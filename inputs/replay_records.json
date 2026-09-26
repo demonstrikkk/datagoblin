@@ -1,0 +1,86 @@
+{
+ "records": [
+  {
+   "fields": {
+    "company_name": "Acme AI",
+    "founder": "Jane Doe",
+    "funding_stage": "Series A",
+    "location": "London",
+    "open_roles": [
+     "backend engineer"
+    ]
+   },
+   "evidence": [
+    {
+     "field": "company_name",
+     "quote": "London-based Acme AI, founded by Jane Doe",
+     "source_url": "https://technews.example.com/acme-series-a"
+    },
+    {
+     "field": "founder",
+     "quote": "founded by Jane Doe and Tom Reyes in 2023",
+     "source_url": "https://technews.example.com/acme-series-a"
+    },
+    {
+     "field": "funding_stage",
+     "quote": "raised $12.5 million in Series A funding",
+     "source_url": "https://technews.example.com/acme-series-a"
+    },
+    {
+     "field": "location",
+     "quote": "expand London engineering hub",
+     "source_url": "https://technews.example.com/acme-series-a"
+    },
+    {
+     "field": "open_roles",
+     "quote": "including two backend engineers",
+     "source_url": "https://technews.example.com/acme-series-a"
+    }
+   ],
+   "source_text": "Acme AI raises $12.5M Series A to expand London engineering hub London-based Acme AI, founded by Jane Doe and Tom Reyes in 2023, announced on Tuesday that Acme AI raised $12.5 million in Series A funding led by Northloop Ventures. We will double our engineering team in London this year, said founder Jane Doe. The company lists 4 open engineering roles on its careers page, including two backend engineers. Acme AI builds evaluation tooling for language models. More at https://acme-ai.example.com.",
+       "source_title": "Acme AI raises $12.5M Series A — TechNews Daily",
+   "source_url": "https://technews.example.com/acme-series-a"
+  },
+  {
+   "fields": {
+    "company_name": "Nova Labs",
+    "founder": "Amir Khan",
+    "funding_stage": "seed",
+    "location": "London",
+    "open_roles": [
+     "engineering"
+    ]
+   },
+   "evidence": [
+    {
+     "field": "company_name",
+     "quote": "Nova Labs, a London machine-learning infrastructure startup",
+     "source_url": "https://technews.example.com/nova-seed"
+    },
+    {
+     "field": "founder",
+     "quote": "founded by Amir Khan, has closed",
+     "source_url": "https://technews.example.com/nova-seed"
+    },
+    {
+     "field": "funding_stage",
+     "quote": "has closed an \u00a38M seed round",
+     "source_url": "https://technews.example.com/nova-seed"
+    },
+    {
+     "field": "location",
+     "quote": "hiring across London",
+     "source_url": "https://technews.example.com/nova-seed"
+    },
+    {
+     "field": "open_roles",
+     "quote": "five of them engineering positions in London",
+     "source_url": "https://technews.example.com/nova-seed"
+    }
+   ],
+   "source_text": "Nova Labs closes \u00a38M seed round, hiring across London Nova Labs, a London machine-learning infrastructure startup founded by Amir Khan, has closed an \u00a38M seed round. The round was led by Seedline Capital with participation from angels. Founder Amir Khan said the funding will support hiring: Nova Labs currently advertises 7 open roles, five of them engineering positions in London. See https://nova-labs.example.com/careers.",
+       "source_title": "Nova Labs closes £8M seed round — TechNews Daily",
+   "source_url": "https://technews.example.com/nova-seed"
+  }
+ ]
+}

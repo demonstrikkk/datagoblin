@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+:root { --ink: #161615; --paper: #F5F2EA; --warm: #FBFAF6; --muted: #74736D; --rule: #D9D4C8; --accent: #A77A32; }
+body { background: var(--paper); color: var(--ink); font-family: "DM Sans", system-ui, sans-serif; }
+.font-display { font-family: "Instrument Serif", "Newsreader", Georgia, serif; }
+.rule { border-color: var(--rule); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+::selection { background: #E9DFC8; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}

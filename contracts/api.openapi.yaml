@@ -1,0 +1,14 @@
+openapi: 3.0.3
+info: {title: DATAGOBLIN API, version: 0.1.0}
+paths:
+  /api/workflows/compile: {post: {requestBody: {content: {application/json: {schema: {type: object, required: [prompt], properties: {prompt: {type: string}}}}}}, responses: {'200': {description: '{plan_id, plan}'}}}}
+  /api/runs: {post: {requestBody: {content: {application/json: {schema: {type: object, required: [plan_id], properties: {plan_id: {type: string}}}}}}, responses: {'200': {description: '{run_id, status}'}}}}
+  /api/runs/{id}: {get: {responses: {'200': {description: run status}}}}
+  /api/runs/{id}/stream: {get: {responses: {'200': {description: SSE per run-event.schema.json}}}}
+  /api/runs/{id}/cancel: {post: {responses: {'200': {description: cancelled}}}}
+  /api/datasets: {get: {responses: {'200': {description: list}}}}
+  /api/datasets/{id}: {get: {responses: {'200': {description: dataset}}}}
+  /api/datasets/{id}/records: {get: {responses: {'200': {description: rows}}}}
+  /api/datasets/{id}/sources: {get: {responses: {'200': {description: sources}}}}
+  /api/datasets/{id}/export: {post: {responses: {'200': {description: export}}}}
+  /api/history: {get: {responses: {'200': {description: history}}}}

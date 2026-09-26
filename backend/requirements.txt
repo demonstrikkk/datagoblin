@@ -1,0 +1,37 @@
+# DATAGOBLIN backend — MVP freeze (12) + pydantic-settings. Versions re-check at deploy.
+# Verified install set 2026-09-25: pydantic 2.13.4, httpx, rapidfuzz 3.14.6, bs4 4.15.0.
+fastapi>=0.115
+uvicorn[standard]
+sse-starlette>=2.1
+pydantic>=2.7
+pydantic-settings>=2.0
+httpx>=0.28
+beautifulsoup4>=4.12
+lxml>=5.0
+trafilatura>=2.2.0
+crawl4ai>=0.9.4
+playwright  # browser engine for Crawl4AI; then: python -m playwright install chromium
+tavily-python>=0.5
+curl_cffi>=0.10  # Phase 2: per-host TLS impersonation (allowlist-gated, no proxies)
+google-genai
+groq>=0.11
+instructor[google-genai]>=1.17.0  # google-genai extra (jsonref) REQUIRED for Gemini structured output
+supabase>=2.9
+rapidfuzz>=3.9
+langgraph>=0.2  # bounded Research Supervisor subgraph only; Runner owns execution
+langchain-core>=0.3  # supervisor structured-output seam only (langchain_client)
+langchain-google-genai  # Gemini via LangChain (supervisor decisions)
+langchain-groq  # Groq fallback via LangChain (supervisor decisions)
+typesafe-sdk  # Jev decision layer (stub policy when TYPESAFE_API_KEY absent)
+pytest>=8.0
+psycopg[binary]>=3.1  # DB tooling only (db_probe/migrate/verify scripts)
+
+# --- LATER (not MVP; install only when phase-gated) ---
+# Phase 1.5 document fallback: docling
+# Phase 2 semantic dedupe: qdrant-client[fastembed]>=1.14.2  # MVP stops at L2
+# Phase 2 analytics: duckdb>=1.1, polars  # MVP: Supabase -> CSV/JSON
+# Phase 2 router alt: litellm>=1.60  # direct Gemini->Groq until evaluated
+# Phase 2 orchestration alt: pydantic-ai  # no switch yet
+# Phase 3 expose: mcp  # server adapter only
+# Phase 3 browser last resort: stagehand / browser-use
+# Deferred scale: redis / celery / temporal / kubernetes / clickhouse

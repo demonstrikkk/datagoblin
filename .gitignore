@@ -1,0 +1,25 @@
+# .env (real keys — NEVER commit) + local runtime artifacts
+.env
+.env.local
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Run artifacts (regenerable; may contain scraped data)
+outputs/
+.datagoblin-local/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
