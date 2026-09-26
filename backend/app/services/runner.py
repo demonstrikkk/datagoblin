@@ -122,7 +122,12 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object) -> dict:
     for p in pages:
         if cancelled():
             return {"status": "CANCELLED", "records": []}
-        recs, provider = await extractor_svc.extract_page(plan, p, llm)
+        try:
+            recs, provider = await asyncio.wait_for(
+                extractor_svc.extract_page(plan, p, llm),
+                timeout=settings.EXTRACT_PAGE_TIMEOUT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            recs, provider = [], "timeout"  # stalled page: skip, never stall run
         extract_providers.append(provider)
         for r in recs:
             raws.append(r)

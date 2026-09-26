@@ -606,3 +606,56 @@ def test_run_completed_event_carries_record_counts():
     assert done["data"]["verified"] >= 1
     assert "needs_review" in done["data"]
 
+
+def test_runner_extraction_page_timeout_skips(monkeypatch):
+    """A stalled extraction page is cut off at EXTRACT_PAGE_TIMEOUT_S and the
+    run completes with the remaining pages — one slow LLM call must never eat
+    the whole RUN_MAX_RUNTIME_S (the 600s-timeout failure mode)."""
+    from app.core import config as config_mod
+    from app.services import extractor as extractor_svc
+    from app.services import runner as runner_svc
+
+    monkeypatch.setattr(config_mod.settings, "EXTRACT_PAGE_TIMEOUT_S", 0.05)
+
+    async def _slow(plan, page, llm):
+        await asyncio.sleep(5)
+        return [{"fields": {}}], "test"
+
+    monkeypatch.setattr(extractor_svc, "extract_page", _slow)
+
+    plan = {"goal": "g", "entity": "Acme", "requested_count": 1, "max_results": 1,
+            "fields": [{"name": "company_name", "type": "string",
+                        "description": "Name", "required": True}],
+            "search_queries": ["Acme"], "seed_domains": [],
+            "seed_urls": ["https://x.example/a"], "source_types": [],
+            "traversal": {"max_pages_per_domain": 1}, "validation_rules": [],
+            "dedupe_keys": ["company_name"], "allowed_sources": [], "max_pages": 2}
+
+    async def _search(q, limit, include=None, exclude=None):
+        return []
+
+    async def _fetch(url, method):
+        return {"url": url, "title": "t",
+                "html": "<html><body><p>Acme.</p></body></html>", "method": "http"}
+
+    async def _llm(prompt, schema):
+        raise AssertionError("stalled page must not reach the LLM again")
+
+    async def _store(rid, pl, rows, counts):
+        return "d1"
+
+    async def _persist(s):
+        pass
+
+    events: list = []
+
+    async def _emit(ev):
+        events.append(ev)
+
+    ctx = {"search": _search, "fetch": _fetch, "llm": _llm, "store": _store,
+           "persist_source": _persist, "cancelled": lambda: False}
+    result = run(runner_svc.execute_run("r1", plan, ctx, _emit))
+    assert result["status"] == "COMPLETED" and result["records"] == 0
+    providers = [e["data"]["provider"] for e in events if e["type"] == "record.extracted"]
+    assert providers == ["timeout"]
+

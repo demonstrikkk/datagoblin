@@ -6,7 +6,10 @@ const EVENT_TYPES = ['run.created', 'stage.started', 'stage.progress', 'source.d
   'source.fetched', 'record.extracted', 'record.verified', 'record.rejected',
   'duplicate.detected', 'duplicate.merged', 'stage.completed', 'run.completed',
   'run.failed', 'run.cancelled'];
-/** Live run events from GET /api/runs/:id/stream (docs/16). EventSource GET-only, cleanup on unmount. */
+/** Live run events from GET /api/runs/:id/stream (docs/16). EventSource GET-only,
+ * cleanup on unmount. Closes on terminal events — otherwise the browser's native
+ * reconnect loop hammers /stream forever after a run ends (replay + break, repeat). */
+const TERMINAL = new Set(['run.completed', 'run.failed', 'run.cancelled']);
 export function useRunStream(runId) {
   const [events, setEvents] = useState([]);
   useEffect(() => {
@@ -16,6 +19,7 @@ export function useRunStream(runId) {
       try {
         const parsed = JSON.parse(e.data);
         setEvents((p) => (p.length > 2000 ? [...p.slice(-1999), parsed] : [...p, parsed]));
+        if (TERMINAL.has(parsed.type)) es.close();
       } catch {}
     };
     EVENT_TYPES.forEach((t) => es.addEventListener(t, append));

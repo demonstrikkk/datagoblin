@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # Caps
     REDUCE_MAX_CHARS: int = Field(default=30000, ge=1000, le=200000)
     EXTRACT_MAX_CHARS: int = Field(default=12000, ge=1000, le=100000)
+    # Per-page extraction ceiling: one stalled LLM call must never eat the
+    # whole RUN_MAX_RUNTIME_S. Worst-case chain per page (~60 groq + 3x60
+    # gemini retries) exceeds this, so the runner cuts the page off and
+    # continues — slow pages yield nothing instead of killing the run.
+    EXTRACT_PAGE_TIMEOUT_S: int = Field(default=150, ge=30, le=600)
 
     # SSE / export
     SSE_PING_S: int = Field(default=15, ge=5, le=120)
