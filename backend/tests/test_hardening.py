@@ -287,6 +287,37 @@ def test_supervisor_screens_irrelevant():
     assert [a["url"] for a in final["accepted_sources"]] == ["https://x.example/a"]
 
 
+def test_strict_supervisor_skips_langchain_cloud(monkeypatch):
+    """OPENCODE_STRICT: supervisor iterations use llm_strategy (opencode)
+    directly — the LangChain Groq/Gemini rung never fires."""
+    from app.core import config as config_mod
+    from app.providers.llm import langchain_client as lc
+
+    monkeypatch.setattr(config_mod.settings, "OPENCODE_STRICT", True)
+
+    def _boom(*a, **k):
+        raise AssertionError("strict mode must not call langchain cloud")
+
+    monkeypatch.setattr(lc, "decide", _boom)
+
+    async def _strategy(prompt, schema):
+        return {"decision": "FETCH", "reason": "strict",
+                "missing_coverage": [], "next_queries": [], "confidence": 0.9}
+
+    from app.providers.decision import jev
+    from app.services.source_router import triage_source
+    deps = SimpleNamespace(search_fn=_deps([]).search_fn, llm_strategy=_strategy,
+                           jev_screen=jev.source_screening,
+                           jev_continuation=jev.research_continuation,
+                           triage_fn=triage_source, include_domains=[],
+                           exclude_domains=[], max_pages=5, max_queries=8,
+                           results_per_query=5)
+    st = _initial()
+    st["accepted_sources"] = [{"url": "https://x.example/a", "title": "t"}]
+    final = run(run_supervisor(st, deps, "r1"))
+    assert "https://x.example/a" in [a["url"] for a in final["accepted_sources"]]
+
+
 # -- crawler traversal + skipped ---------------------------------------------------------------
 def _page(url, html=""):
     return {"url": url, "final_url": url, "title": "t", "html": html or f"<p>{url}</p>",

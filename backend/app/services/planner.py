@@ -118,9 +118,13 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
     """Returns (plan_dict, provider). Raises E_VALIDATION on empty prompt."""
     if not (prompt or "").strip():
         raise validation("Prompt must not be empty")
-    hit = await _instructor_plan(prompt)
-    if hit is not None:
-        return hit
+    if not settings.OPENCODE_STRICT:
+        hit = await _instructor_plan(prompt)
+        if hit is not None:
+            return hit
+    # Strict reader mode: the injected llm (opencode) is the ONLY model rung —
+    # the hardwired Gemini instructor above never fires, so no cloud quota
+    # can burn during planning. Without an llm, straight to rule-based.
     if llm is not None:
         try:
             out = await llm(

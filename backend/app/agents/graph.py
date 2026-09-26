@@ -13,11 +13,16 @@ from typing import Any, Literal
 
 from app.agents.decisions import SupervisorDecision
 from app.agents.policies import POLICIES
+from app.core.config import settings
 
 
 async def supervisor_step(state: dict, llm_strategy: Any, jev_continuation: Any) -> SupervisorDecision:
     """Jev-D judgment first (cheap); LangChain schema-enforced strategy, then raw
-    llm_strategy fallback; deterministic break when nothing usable returns."""
+    llm_strategy fallback; deterministic break when nothing usable returns.
+
+    Strict reader mode: the LangChain cloud rung (Groq/Gemini) never fires —
+    llm_strategy (opencode) decides directly, so supervisor iterations cannot
+    burn cloud quota either."""
     j = await jev_continuation(state.get("valid_count", 0),
                                max(1, state.get("requested_count", 20)),
                                state.get("missing_fields", []))
@@ -30,14 +35,15 @@ async def supervisor_step(state: dict, llm_strategy: Any, jev_continuation: Any)
               "Return JSON {decision: REFINE_SEARCH|FETCH|FINALIZE, reason, "
               "missing_coverage[], next_queries[<=3], confidence}.")
     raw: dict = {}
-    try:  # LangChain structured output first (schema-native typed object)
-        from app.providers.llm import langchain_client as lc
-        out = await lc.decide(prompt, POLICIES["MAX_SEARCH_QUERIES"],
-                              state.get("searched_queries", []))
-        if isinstance(out.get("data"), dict):
-            raw = out["data"]
-    except Exception:
-        raw = {}
+    if not settings.OPENCODE_STRICT:
+        try:  # LangChain structured output first (schema-native typed object)
+            from app.providers.llm import langchain_client as lc
+            out = await lc.decide(prompt, POLICIES["MAX_SEARCH_QUERIES"],
+                                  state.get("searched_queries", []))
+            if isinstance(out.get("data"), dict):
+                raw = out["data"]
+        except Exception:
+            raw = {}
     if not raw:
         try:
             raw = await llm_strategy(prompt, SupervisorDecision.model_json_schema()) or {}

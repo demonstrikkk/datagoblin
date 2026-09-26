@@ -43,6 +43,26 @@ def test_rule_planner_count_bounds():
     assert plan["requested_count"] == 15
 
 
+def test_strict_planner_never_touches_gemini(monkeypatch):
+    """OPENCODE_STRICT: the hardwired Gemini instructor is skipped — the
+    injected llm (opencode) is the only model rung in planning."""
+    from app.core import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "OPENCODE_STRICT", True)
+
+    async def _boom(prompt):
+        raise AssertionError("strict mode must not call the Gemini instructor")
+
+    monkeypatch.setattr(planner_svc, "_instructor_plan", _boom)
+
+    async def _llm(prompt, schema):
+        return {"data": planner_svc._rule_plan("Find 5 companies"),
+                "provider": "opencode"}
+
+    plan, provider = run(planner_svc.compile_plan("Find 5 companies", _llm))
+    assert provider == "opencode" and plan["requested_count"] == 5
+
+
 def test_seeds_drive_discovery_without_tavily():
     async def _raising_search(q, limit, include=None, exclude=None):
         raise AppError("E_PROVIDER_FATAL", "no key", 424)
