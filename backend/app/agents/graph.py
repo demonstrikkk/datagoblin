@@ -10,6 +10,7 @@ mutate-and-return-full-state). List fields carry reducers (state.py).
 """
 from functools import partial
 from typing import Any, Literal
+import asyncio
 
 from app.agents.decisions import SupervisorDecision
 from app.agents.policies import POLICIES
@@ -90,25 +91,41 @@ async def search_node(state: dict, deps: Any) -> dict:
 
 
 async def screen_node(state: dict, deps: Any) -> dict:
-    """Jev-A screen on unscreened candidates; triage route attached. Single NO-path."""
+    """Jev-A screen on unscreened candidates; triage route attached. Single NO-path.
+
+    Screens run in concurrent batches of 5 (the 282s-discovery fix: sequential
+    Jev calls at ~10s each stalled whole runs). Decisions still apply in
+    original order with the same cap, and every fresh URL is still marked
+    screened. Batches stop once the cap fills, so at most one partial batch
+    of calls is ever spent past the cap.
+    """
     screened = set(state.get("screened_urls", []))
     fresh = [r for r in state.get("candidate_urls", [])
              if r.get("url") and r["url"] not in screened]
+    base = len(state.get("accepted_sources", []))
+    done = [r["url"] for r in fresh]
     accepted: list[dict] = []
-    done: list[str] = []
-    for r in fresh:
-        url = r["url"]
-        done.append(url)
-        if len(state.get("accepted_sources", [])) + len(accepted) >= deps.max_pages:
-            continue
-        screen = await deps.jev_screen(url, r.get("title", ""), r.get("snippet", ""),
-                                       state.get("entity", ""))
-        if screen.get("judgment") == "NO":
-            continue  # one path: any NO (jev-confident or heuristic) skips fetch+extract
-        accepted.append({"url": url, "title": str(r.get("title", ""))[:300],
-                         "snippet": str(r.get("snippet", ""))[:2000],
-                         "route": deps.triage_fn(url),
-                         "screen_confidence": screen.get("confidence", 0.0)})
+    sem = asyncio.Semaphore(5)
+
+    async def _one(r: dict) -> dict:
+        async with sem:
+            return await deps.jev_screen(r["url"], r.get("title", ""),
+                                         r.get("snippet", ""), state.get("entity", ""))
+
+    idx = 0
+    while idx < len(fresh) and base + len(accepted) < deps.max_pages:
+        batch = fresh[idx:idx + 5]
+        idx += len(batch)
+        for r, screen in zip(batch, await asyncio.gather(*(_one(r) for r in batch))):
+            if base + len(accepted) >= deps.max_pages:
+                break
+            url = r["url"]
+            if (screen or {}).get("judgment") == "NO":
+                continue  # one path: any NO skips fetch+extract
+            accepted.append({"url": url, "title": str(r.get("title", ""))[:300],
+                             "snippet": str(r.get("snippet", ""))[:2000],
+                             "route": deps.triage_fn(url),
+                             "screen_confidence": (screen or {}).get("confidence", 0.0)})
     return {"screened_urls": done, "accepted_sources": accepted}
 
 

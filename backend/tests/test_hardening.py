@@ -318,6 +318,42 @@ def test_strict_supervisor_skips_langchain_cloud(monkeypatch):
     assert "https://x.example/a" in [a["url"] for a in final["accepted_sources"]]
 
 
+def test_screen_node_batches_concurrent_with_cap():
+    """Screens run concurrently (batches of 5), decisions apply in order,
+    the max_pages cap holds, and every fresh URL is marked screened."""
+    from app.agents.graph import screen_node
+
+    state_calls = {"cur": 0, "max": 0}
+
+    async def _screen(url, title, snippet, entity):
+        state_calls["cur"] += 1
+        state_calls["max"] = max(state_calls["max"], state_calls["cur"])
+        try:
+            await asyncio.sleep(0.1)
+            if "nope" in url:
+                return {"judgment": "NO", "confidence": 0.9}
+            return {"judgment": "YES", "confidence": 0.8}
+        finally:
+            state_calls["cur"] -= 1
+
+    fresh = [{"url": f"https://x.example/p{i}", "title": "t", "snippet": "s"}
+             for i in range(12)]
+    fresh[3] = {"url": "https://x.example/nope", "title": "t", "snippet": "s"}
+    deps = SimpleNamespace(jev_screen=_screen, triage_fn=lambda u: "web:http",
+                           max_pages=5)
+    t0 = time.perf_counter()
+    out = run(screen_node({"candidate_urls": fresh, "screened_urls": [],
+                           "accepted_sources": [], "entity": "startup"},
+                          deps))
+    elapsed = time.perf_counter() - t0
+    assert state_calls["max"] >= 2  # genuinely concurrent
+    assert elapsed < 0.9  # sequential would take 12 x 0.1 = 1.2s
+    assert len(out["accepted_sources"]) == 5  # cap holds
+    assert [a["url"] for a in out["accepted_sources"]] == [
+        f"https://x.example/p{i}" for i in (0, 1, 2, 4, 5)]  # order kept, NO skipped
+    assert sorted(out["screened_urls"]) == sorted(r["url"] for r in fresh)
+
+
 # -- crawler traversal + skipped ---------------------------------------------------------------
 def _page(url, html=""):
     return {"url": url, "final_url": url, "title": "t", "html": html or f"<p>{url}</p>",
