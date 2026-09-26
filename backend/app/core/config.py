@@ -91,7 +91,11 @@ class Settings(BaseSettings):
     RUN_MAX_REQUESTS: int = Field(default=50, ge=1, le=200)
     RUN_MAX_PAGES_PER_SOURCE: int = Field(default=5, ge=1, le=10)
     RUN_RETRY_COUNT: int = Field(default=1, ge=0, le=3)
-    RUN_MAX_RUNTIME_S: int = Field(default=600, ge=30, le=3600)
+    RUN_MAX_RUNTIME_S: int = Field(default=1200, ge=30, le=3600)
+    # Pacing between extraction pages: free-tier LLM quotas are per-minute, so
+    # back-to-back page calls stall in queue and die at EXTRACT_PAGE_TIMEOUT_S.
+    # A short breath between pages keeps calls under the limit (6 RPM at 10s).
+    EXTRACT_PAGE_SPACING_S: int = Field(default=10, ge=0, le=120)
     # Phase-5 metering: per-run credit budget. 0 = unlimited (record-only).
     RUN_CREDIT_BUDGET: int = Field(default=0, ge=0, le=100000)
     SUPERVISOR_MAX_ITERATIONS: int = Field(default=3, ge=1, le=5)

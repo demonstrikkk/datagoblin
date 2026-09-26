@@ -119,9 +119,11 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object) -> dict:
         pages = []
     raws: list[dict] = []
     extract_providers: list[str] = []
-    for p in pages:
+    for idx, p in enumerate(pages):
         if cancelled():
             return {"status": "CANCELLED", "records": []}
+        if idx > 0 and settings.EXTRACT_PAGE_SPACING_S > 0:
+            await asyncio.sleep(settings.EXTRACT_PAGE_SPACING_S)
         try:
             recs, provider = await asyncio.wait_for(
                 extractor_svc.extract_page(plan, p, llm),

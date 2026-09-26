@@ -20,6 +20,11 @@ Pinned reader: `OPENCODE_MODEL=opencode/muse-spark-1.3-contributor-free` (free
 Zen tier, verified valid extraction JSON). Tested free backups:
 `opencode/nemotron-3-ultra-free`, `opencode/mimo-v2.5-free`.
 `OPENCODE_STRICT=true` makes opencode THE reader — cloud fallbacks never fire.
+Session economy (free-tier survival): back-to-back calls share one server
+session (max 3 uses / 180s, then rotate+delete); dead sessions are deleted,
+never piled up. Pacing: `EXTRACT_PAGE_SPACING_S=10` between pages (free-tier
+quotas are per-minute), `EXTRACT_PAGE_TIMEOUT_S=150` per page,
+`RUN_MAX_RUNTIME_S=1200` overall.
 Judge: Jev `~typesafe/jev-latest` via `POST https://openrouter.ai/api/alpha/decisions`
 (flat `{model, state, questions}`).
 

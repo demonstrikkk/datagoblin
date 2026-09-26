@@ -59,6 +59,11 @@ class _Client:
             {"id": "msg_1", "type": "assistant",
              "content": [{"type": "text", "text": text}]}]})
 
+    async def delete(self, url, headers=None):
+        _Client.seen.setdefault("deletes", []).append({"url": url,
+                                                       "headers": headers})
+        return _Resp(200, {})
+
 
 @pytest.fixture(autouse=True)
 def _opencode_cfg(monkeypatch):
@@ -70,10 +75,12 @@ def _opencode_cfg(monkeypatch):
     monkeypatch.setattr(config_mod.settings, "OPENCODE_TIMEOUT_S", 30)
     import httpx
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    gen._reset_session_cache()
     _Client.seen = {}
     _Client.mode = "ok"
     _Client.next_post = _Resp(200, {"data": {"id": "ses_1"}})
     yield
+    gen._reset_session_cache()
 
 
 def _session_ok():
@@ -253,3 +260,31 @@ def test_strict_mode_opencode_is_the_reader(monkeypatch):
     with pytest.raises(AppError) as ei:
         run(gen.structured_generate("Do it.", {"type": "object"}))
     assert ei.value.code == "E_PROVIDER_TRANSIENT"
+
+
+def test_session_reused_back_to_back():
+    """Consecutive calls share one session (no second session-create post) —
+    fewer free-tier sessions burned per page of chunks."""
+    _session_ok()
+    out1 = run(gen.opencode_structured("First.", {"type": "object"}))
+    out2 = run(gen.opencode_structured("Second.", {"type": "object"}))
+    assert out1["provider"] == out2["provider"] == "opencode"
+    urls = [p["url"] for p in _Client.seen["posts"]]
+    assert urls == ["http://127.0.0.1:4096/api/session",
+                    "http://127.0.0.1:4096/api/session/ses_1/model",
+                    "http://127.0.0.1:4096/api/session/ses_1/prompt",
+                    "http://127.0.0.1:4096/api/session/ses_1/prompt"]
+    assert _Client.seen.get("deletes", []) == []  # success keeps the session warm
+
+
+def test_session_deleted_on_timeout(monkeypatch):
+    """A stalled session is deleted and evicted — dead sessions never pile up
+    or get reused."""
+    _session_ok()
+    _Client.mode = "prose"
+    monkeypatch.setattr(config_mod.settings, "OPENCODE_TIMEOUT_S", 9)
+    with pytest.raises(AppError):
+        run(gen.opencode_structured("x", {}))
+    assert [d["url"] for d in _Client.seen.get("deletes", [])] == [
+        "http://127.0.0.1:4096/api/session/ses_1"]
+    assert gen._session_cache.get("sid", "") == ""

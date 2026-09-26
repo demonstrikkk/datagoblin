@@ -59,6 +59,65 @@ def _strip_fences(text: str) -> str:
     return t
 
 
+# Warm-session cache: back-to-back calls (same-page extraction chunks) share
+# one server session instead of paying session-create + project-context load
+# per call — and burn fewer free-tier sessions. Bounded: max 3 consecutive
+# uses within 180s, then rotate. A poisoned/failed session is always dropped.
+_session_cache: dict = {"sid": "", "uses": 0, "at": 0.0}
+_SESSION_MAX_USES = 3
+_SESSION_TTL_S = 180.0
+
+
+def _reset_session_cache() -> None:
+    _session_cache.update(sid="", uses=0, at=0.0)
+
+
+async def _delete_session(client: Any, base: str, sid: str, headers: dict) -> None:
+    try:
+        await client.delete(f"{base}/api/session/{sid}", headers=headers)
+    except Exception:
+        pass  # hygiene only; a leaked server-side session expires on its own
+
+
+async def _drop_session(client: Any, base: str, headers: dict, sid: str) -> None:
+    """Delete + evict, but only if it is still the cached one (a newer call
+    may already have rotated past it)."""
+    await _delete_session(client, base, sid, headers)
+    if _session_cache.get("sid") == sid:
+        _reset_session_cache()
+
+
+async def _open_session(client: Any, base: str, headers: dict) -> tuple[str, bool]:
+    """Returns (sid, fresh). Reuses the warm session for back-to-back calls,
+    else rotates (deletes the stale one first so sessions never pile up)."""
+    now = asyncio.get_running_loop().time()
+    sid = _session_cache.get("sid", "")
+    if (sid and _session_cache.get("uses", 0) < _SESSION_MAX_USES
+            and now - _session_cache.get("at", 0.0) < _SESSION_TTL_S):
+        _session_cache["uses"] += 1
+        _session_cache["at"] = now
+        return sid, False
+    if sid:
+        await _delete_session(client, base, sid, headers)
+        _reset_session_cache()
+    try:
+        r = await client.post(f"{base}/api/session", json={}, headers=headers)
+    except Exception as e:
+        raise provider_transient(f"OpenCode unreachable: {str(e)[:120]}")
+    if r.status_code in (401, 403):
+        raise provider_fatal(f"OpenCode auth failed (HTTP {r.status_code})")
+    if r.status_code >= 400:
+        raise provider_transient(f"OpenCode session refused (HTTP {r.status_code})")
+    try:
+        new_sid = (r.json().get("data", {}) or {}).get("id", "")
+    except Exception:
+        new_sid = ""
+    if not new_sid:
+        raise provider_transient("OpenCode session created without id")
+    _session_cache.update(sid=new_sid, uses=1, at=now)
+    return new_sid, True
+
+
 async def gemini_structured(prompt: str, schema: dict) -> dict[str, Any]:
     key = settings.GEMINI_API_KEY
     if not key:
@@ -149,21 +208,8 @@ async def opencode_structured(prompt: str, schema: dict) -> dict[str, Any]:
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            try:
-                r = await client.post(f"{base}/api/session", json={}, headers=headers)
-            except Exception as e:
-                raise provider_transient(f"OpenCode unreachable: {str(e)[:120]}")
-            if r.status_code in (401, 403):
-                raise provider_fatal(f"OpenCode auth failed (HTTP {r.status_code})")
-            if r.status_code >= 400:
-                raise provider_transient(f"OpenCode session refused (HTTP {r.status_code})")
-            try:
-                sid = (r.json().get("data", {}) or {}).get("id", "")
-            except Exception:
-                sid = ""
-            if not sid:
-                raise provider_transient("OpenCode session created without id")
-            if settings.OPENCODE_MODEL:
+            sid, fresh = await _open_session(client, base, headers)
+            if fresh and settings.OPENCODE_MODEL:
                 try:
                     await client.post(f"{base}/api/session/{sid}/model",
                                       json={"model": settings.OPENCODE_MODEL},
@@ -175,15 +221,20 @@ async def opencode_structured(prompt: str, schema: dict) -> dict[str, Any]:
                                       json={"prompt": {"text": full_prompt}},
                                       headers=headers)
             except Exception as e:
+                await _drop_session(client, base, headers, sid)
                 raise provider_transient(f"OpenCode prompt failed: {str(e)[:120]}")
             if r.status_code in (401, 403):
+                await _drop_session(client, base, headers, sid)
                 raise provider_fatal(f"OpenCode auth failed (HTTP {r.status_code})")
             if r.status_code >= 400:
+                await _drop_session(client, base, headers, sid)
                 raise provider_transient(
                     f"OpenCode prompt refused (HTTP {r.status_code}): {r.text[:120]}")
             deadline = asyncio.get_running_loop().time() + settings.OPENCODE_TIMEOUT_S
             last_text = ""
             while True:
+                # 4s poll cadence is deliberate: each poll is a server request
+                # against free-tier quota — tighter polling burns budget faster.
                 await asyncio.sleep(4)
                 try:
                     r = await client.get(f"{base}/api/session/{sid}/message",
@@ -208,6 +259,7 @@ async def opencode_structured(prompt: str, schema: dict) -> dict[str, Any]:
                     except ValueError:
                         pass  # still streaming / thinking; keep polling
                 if asyncio.get_running_loop().time() >= deadline:
+                    await _drop_session(client, base, headers, sid)
                     if last_text:
                         raise provider_transient(
                             f"OpenCode answer never became JSON ({len(last_text)} chars)")
