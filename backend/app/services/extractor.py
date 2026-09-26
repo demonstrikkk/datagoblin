@@ -6,6 +6,7 @@ regen when the tripwire says content exists but nothing extracted -> coerce to
 the ExtractionEnvelope contract. Empty list (never prose, never guesses).
 """
 from app.core.config import settings
+from app.core.logging import log
 from app.schemas.evidence import (ExtractedRecord, coverage_tripwire,
                                   parse_llm_json, simplify_schema)
 
@@ -244,7 +245,10 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
                 schema, page["url"])
             provider = prov
             batches.append(recs)
-    except Exception:
+    except Exception as e:  # noqa: BLE001 (cause logged; caller sees ([], "error"))
+        log.warning("extract chunks failed",
+                    extra={"data": {"url": page.get("url", "")[:200],
+                                    "error": str(e)[:200]}})
         return [], "error"
     records = merge_records(batches)
     if not records and tripwire["covered"] and chunks:
@@ -257,7 +261,10 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
                 schema, page["url"])
             provider = prov
             records = merge_records([recs])
-        except Exception:
+        except Exception as e:  # noqa: BLE001 (cause logged; caller sees ([], "error"))
+            log.warning("extract regen failed",
+                        extra={"data": {"url": page.get("url", "")[:200],
+                                        "error": str(e)[:200]}})
             return [], "error"
     if not records:
         return [], provider  # tripwire-cold: genuine absence; skip page

@@ -160,3 +160,67 @@ def test_chain_fatal_stops_cascade(monkeypatch):
     with pytest.raises(AppError) as ei:
         run(gen.structured_generate("Do it.", {}))
     assert ei.value.code == "E_PROVIDER_FATAL"
+
+
+def test_groq_retries_transient_then_succeeds(monkeypatch):
+    """Free-tier 429s clear in seconds: groq retries transient failures twice
+    before giving up (previously one attempt turned a blip into a dead page)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(config_mod.settings, "GROQ_API_KEY", "test-key")
+    calls = {"n": 0}
+
+    def _create(**k):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("429 rate limit exceeded, try again")
+        msg = SimpleNamespace(content='{"records": [], "coverage": "none"}')
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    class _FakeGroq:
+        def __init__(self, *a, **k):
+            pass
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **k):
+            return _create(**k)
+
+    monkeypatch.setitem(sys.modules, "groq", SimpleNamespace(Groq=_FakeGroq))
+    out = run(gen.groq_structured("Do it.", {"type": "object"}))
+    assert out["provider"] == "groq" and calls["n"] == 3
+
+
+def test_groq_fatal_raises_at_once(monkeypatch):
+    """Auth/400 failures never retry — the request is wrong, not unlucky."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(config_mod.settings, "GROQ_API_KEY", "test-key")
+    calls = {"n": 0}
+
+    class _FakeGroq:
+        def __init__(self, *a, **k):
+            pass
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **k):
+            calls["n"] += 1
+            raise RuntimeError("401 invalid api key")
+
+    monkeypatch.setitem(sys.modules, "groq", SimpleNamespace(Groq=_FakeGroq))
+    with pytest.raises(AppError) as ei:
+        run(gen.groq_structured("Do it.", {"type": "object"}))
+    assert ei.value.code == "E_PROVIDER_FATAL" and calls["n"] == 1

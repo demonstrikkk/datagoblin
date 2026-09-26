@@ -8,6 +8,7 @@ down, so the pipeline degrades to Groq/Gemini instead of stalling.
 import asyncio
 import base64
 import json
+import random
 from typing import Any
 
 import httpx
@@ -92,21 +93,32 @@ async def groq_structured(prompt: str, inner_schema: dict) -> dict[str, Any]:
     if not key:
         raise provider_fatal("LLM fallback unavailable: GROQ_API_KEY unset")
     model = settings.GROQ_FALLBACK_MODEL
-    try:
-        def _call() -> str:
-            from groq import Groq
-            # json_object mode (not strict json_schema): gpt-oss models reject
-            # additionalProperties:false on open object items. The caller
-            # validates/coerces content downstream (extractor.coerce_output).
-            resp = Groq(api_key=key, max_retries=0, timeout=25).chat.completions.create(
-                model=model, messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"})
-            return resp.choices[0].message.content or "{}"
-        text = await asyncio.wait_for(asyncio.to_thread(_call), timeout=settings.LLM_TIMEOUT_S)
-        _ = inner_schema  # Groq enforces the fixed records envelope; caller validates content.
-        return {"data": json.loads(text), "provider": "groq", "model": model}
-    except Exception as e:  # noqa: BLE001
-        raise _classify("Groq", e)
+    last: Exception | None = None
+    # Single-shot SDK (max_retries=0) + OUR bounded retry on transient only:
+    # bursts hit free-tier 429s that clear in seconds — one attempt turns a
+    # recoverable blip into a dead page. Fatal (auth/400) raises at once.
+    for attempt in range(3):
+        try:
+            def _call() -> str:
+                from groq import Groq
+                # json_object mode (not strict json_schema): gpt-oss models reject
+                # additionalProperties:false on open object items. The caller
+                # validates/coerces content downstream (extractor.coerce_output).
+                resp = Groq(api_key=key, max_retries=0, timeout=25).chat.completions.create(
+                    model=model, messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"})
+                return resp.choices[0].message.content or "{}"
+            text = await asyncio.wait_for(asyncio.to_thread(_call), timeout=settings.LLM_TIMEOUT_S)
+            _ = inner_schema  # Groq enforces the fixed records envelope; caller validates content.
+            return {"data": json.loads(text), "provider": "groq", "model": model}
+        except Exception as e:  # noqa: BLE001
+            err = _classify("Groq", e)
+            if getattr(err, "http", 502) != 502:
+                raise err
+            last = err
+            if attempt < 2:
+                await asyncio.sleep(5 * (attempt + 1) + random.uniform(0, 2))
+    raise last  # type: ignore[misc]
 
 
 async def opencode_structured(prompt: str, schema: dict) -> dict[str, Any]:
