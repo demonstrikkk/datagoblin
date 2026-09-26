@@ -221,11 +221,15 @@ async def opencode_structured(prompt: str, schema: dict) -> dict[str, Any]:
 async def structured_generate(prompt: str, schema: dict) -> dict[str, Any]:
     """OpenCode primary -> Groq -> Gemini, transient failures only cascade.
 
-    Fatal errors (auth, bad request) raise immediately — failing over would bill
-    a second provider for a request that is wrong, not unlucky. Unexpected
-    non-AppError exceptions propagate unmasked.
+    OPENCODE_STRICT=true makes opencode THE reader: its result (or error) is
+    final and cloud fallbacks never fire — no surprise quota burn. Fatal
+    errors (auth, bad request) raise immediately in both modes — failing over
+    would bill a second provider for a request that is wrong, not unlucky.
+    Unexpected non-AppError exceptions propagate unmasked.
     """
     from app.core.errors import AppError
+    if settings.OPENCODE_STRICT:
+        return await opencode_structured(prompt, schema)
     for attempt in (opencode_structured, groq_structured):
         try:
             return await attempt(prompt, schema)

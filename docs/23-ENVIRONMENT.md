@@ -16,6 +16,10 @@ VITE_API_URL=            # OPTIONAL (frontend → backend; empty = same-origin, 
 ```
 
 Generator chain: opencode → Groq → Gemini (first success wins, provider labeled).
+Pinned reader: `OPENCODE_MODEL=opencode/muse-spark-1.3-contributor-free` (free
+Zen tier, verified valid extraction JSON). Tested free backups:
+`opencode/nemotron-3-ultra-free`, `opencode/mimo-v2.5-free`.
+`OPENCODE_STRICT=true` makes opencode THE reader — cloud fallbacks never fire.
 Judge: Jev `~typesafe/jev-latest` via `POST https://openrouter.ai/api/alpha/decisions`
 (flat `{model, state, questions}`).
 

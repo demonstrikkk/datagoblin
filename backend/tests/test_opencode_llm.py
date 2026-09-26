@@ -224,3 +224,32 @@ def test_groq_fatal_raises_at_once(monkeypatch):
     with pytest.raises(AppError) as ei:
         run(gen.groq_structured("Do it.", {"type": "object"}))
     assert ei.value.code == "E_PROVIDER_FATAL" and calls["n"] == 1
+
+
+def test_strict_mode_opencode_is_the_reader(monkeypatch):
+    """OPENCODE_STRICT=true: opencode result is final, cloud fallbacks never
+    fire; opencode failure raises instead of cascading."""
+    monkeypatch.setattr(config_mod.settings, "OPENCODE_STRICT", True)
+
+    async def _oc(prompt, schema):
+        return {"data": {"records": []}, "provider": "opencode", "model": "m"}
+
+    async def _groq(prompt, schema):
+        raise AssertionError("strict mode must not reach groq")
+
+    async def _gemini(prompt, schema):
+        raise AssertionError("strict mode must not reach gemini")
+
+    monkeypatch.setattr(gen, "opencode_structured", _oc)
+    monkeypatch.setattr(gen, "groq_structured", _groq)
+    monkeypatch.setattr(gen, "gemini_structured", _gemini)
+    out = run(gen.structured_generate("Do it.", {"type": "object"}))
+    assert out["provider"] == "opencode"
+
+    async def _oc_down(prompt, schema):
+        raise AppError("E_PROVIDER_TRANSIENT", "opencode down", 502)
+
+    monkeypatch.setattr(gen, "opencode_structured", _oc_down)
+    with pytest.raises(AppError) as ei:
+        run(gen.structured_generate("Do it.", {"type": "object"}))
+    assert ei.value.code == "E_PROVIDER_TRANSIENT"

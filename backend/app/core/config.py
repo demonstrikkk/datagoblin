@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     OPENCODE_BASE_URL: str = "http://127.0.0.1:4096"
     OPENCODE_PASSWORD: str = ""
     OPENCODE_MODEL: str = ""
+    # Strict reader mode: opencode is THE reader — its failure raises instead
+    # of billing cloud fallbacks. Use with a pinned free Zen model
+    # (e.g. opencode/muse-spark-1.3-contributor-free). False = cascade.
+    OPENCODE_STRICT: bool = False
     # Session answers stream in (agent thinks, tools run); bound the whole wait.
     OPENCODE_TIMEOUT_S: int = Field(default=240, ge=30, le=1200)
     LLM_TIMEOUT_S: int = Field(default=60, ge=5, le=300)
