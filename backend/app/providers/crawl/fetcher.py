@@ -17,6 +17,7 @@ import re
 import socket
 import time
 import urllib.robotparser
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -25,6 +26,16 @@ import httpx
 from app.core.config import settings
 from app.core.errors import AppError, provider_fatal, provider_transient
 from app.services import politeness
+
+# Dedicated crawl executor: a timed-out Crawl4AI call orphans its thread (the
+# in-thread browser loop cannot be cancelled from outside) AND its browser
+# subprocess. On the shared default pool those orphans accumulate until DNS
+# guards, SDK calls and crawls all queue forever — total deadlock with an
+# idle event loop (observed: 11 leaked chromiums, wedged server). Isolated
+# here, the blast radius is bounded: worst case the crawl rung degrades while
+# HTTP/DNS/SDK calls keep flowing on the default pool.
+_CRAWL_EXECUTOR = ThreadPoolExecutor(max_workers=4,
+                                     thread_name_prefix="dg-crawl")
 
 _MAX_BYTES = 2_000_000
 _MAX_TEXT = 100_000
@@ -483,8 +494,11 @@ async def crawl4ai_fetch(url: str) -> dict[str, Any]:
     await throttle(host, delay)
     try:
         # Outer cap covers browser launch too (inner timeout covers arun only).
+        # Runs on the DEDICATED crawl executor (never the default pool).
+        loop = asyncio.get_running_loop()
         return await asyncio.wait_for(
-            asyncio.to_thread(_sync_crawl, target, settings.FETCH_CRAWL_TIMEOUT_S),
+            loop.run_in_executor(_CRAWL_EXECUTOR, _sync_crawl, target,
+                                 settings.FETCH_CRAWL_TIMEOUT_S),
             timeout=settings.FETCH_CRAWL_TIMEOUT_S + 30)
     except (asyncio.TimeoutError, TimeoutError):
         raise provider_transient(f"Crawl4AI timeout ({settings.FETCH_CRAWL_TIMEOUT_S + 30}s cap)")

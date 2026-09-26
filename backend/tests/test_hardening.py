@@ -354,6 +354,36 @@ def test_screen_node_batches_concurrent_with_cap():
     assert sorted(out["screened_urls"]) == sorted(r["url"] for r in fresh)
 
 
+def test_crawl_runs_on_dedicated_executor(monkeypatch):
+    """Crawl4AI blocking work must run on _CRAWL_EXECUTOR threads, never the
+    default pool — orphaned browser threads starved the shared pool into a
+    total idle-loop deadlock (regression)."""
+    import threading
+
+    seen_threads: list = []
+
+    def _fake_crawl(url, timeout_s):
+        seen_threads.append(threading.current_thread().name)
+        return {"url": url, "title": "t", "markdown": "hi", "method": "crawl4ai"}
+
+    async def _guard(url):
+        return url
+
+    async def _robots(url):
+        return True, 0.0
+
+    async def _throttle(host, floor=0.0):
+        return None
+
+    monkeypatch.setattr(fetcher, "_sync_crawl", _fake_crawl)
+    monkeypatch.setattr(fetcher, "aguard_url", _guard)
+    monkeypatch.setattr(fetcher, "robots_allowed", _robots)
+    monkeypatch.setattr(fetcher, "throttle", _throttle)
+    page = run(fetcher.crawl4ai_fetch("https://x.example/a"))
+    assert page["method"] == "crawl4ai"
+    assert seen_threads and all(t.startswith("dg-crawl") for t in seen_threads)
+
+
 # -- crawler traversal + skipped ---------------------------------------------------------------
 def _page(url, html=""):
     return {"url": url, "final_url": url, "title": "t", "html": html or f"<p>{url}</p>",
