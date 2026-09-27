@@ -10,6 +10,7 @@ import json
 import uuid
 
 from fastapi import Depends, FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
@@ -23,6 +24,7 @@ from app.events.stream import bus
 from app.providers.crawl import fetcher
 from app.providers.llm import generate as llm_provider
 from app.providers.search import tavily as search_provider
+from app.repositories import factory as factory_repo
 from app.repositories.factory import build_repo
 from app.schemas.run import DatasetView, Envelope, RunView
 from app.services import crawler as crawler_svc
@@ -90,7 +92,17 @@ async def _startup() -> None:
     missing = [n for n in ("TAVILY_API_KEY", "GEMINI_API_KEY") if not getattr(settings, n)]
     if missing and settings.REQUIRE_KEYS_AT_STARTUP:
         log.info("startup keys missing", extra={"data": {"missing": missing}})
-    log.info("startup complete")
+    # A run lived only as an asyncio task on this process, so a crash or a
+    # restart left its row mid-flight forever and /api/jobs reported a ghost
+    # indistinguishable from a healthy run. Fail them honestly instead.
+    recover = getattr(REPO, "recover_orphan_runs", None)
+    if callable(recover):
+        try:
+            recover()
+        except Exception as e:  # noqa: BLE001 (recovery must never block startup)
+            log.warning("orphan run recovery failed",
+                        extra={"data": {"error": str(e)[:150]}})
+    log.info("startup complete", extra={"data": {"persistence": factory_repo.ACTIVE}})
 
 
 @app.on_event("shutdown")
@@ -105,11 +117,40 @@ async def _app_error(_: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(status_code=exc.http, content=exc.envelope())
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """Validation errors in the same envelope as everything else.
+
+    FastAPI's default is `{"detail": [...]}`, a different shape from the
+    `{data, error, meta}` every other response uses. The frontend reads
+    `payload.error.message`, so a 422 produced a blank error box - the request
+    just looked like it had failed silently.
+    """
+    first = exc.errors()[0] if exc.errors() else {}
+    loc = ".".join(str(x) for x in first.get("loc", []) if x not in ("body", "query"))
+    message = first.get("msg", "invalid request")
+    if loc:
+        message = f"{loc}: {message}"
+    return JSONResponse(status_code=422, content={
+        "data": None,
+        "error": {"code": "E_VALIDATION",
+                  "message": message,
+                  "details": {"fields": [
+                      {"field": ".".join(str(x) for x in e.get("loc", [])
+                                         if x not in ("body", "query")),
+                       "message": e.get("msg", "")}
+                      for e in exc.errors()[:20]]}},
+        "meta": {}})
+
+
 def _run_view(run_id: str) -> dict:
     r = RUNS.get(run_id, {})
     return {"run_id": run_id, "status": r.get("status", "UNKNOWN"),
             "current_stage": r.get("current_stage", ""), "progress": r.get("progress", 0),
             "counters": r.get("counters", {}), "dataset_id": r.get("dataset_id"),
+            # Whether this run finished everything. A PARTIAL run stored real
+            # records but did not complete, and the flag is what says so.
+            "partial": bool(r.get("partial", False)),
             "error": r.get("error", "")}
 
 
@@ -130,6 +171,16 @@ async def compile_plan(body: dict, cid: str = Depends(correlation_id)) -> dict:
         planner_svc.coerce_plan(plan)  # re-validate merged plan (strings only)
     pid = str(uuid.uuid4())
     PLANS[pid] = plan
+    # Persisted as well as cached, so the id still resolves after a restart.
+    # A store that cannot hold plans is not fatal - the in-memory copy serves
+    # this process - but it must be said out loud rather than swallowed.
+    saver = getattr(repo(), "save_plan", None)
+    if callable(saver):
+        try:
+            saver(pid, plan)
+        except Exception as e:  # noqa: BLE001
+            log.warning("plan not persisted; it will not survive a restart",
+                        extra={"data": {"plan_id": pid, "error": str(e)[:150]}})
     log.info("plan compiled", extra={"data": {"plan_id": pid, "provider": provider}})
     return Envelope[dict](data={"plan_id": pid, "plan": plan, "provider": provider},
                           meta={"correlation_id": cid}).model_dump()
@@ -140,6 +191,18 @@ async def compile_plan(body: dict, cid: str = Depends(correlation_id)) -> dict:
 async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
     plan_id = body.get("plan_id", "")
     base = PLANS.get(plan_id)
+    if base is None:
+        # Fall back to the store: a plan compiled before a restart is still a
+        # valid plan, and refusing it would force the caller to recompile for
+        # no reason.
+        getter = getattr(repo(), "get_plan", None)
+        if callable(getter):
+            try:
+                base = getter(plan_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("plan lookup failed",
+                            extra={"data": {"plan_id": plan_id[:36], "error": str(e)[:150]}})
+                base = None
     if base is None:
         raise validation(f"Unknown plan_id: {plan_id[:36]}")
     plan = dict(base)
@@ -178,15 +241,29 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         if st is not None:
             st.update(current_stage=ev.get("stage", st.get("current_stage", "")),
                       progress=ev.get("progress", st.get("progress", 0)))
+            data = ev.get("data", {}) or {}
+            counters = {"attempted": data.get("attempted", 0),
+                        "successful": data.get("successful", 0),
+                        "failed": data.get("failed", 0),
+                        "records": data.get("records", 0),
+                        # Named for what they measure. `verified`/`needs_review`
+                        # conflated records with fields and counted unjudged
+                        # claims as verified.
+                        "records_fully_verified": data.get("records_fully_verified", 0),
+                        "records_needing_review": data.get("records_needing_review", 0),
+                        "fields_verified": data.get("fields_verified", 0),
+                        "fields_judgment_unavailable": data.get(
+                            "fields_judgment_unavailable", 0)}
             if ev["type"] == "run.completed":
-                data = ev.get("data", {}) or {}
                 st.update(status="COMPLETED", dataset_id=data.get("dataset_id"),
-                          counters={"attempted": data.get("attempted", 0),
-                                    "successful": data.get("successful", 0),
-                                    "failed": data.get("failed", 0),
-                                    "records": data.get("records", 0),
-                                    "verified": data.get("verified", 0),
-                                    "needs_review": data.get("needs_review", 0)})
+                          partial=False, counters=counters)
+            elif ev["type"] == "run.partial":
+                # A budget-stopped run stores what it earned. It was not handled
+                # here, so a partial run sat at its initial status forever and
+                # the UI showed a finished-looking run still "PLANNING".
+                st.update(status="PARTIAL", dataset_id=data.get("dataset_id") or None,
+                          partial=True, error=data.get("partial_reason")
+                          or ev.get("message", ""), counters=counters)
             elif ev["type"] == "run.failed":
                 st.update(status="FAILED", error=ev.get("message", ""))
             elif ev["type"] == "run.cancelled":
@@ -207,11 +284,21 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         if fp:
             r.note_fingerprint(run_id, fp, source.get("url", ""))
 
+    async def _persist_page(page: dict) -> str:
+        """Store the crawled page so evidence can cite it later.
+
+        Sync psycopg on the event loop: a single indexed upsert per settled
+        page, bounded by RUN_MAX_PAGES. Offloaded to a thread so a slow write
+        cannot stall the crawl's worker loop.
+        """
+        return await asyncio.to_thread(r.upsert_page, run_id, page)
+
     def _record_charge(entry: dict) -> None:
         r.record_charge(run_id, entry)
 
     ctx = {"search": search_provider.search, "fetch": _fetch, "llm": _llm,
            "store": _store, "persist_source": _persist_source,
+           "persist_page": _persist_page,
            "record_charge": _record_charge,
            "cancelled": lambda: RUNS.get(run_id, {}).get("status") == "CANCELLED"}
     TASKS[run_id] = asyncio.create_task(runner_svc.execute_run(run_id, plan, ctx, _emit))
@@ -404,5 +491,123 @@ async def history(cid: str = Depends(correlation_id)) -> dict:
 @app.get("/api/health")
 async def health() -> dict:
     return {"data": {"status": "ok", "version": "0.1.0",
-                     "time": datetime.datetime.utcnow().isoformat() + "Z"},
+                     "time": datetime.datetime.utcnow().isoformat() + "Z",
+                     # Which store this process is actually writing to. The
+                     # adapter used to be inferred from absent keys and fall
+                     # back silently, so a real database could be bypassed
+                     # with nothing reporting it.
+                     "persistence": dict(factory_repo.ACTIVE)},
             "error": None, "meta": {}}
+
+
+@app.get("/api/models/free")
+async def free_models(cid: str = Depends(correlation_id)) -> dict:
+    """The free-model registry, annotated with live transport reachability.
+
+    Deliberately a registry, not `GET /zen/v1/models`: that endpoint lists 82
+    models with null cost, so free-ness cannot be derived from it. This tells
+    the UI which transport each model needs and whether it is usable right now.
+    """
+    from app.providers.llm import opencode as opencode_svc
+    from app.services import fanout
+    data = fanout.catalogue()
+    data["zen"] = {"configured": bool(settings.ZEN_API_KEY),
+                   "enabled": bool(settings.ZEN_ENABLED),
+                   "base_url": settings.ZEN_BASE_URL}
+    data["opencode"] = await opencode_svc.available()
+    return {"data": data, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/intel/ask", dependencies=[Depends(require_api_key)])
+async def intel_ask(body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Ask the free tier one question, get every model's answer plus agreement.
+
+    Accepts either a raw `prompt` or a `url`. With a url the page is fetched
+    server-side through the same crawler waterfall runs use (robots, rate limit,
+    permitted hosts) and reduced to text, so the browser never talks to a target
+    site directly.
+
+    One credit, like /api/map.
+    """
+    from app.providers.llm import zen as zen_svc
+    from app.services import fanout, source_router
+
+    prompt = (body.get("prompt", "") or "").strip()
+    url = (body.get("url", "") or "").strip()
+    if not prompt and not url:
+        raise validation("Provide a `prompt` or a `url`.")
+    if len(prompt) > 20000:
+        raise validation("Prompt too long (20000 chars max).")
+
+    source: dict = {"url": "", "title": "", "chars": 0, "skipped": ""}
+    if url:
+        try:
+            route = source_router.triage_source(url)
+        except AppError:
+            raise validation(f"Bad intel URL: {url[:120]}")
+        try:
+            page = await crawler_svc._one(url, route, _fetch_method, asyncio.Semaphore(1))
+        except AppError:
+            raise
+        if page.get("skipped"):
+            raise validation(f"Source refused: {page.get('skipped')}")
+        from app.services import reducer as reducer_svc
+        from app.services import politeness as politeness_svc
+        # Same precedence as crawler._one: the rendered rungs (crawl4ai, jina)
+        # return `markdown`, only the static rung returns `html`. Reading html
+        # alone reported "no readable text" for pages that fetched perfectly.
+        text = page.get("markdown") or reducer_svc.reduce_html(page.get("html", ""), 20000)
+        text = text[:20000]
+        thin_at = settings.FETCH_THIN_CHARS
+        method = page.get("method", "")
+        rendered = method in ("crawl4ai", "impersonate", "jina")
+        if not text.strip():
+            raise validation("No readable text at that URL.")
+        # A JS shell that the renderer could not execute is an infrastructure
+        # failure, NOT an analysis result. Measured: startupblink.com returns
+        # 483KB of HTML that reduces to 64 chars (the title) because 99% of the
+        # document is <script>. When Crawl4AI is busy that thin page was returned
+        # silently, and ten models dutifully reported "no companies found" from a
+        # bare <title>. In an evidence-first tool that is the worst possible
+        # failure: a confident, wrong, unearned negative. Refuse instead.
+        if len(text) < thin_at and politeness_svc.looks_js_shell(page.get("html", ""),
+                                                                len(text), thin_at):
+            raise validation(
+                f"Render failed, nothing analysed. That URL is a JavaScript app: "
+                f"{len(page.get('html', '')):,}B of HTML reduces to {len(text)} chars "
+                f"of text, and the browser renderer "
+                f"({'succeeded but was still empty' if rendered else 'did not run'}). "
+                f"Any answer here would be invented from the page title alone. "
+                f"Retry, or use a static source.")
+        source = {"url": page.get("final_url", url),
+                  "title": (page.get("title", "") or "")[:300],
+                  "chars": len(text), "skipped": "",
+                  "method": method, "rendered": rendered,
+                  "thin": len(text) < thin_at}
+        if not prompt:
+            prompt = (f"Read the page below and answer the question. Cite nothing "
+                      f"you cannot see in the text.\n\nQUESTION: {body.get('question', '')}\n\n"
+                      f"PAGE ({source['title'] or source['url']}):\n{text}")
+
+    requested = body.get("models")
+    if isinstance(requested, str):  # tolerate a comma-separated list
+        requested = [m.strip() for m in requested.split(",") if m.strip()]
+    if requested is not None and (not isinstance(requested, list)
+                                  or not all(isinstance(m, str) for m in requested)):
+        raise validation("`models` must be a list of model ids.")
+    unknown = [m for m in (requested or []) if not zen_svc.is_free(m)]
+    if unknown:
+        raise validation(f"Unknown model id(s): {', '.join(unknown[:5])}")
+
+    job_id = f"intel-{uuid.uuid4().hex[:8]}"
+    entry = metering_svc.Ledger().bill(job_id, "intel", 1)
+    try:
+        repo().record_charge(job_id, entry)
+    except Exception as e:  # noqa: BLE001 (the answer matters more than its receipt)
+        log.info("intel ledger persist failed", extra={"data": {"error": str(e)[:150]}})
+
+    out = await fanout.ask_many(prompt, requested or None,
+                                system=(body.get("system") or None),
+                                json_mode=bool(body.get("json", False)))
+    out.update(source=source, job_id=job_id, credits_used=entry["credits"])
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}

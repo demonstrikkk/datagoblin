@@ -194,12 +194,42 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
     raise last_err if last_err else RuntimeError("fetch failed")
 
 
+def _child_links(page: dict) -> list[str]:
+    """Same-host child URLs of a settled page, from whichever rung produced it.
+
+    The static rungs return `html`; the rendered rungs return `markdown` plus a
+    parsed `links` list and never an `html` key. Reading only `html` therefore
+    found children on plain pages and none at all on rendered ones, so a
+    JS-heavy seed never expanded at all. Both are honoured now, in that order,
+    with the renderer's own parsed links preferred because they are post-JS.
+    """
+    parsed = page.get("links")
+    if isinstance(parsed, list) and parsed:
+        out = [str(x) for x in parsed if isinstance(x, (str, bytes))]
+        if out:
+            return [x.decode() if isinstance(x, bytes) else x for x in out]
+    html = page.get("html") or page.get("rendered_html") or ""
+    if html:
+        try:
+            return list(fetcher.extract_links(html, page.get("url", "")))
+        except Exception:  # noqa: BLE001 (malformed markup must not kill the crawl)
+            return []
+    return []
+
+
 async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: Any,
-                    plan: dict | None = None) -> tuple[list[dict], dict]:
+                    plan: dict | None = None,
+                    persist_page: Any = None) -> tuple[list[dict], dict]:
     """Seeds (depth 0) then breadth-first same-host traversal within caps.
 
     Returns (pages, {attempted, successful, failed, skipped}). Every settled URL is
     persisted exactly once (progressive; idempotent on retry via run_id+url).
+
+    `persist_page` stores the page body and returns its id. That id is what makes
+    the rest of the pipeline checkable: previously a page was fetched, reduced in
+    RAM, extracted from and thrown away, so every evidence quote and offset pointed
+    at text that no longer existed. When it is not supplied (unit tests, the /api/map
+    probe) the run still works, it just carries no re-verifiable evidence.
     """
     plan = plan or {}
     traversal = plan.get("traversal", {}) or {}
@@ -246,9 +276,41 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         domain_count[dom] = domain_count.get(dom, 0) + 1
         page["title"] = page.get("title") or item.get("title", "")
         page["depth"] = depth
-        pages.append(page)
+        page["parent_url"] = item.get("parent_url", "") or ""
         snapshot_chars = len(page.get("rendered_html", "") or page.get("html", "")
                              or page.get("markdown", "") or "")
+
+        # Store the evidence, and keep the id on the page dict so extraction and
+        # validation can cite it. markdown is what the LLM actually saw, so
+        # quotes resolve against it; raw_html is the snapshot for re-checking
+        # content_hash. A storage failure here is reported, never silent: a run
+        # whose evidence could not be saved is not a trustworthy run.
+        if persist_page is not None:
+            try:
+                pid = await persist_page({
+                    "url": url, "final_url": page.get("final_url", ""),
+                    "parent_url": page["parent_url"], "depth": depth,
+                    "method": page.get("method", ""), "status": "ok", "error": "",
+                    "content_hash": page.get("content_hash", ""),
+                    # Shared with the extractor, so a verified quote always
+                    # resolves against the stored copy.
+                    "markdown": reducer_svc.page_evidence_text(page),
+                    "raw_html": page.get("rendered_html", "") or page.get("html", ""),
+                    "snapshot_chars": snapshot_chars})
+                if pid:
+                    page["page_id"] = pid
+            except Exception as e:  # noqa: BLE001
+                fail += 1
+                ok -= 1
+                await persist_source({"url": url, "title": page["title"],
+                                      "status": "failed", "method": page.get("method", ""),
+                                      "error": f"evidence not stored: {str(e)[:200]}",
+                                      "content_hash": page.get("content_hash", ""),
+                                      "snapshot_chars": snapshot_chars,
+                                      "media": _media_counts(page, url),
+                                      "fingerprint": politeness_svc.fingerprint("GET", url)})
+                return
+        pages.append(page)
         await persist_source({"url": url, "title": page["title"], "status": "ok",
                               "method": page.get("method", ""), "error": "",
                               "content_hash": page.get("content_hash", ""),
@@ -256,10 +318,19 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                               "media": _media_counts(page, url),
                               "fingerprint": politeness_svc.fingerprint("GET", url)})
         await emit_source(emit, url, True)
-        if depth + 1 < max_depth and page.get("html"):
-            for link in fetcher.extract_links(page["html"], url):
+        # Traversal reads `html`, which the rendered rungs never return: a
+        # Crawl4AI page has markdown and rendered_html only. Gating on `html`
+        # therefore dead-ended subpage discovery for exactly the JS-heavy pages
+        # that need it most, while their parsed links sat unused in the dict.
+        # `depth < max_depth`, not `depth + 1 < max_depth`: the old form made
+        # RUN_MAX_DEPTH=2 mean ONE hop, because a child at depth 1 evaluated
+        # 2 < 2 and stopped. The setting now means what it says - that many
+        # levels below the seeds.
+        if depth < max_depth:
+            for link in _child_links(page):
                 if link not in seen and traversal_allowed(link, plan):
-                    queue.append(({"url": link, "title": ""}, depth + 1))
+                    queue.append(({"url": link, "title": "",
+                                   "parent_url": url}, depth + 1))
                 if len(queue) >= budget + 100:
                     break
 

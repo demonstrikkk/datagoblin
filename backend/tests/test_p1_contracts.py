@@ -1,6 +1,8 @@
 """P1 contracts: batched finalize, string seeds, records bounds, empty-sig dedupe,
-semantic fail-fast, real RunView counters. No network/keys (supabase faked at seam)."""
+semantic fail-fast, real RunView counters. No network/keys (the DB is faked at
+the connection seam, so the SQL and the transaction shape are still asserted)."""
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -16,58 +18,132 @@ from app.core import config as config_mod  # noqa: E402
 from app.services import deduper as deduper_svc  # noqa: E402
 
 
-class _Table:
-    def __init__(self, rec, name):
-        self._rec, self._name = rec, name
+class _CopySink:
+    def __init__(self, calls):
+        self._calls = calls
+        self.rows = []
 
-    def insert(self, payload):
-        self._rec.calls.append((self._name, "insert", payload))
+    def __enter__(self):
         return self
 
-    def upsert(self, payload, on_conflict=None):
-        self._rec.calls.append((self._name, "upsert", payload))
+    def __exit__(self, *a):
+        return False
+
+    def write_row(self, row):
+        self.rows.append(row)
+
+
+class _FakeCursor:
+    def __init__(self, calls):
+        self._calls = calls
+        self._copy = None
+
+    description = None
+
+    def __enter__(self):
         return self
 
-    def update(self, payload):
-        self._rec.calls.append((self._name, "update", payload))
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=()):
+        self._calls.append(("execute", " ".join(sql.split())[:70], params))
         return self
 
-    def select(self, *a):
+    def copy(self, sql):
+        self._calls.append(("copy", " ".join(sql.split())[:70], ()))
+        self._copy = _CopySink(self._calls)
+        return self._copy
+
+    def fetchall(self):
+        return []
+
+
+class _FakeConn:
+    def __init__(self, calls):
+        self._calls = calls
+        self.cur = _FakeCursor(calls)
+        self.commits = 0
+
+    def __enter__(self):
         return self
 
-    def eq(self, *a):
-        return self
+    def __exit__(self, *a):
+        return False
 
-    def order(self, *a, **k):
-        return self
+    def cursor(self):
+        return self.cur
 
-    def limit(self, *a):
-        return self
-
-    def execute(self):
-        self._rec.calls.append((self._name, "execute", None))
-
-        class _R:
-            data = []
-        return _R()
+    def commit(self):
+        self.commits += 1
 
 
-class _FakeDB:
-    def __init__(self):
-        self.calls = []
+def test_finalize_writes_all_records_in_one_copy():
+    """Records must be written as a single batch inside one transaction.
 
-    def table(self, name):
-        return _Table(self, name)
+    The REST adapter this replaced issued one request per table and could
+    leave a dataset written without its run status; the property that matters
+    is that N records cost one COPY, not N round trips, and that the run is
+    marked complete in the same transaction.
+    """
+    from app.repositories.postgres_repo import PostgresRepo
+    calls: list = []
+    repo = PostgresRepo.__new__(PostgresRepo)
+    repo._dsn = "postgresql://unused"
+    repo._lock = threading.Lock()
+    conn = _FakeConn(calls)
+    repo._conn = lambda: conn
 
-
-def test_finalize_single_bulk_insert():
-    from app.repositories.supabase_repo import SupabaseRepo
-    repo = SupabaseRepo.__new__(SupabaseRepo)
-    repo._db = _FakeDB()
     rows = [{"fields": {"a": {"value": i}}} for i in range(5)]
-    repo.finalize_dataset("r1", {"goal": "g", "fields": []}, rows, {})
-    rec_inserts = [c for c in repo._db.calls if c[0] == "dataset_records" and c[1] == "insert"]
-    assert len(rec_inserts) == 1 and len(rec_inserts[0][2]) == 5
+    did = repo.finalize_dataset(
+        "11111111-1111-1111-1111-111111111111",
+        {"goal": "g", "fields": []}, rows, {})
+
+    copies = [c for c in calls if c[0] == "copy"]
+    assert len(copies) == 1, f"expected exactly one COPY, got {len(copies)}"
+    assert len(conn.cur._copy.rows) == 5
+    assert all(r[0] == did for r in conn.cur._copy.rows)
+    # Terminal run state lands in the same transaction, so a run is never
+    # marked complete without its records.
+    assert any("UPDATE runs SET status=%s" in c[1] for c in calls
+               if c[0] == "execute")
+    assert conn.commits == 1
+
+
+def test_partial_run_is_never_marked_completed():
+    """A run that hit its budget is FAILED with partial=true. Marking a
+    truncated run COMPLETED because a dataset happened to be written is how a
+    15-record run came to look finished."""
+    from app.repositories.postgres_repo import PostgresRepo
+    calls: list = []
+    repo = PostgresRepo.__new__(PostgresRepo)
+    repo._dsn = "postgresql://unused"
+    repo._lock = threading.Lock()
+    conn = _FakeConn(calls)
+    repo._conn = lambda: conn
+    repo.finalize_dataset(
+        "11111111-1111-1111-1111-111111111111", {"goal": "g", "fields": []},
+        [{"fields": {"a": {"value": 1}}}],
+        {"partial": True, "partial_reason": "runtime budget exhausted after 2 of 6 pages"})
+
+    update = next(c for c in calls if c[0] == "execute" and "UPDATE runs" in c[1])
+    # (status, stage, partial, reason, stats, run_id)
+    assert update[2][0] == "FAILED", "a partial run must not read COMPLETED"
+    assert update[2][2] is True, "partial must be recorded as a flag, not a message"
+    assert "runtime budget" in update[2][3]
+
+
+def test_empty_record_set_writes_no_copy():
+    from app.repositories.postgres_repo import PostgresRepo
+    calls: list = []
+    repo = PostgresRepo.__new__(PostgresRepo)
+    repo._dsn = "postgresql://unused"
+    repo._lock = threading.Lock()
+    conn = _FakeConn(calls)
+    repo._conn = lambda: conn
+    repo.finalize_dataset("11111111-1111-1111-1111-111111111111",
+                          {"goal": "g", "fields": []}, [], {})
+    assert not [c for c in calls if c[0] == "copy"]
 
 
 def test_semantic_flag_fails_before_work(monkeypatch):

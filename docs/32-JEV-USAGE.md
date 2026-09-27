@@ -1,21 +1,81 @@
-# 32 — JEV USAGE MAP (CORE decision layer: 4 families — GENERATE→ORCHESTRATE→JUDGE→EXECUTE→PROVE)
+# 32 — JEV USAGE MAP (CORE decision layer: 4 families)
 
-Jev = TypeSafe System One typed judgments (Choice/Score/Noul + probabilities, skills/jev), NOT prose generation, NOT a pipeline stage. Gemini/Groq GENERATE; LangGraph ORCHESTRATES the loop; Jev JUDGES at boundaries; Python EXECUTES; evidence PROVES. Jev outputs are probabilities with fallbacks — deterministic policy maps them → verified/unverified/conflicting (never "Jev says TRUE").
+Jev = typed judgments (Choice/Score/Noul + probabilities), **not** prose
+generation and **not** a pipeline stage.
 
-## A. Source screening (post-discovery, biggest saver)
+```
+LLM    = understand / generate
+Jev    = judge / decide
+Python = execute
+DB     = remember
+```
 
-Q: Is this source likely relevant to entity/fields? → YES / NO / UNCERTAIN. NO → skip fetch+extract entirely. `jev.source_screening()`.
+Jev returns a judgement. **Python applies the policy.** Jev never mutates state
+and never decides what gets stored. Outputs are probabilities; the deterministic
+policy maps them onto `verified` / `unverified` / `conflicting` /
+`judgment_unavailable` — never "Jev says TRUE".
 
-## B. Evidence verification (post-extract, feeds Proof Drawer)
+## A. Source screening — `jev.source_screening()`
 
-Q: Does this quote support this claim? → SUPPORTED (show "$15M — SUPPORTED 0.97") / NOT_SUPPORTED / UNCERTAIN. Deterministic quote⊂text pre-check runs first; Jev judges semantics. `jev.evidence_verification()`.
+Q: is this source relevant? → `YES` / `NO` / `UNCERTAIN`. `NO` skips
+fetch+extract entirely. Runs in concurrent batches of 5; the sequential version
+stalled whole runs at ~10s a call.
 
-## C. Conflict resolution (bounded A/B/C/D)
+## B. Evidence verification — `jev.evidence_verification()`
 
-Q: Which evidence state? → A (source A better) / B / CONFLICT (genuine — mark CONFLICTING, never merge) / INSUFFICIENT. `jev.conflict_triage()`. Extra search only on INSUFFICIENT.
+Q: does this quote support this claim? → `SUPPORTED` / `NOT_SUPPORTED` /
+`UNCERTAIN` / **`JUDGMENT_UNAVAILABLE`**.
 
-## D. Research continuation (inside LangGraph loop)
+Order: deterministic substring pre-check, then a verbatim-containment
+shortcut, then the judge. See docs/11.
 
-Q: Coverage state? → sufficient → FETCH / insufficient → REFINE / uncertain → REVIEW-broader-search. LangGraph moves state; Jev judges; Runner executes ≤3 iterations. `jev.research_continuation()` (+ legacy alias `coverage_gate`).
+> **The bug this family hid:** when no judge was reachable, this returned
+> `SUPPORTED, 0.9, deterministic`. A dead or unconfigured judge therefore
+> promoted every substring-matching claim to "verified", and the verification
+> summary counted them as checked. Because no test stubbed the judge, the whole
+> suite was passing on that behaviour. It now returns
+> `JUDGMENT_UNAVAILABLE`, which the validator records as its own status and
+> never counts as verified.
 
-Forbidden: planning, extraction prose, validation math, dedupe, normalization, export, transitions, budgets. Key absent → deterministic stubs.
+## C. Conflict resolution — `jev.conflict_triage()`
+
+Q: which evidence state? → `A` / `B` / `CONFLICT` / `INSUFFICIENT`. `CONFLICT`
+marks the cell `conflicting` and never merges. Judged **concurrently** — a live
+run merged 35 duplicates and then spent the rest of its 600s budget
+adjudicating them one at a time.
+
+A judge that *fails* leaves the cell `conflicting`. A conflict is never
+silently resolved one way.
+
+## D. Research continuation — `jev.research_continuation()`
+
+Q: is the evidence enough, and if not, what now? → `sufficient` / `insufficient`
+/ `uncertain`, with `FETCH` / `REFINE` / `REVIEW`.
+
+> This was a pure function of `valid >= requested` with **no model call at
+> all**, while the graph documented it as the coverage judge. Counting is
+> necessary but not sufficient: 3-of-5 with no leads left should stop, 4-of-5
+> missing a required field should continue, and neither is visible to a count.
+
+It is now a real judgement, with the count comparison kept as the fallback so a
+missing judge never changes behaviour — only its speed. The judge is told what
+discovery actually knows (`_coverage_summary`: rounds used, queries run,
+candidates seen, sources accepted, their titles), because it used to be invoked
+with `valid_count` and `missing_fields`, **neither of which any node ever
+wrote** — so it only ever saw "0 valid out of 20" and had nothing to reason
+from.
+
+The judge advises; `supervisor_step` still decides, and the loop is bounded by
+`SUPERVISOR_MAX_ITERATIONS`.
+
+## Not called anywhere
+
+`jev.coverage_gate()` (legacy alias), `jev.source_relevance()`,
+`jev.decide_record()` have **zero callers** in `app/`.
+
+## Forbidden
+
+Planning, extraction prose, validation math, dedupe, normalization, export,
+transitions, budgets. Key absent → deterministic policy. Where a judge is
+unavailable, every family degrades to a stated deterministic outcome rather
+than a fabricated judgment.

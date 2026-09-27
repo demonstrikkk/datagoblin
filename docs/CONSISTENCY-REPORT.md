@@ -1,5 +1,13 @@
 # CONSISTENCY AUDIT REPORT (2026-09-24, build mode)
 
+> **SUPERSEDED (2026-09-27).** A point-in-time report kept for history.
+> Several of its conclusions no longer hold: the app now persists to
+> Postgres via `PERSISTENCE` (it used to silently write JSONL), pages are
+> stored as evidence, validation drops records instead of annotating them,
+> and the emitted event set is 13, not 14. See docs/37-CURRENT-STATE.md
+> and the AUDIT.md addendum for current truth.
+
+
 Checked: docs/00–29 (30 files), contracts/*.schema.json + api.openapi.yaml, prompts/*, backend 16 .py, frontend routes/components/hooks, skills/24, .env.example.
 
 ## Contradictions found → fixed

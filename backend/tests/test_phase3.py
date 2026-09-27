@@ -603,8 +603,14 @@ def test_run_completed_event_carries_record_counts():
     result = run(runner_svc.execute_run("r1", plan, ctx, _emit))
     done = next(e for e in events if e["type"] == "run.completed")
     assert done["data"]["records"] == result["records"] == 1
-    assert done["data"]["verified"] >= 1
-    assert "needs_review" in done["data"]
+    # The counts are named for what they measure. `verified`/`needs_review`
+    # conflated records with fields - `{"records":1,"verified":0,
+    # "needs_review":4}` reads as four bad records when it is one record with
+    # four unproven fields - and counted unjudged claims as verified.
+    assert done["data"]["records_fully_verified"] == 1
+    assert done["data"]["records_needing_review"] == 0
+    assert done["data"]["fields_verified"] >= 1
+    assert "fields_judgment_unavailable" in done["data"]
 
 
 def test_runner_extraction_page_timeout_skips(monkeypatch):

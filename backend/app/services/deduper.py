@@ -74,9 +74,28 @@ async def adjudicate_conflicts(rows: list[dict]) -> dict:
     A: keep incumbent. B: adopt rival value+source. CONFLICT: keep conflicting.
     INSUFFICIENT: downgrade to unverified (honest, never guessed).
     Returns {judged, confirmed, adopted, downgraded}.
+
+    The cells are judged concurrently. One live run merged 35 duplicates and
+    then spent the remainder of its 600s budget adjudicating their conflicts
+    one at a time, which is what pushed the run past its limit; the cells are
+    independent, so the wall cost is now the slowest call rather than the sum.
     """
+    import asyncio
     from app.providers.decision import jev
+    from app.core.config import settings
+
     stats = {"judged": 0, "confirmed": 0, "adopted": 0, "downgraded": 0}
+    sem = asyncio.Semaphore(max(1, int(getattr(settings, "ITEM_CONCURRENCY", 8) or 8)))
+
+    async def _judge(name: str, cell: dict, rival: dict) -> str:
+        async with sem:
+            res = await jev.conflict_triage(
+                name, str(cell.get("value", "")), str(rival.get("value", "")),
+                (cell.get("source", {}) or {}).get("quote", ""),
+                (rival.get("source", {}) or {}).get("quote", ""))
+        return str(res.get("decision", "CONFLICT"))
+
+    jobs: list[tuple[str, dict, dict]] = []
     for row in rows:
         for name, cell in row.get("fields", {}).items():
             if not isinstance(cell, dict) or cell.get("verification_status") != "conflicting":
@@ -84,22 +103,28 @@ async def adjudicate_conflicts(rows: list[dict]) -> dict:
             rivals = cell.get("rivals", []) or []
             if not rivals:
                 continue
-            rival = rivals[0]
-            stats["judged"] += 1
-            res = await jev.conflict_triage(
-                name, str(cell.get("value", "")), str(rival.get("value", "")),
-                (cell.get("source", {}) or {}).get("quote", ""),
-                (rival.get("source", {}) or {}).get("quote", ""))
-            verdict = res.get("decision", "CONFLICT")
-            if verdict == "B":
-                cell["value"] = rival.get("value")
-                cell["source"] = rival.get("source", cell.get("source", {}))
-                cell["verification_status"] = "verified"
-                stats["adopted"] += 1
-            elif verdict == "INSUFFICIENT":
-                cell["value"] = None
-                cell["verification_status"] = "unverified"
-                stats["downgraded"] += 1
-            else:
-                stats["confirmed"] += 1  # A or CONFLICT: incumbent stands as conflicting
+            jobs.append((name, cell, rivals[0]))
+
+    stats["judged"] = len(jobs)
+    if not jobs:
+        return stats
+    verdicts = await asyncio.gather(
+        *(_judge(n, c, rv) for n, c, rv in jobs), return_exceptions=True)
+    for (_name, cell, rival), item in zip(jobs, verdicts):
+        if isinstance(item, BaseException):
+            # A failed judge leaves the cell conflicting, which is the safe
+            # outcome: a conflict is never silently resolved one way.
+            stats["confirmed"] += 1
+            continue
+        if item == "B":
+            cell["value"] = rival.get("value")
+            cell["source"] = rival.get("source", cell.get("source", {}))
+            cell["verification_status"] = "verified"
+            stats["adopted"] += 1
+        elif item == "INSUFFICIENT":
+            cell["value"] = None
+            cell["verification_status"] = "unverified"
+            stats["downgraded"] += 1
+        else:
+            stats["confirmed"] += 1  # A or CONFLICT: incumbent stands as conflicting
     return stats

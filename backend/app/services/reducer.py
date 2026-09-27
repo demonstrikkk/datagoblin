@@ -110,6 +110,65 @@ def reduce_html(html: str, max_chars: int = 0) -> str:
     return text
 
 
+def media_block(page: dict, max_items: int = 30) -> str:
+    """Grounded media appendix: image alts + media URLs (binaries never fetched).
+
+    Moved here from extractor so the evidence store and the extractor can build
+    the identical text. Alt text is quotable evidence exactly like body copy, so
+    if the store omits it a quote lifted from an image cannot be re-verified.
+    """
+    images = page.get("images", []) or []
+    videos = page.get("videos", []) or []
+    if not images and not videos:
+        return ""
+    lines = ["", "Media on this page (URLs with alt text; binaries not fetched):"]
+    for img in images[:max_items]:
+        if isinstance(img, dict):
+            alt, src = str(img.get("alt", "") or "").strip(), str(img.get("src", ""))
+        else:
+            alt, src = "", str(img)
+        lines.append(f"- image: {alt} <{src}>" if alt else f"- image: <{src}>")
+    for v in videos[:max_items]:
+        lines.append(f"- video: <{str(v)}>")
+    return "\n".join(lines)
+
+
+def page_evidence_text(page: dict, max_chars: int = 0) -> str:
+    """Every quotable character on a page, in one place.
+
+    This is the single definition shared by the evidence store and the
+    extractor. They used to disagree: the extractor appended media alt-text and
+    JSON-LD to what it read, while the stored copy was built by a separate
+    expression. Any difference between the two makes a verified quote
+    unverifiable against the stored page, which defeats the point of storing it.
+
+    Rendered rungs return `markdown` and no `html`; static rungs return `html`
+    and no `markdown`. Both are folded in, so the stored text is a superset of
+    whatever the LLM was shown.
+    """
+    from app.services import selectors as selectors_svc  # local: avoids a cycle
+    dom_source = page.get("html", "") or page.get("rendered_html", "")
+    parts: list[str] = []
+    if dom_source:
+        try:
+            parts.append(selectors_svc.page_text(dom_source))
+        except Exception:  # noqa: BLE001 (malformed markup is not a store failure)
+            pass
+    parts.append(page.get("markdown") or (reduce_html(dom_source) if dom_source else ""))
+    if dom_source:
+        try:
+            structured = extract_structured(dom_source)
+            if structured.get("text"):
+                parts.append(str(structured["text"]))
+        except Exception:  # noqa: BLE001
+            pass
+    block = media_block(page)
+    if block:
+        parts.append(block)
+    out = "\n".join(p for p in parts if p).strip()
+    return out[:max_chars] if max_chars and len(out) > max_chars else out
+
+
 def _walk_json_ld(node: object, found: dict) -> None:
     """Collect Article-ish fields from JSON-LD (dicts, lists, @graph)."""
     if isinstance(node, list):

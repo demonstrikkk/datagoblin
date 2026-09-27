@@ -1,9 +1,13 @@
 """Decision layer — Jev CORE (4 families). GENERATE → ORCHESTRATE → JUDGE → EXECUTE → PROVE.
 
-Real path: OpenRouter Decisions API, POST https://openrouter.ai/api/alpha/decisions
-{decisionsRequest: {model: ~typesafe/jev-latest, state, questions}} answered with
-typed {noul|choice|score} + probabilities. Key: OPENROUTER_API_KEY, with
-TYPESAFE_API_KEY accepted as alias (existing .env files carry it there).
+Two paths, free first:
+  1. Zen's `jev-1.13-free` via POST {ZEN_BASE_URL}/systemone — measured 200 on
+     direct REST (~0.6s), same `{answers}` shape, no spend.
+  2. OpenRouter Decisions API, POST https://openrouter.ai/api/alpha/decisions
+     {model: ~typesafe/jev-latest, state, questions} answered with typed
+     {noul|choice|score} + probabilities. Key: OPENROUTER_API_KEY, with
+     TYPESAFE_API_KEY accepted as alias (existing .env files carry it there).
+
 Deterministic policy otherwise (complete production logic for the no-key
 deployment, not a placeholder). Judgments are probabilities; deterministic policy
 maps them to verified/unverified/conflicting — never "Jev says TRUE".
@@ -27,7 +31,19 @@ def _key() -> str:
 
 
 async def _jev_call(state: str, questions: dict) -> dict | None:
-    """Returns parsed answers or None (key absent/failure => deterministic policy)."""
+    """Returns parsed answers or None (key absent/failure => deterministic policy).
+
+    Free Zen Jev is tried before the paid OpenRouter judge: same contract, no
+    cost, measured reachable. A paid call only happens when the free one is
+    unavailable, so a key-less deployment never silently bills.
+    """
+    from app.providers.llm import zen
+
+    if settings.ZEN_JEV_ENABLED:
+        answers = await zen.systemone(state, questions)
+        if answers is not None:
+            return answers
+
     key = _key()
     if not key:
         return None
@@ -105,11 +121,29 @@ async def source_relevance(url: str, title: str, snippet: str, entity: str) -> d
 
 
 async def evidence_verification(value: str, quote: str, source_text: str) -> dict:
-    """B. SUPPORTED/NOT_SUPPORTED/UNCERTAIN. Deterministic substring pre-check first."""
+    """B. SUPPORTED/NOT_SUPPORTED/UNCERTAIN/JUDGMENT_UNAVAILABLE.
+
+    The deterministic substring pre-check runs first and is free. When it passes
+    but no judge is reachable, the answer is JUDGMENT_UNAVAILABLE - explicitly
+    not SUPPORTED. This used to return `SUPPORTED, 0.9, deterministic`, which
+    meant a dead or unconfigured judge silently promoted every substring-matching
+    claim to "verified" and the verification summary counted them as checked.
+    A judgement that never happened must not be reported as one that did.
+    """
     import re
     norm = lambda s: re.sub(r"\s+", " ", (s or "").strip().lower())
-    if not quote or norm(quote) not in norm(source_text):
+    v, q = norm(value), norm(quote)
+    if not quote or q not in norm(source_text):
         return {"judgment": "NOT_SUPPORTED", "confidence": 0.95, "provider": "deterministic"}
+    if v and v in q:
+        # The value is literally inside its own quote, so "does this evidence
+        # support the claim" has no answer other than yes. Spending a judge call
+        # on it is pure latency: a live run reached 728 extracted records, and
+        # asking a model about every field of every one of them meant thousands
+        # of round trips and a blown budget. This is a deduction, not a guess -
+        # the substring is the claim.
+        return {"judgment": "SUPPORTED", "confidence": 0.95,
+                "provider": "deterministic"}
     ans = await _jev_call(
         f"Claim: {value}\nEvidence: {quote}",
         {"support": {"type": "noul", "instructions": "Does the evidence support the claim?"}})
@@ -125,8 +159,11 @@ async def evidence_verification(value: str, quote: str, source_text: str) -> dic
             return {"judgment": "SUPPORTED", "confidence": score, "provider": "jev"}
         if score <= 0.4:
             return {"judgment": "NOT_SUPPORTED", "confidence": 1 - score, "provider": "jev"}
+        # The 0.4-0.6 band is a real "I cannot tell". The validator used to
+        # treat it as verified, so a hesitant judge was reported as support.
         return {"judgment": "UNCERTAIN", "confidence": 0.5, "provider": "jev"}
-    return {"judgment": "SUPPORTED", "confidence": 0.9, "provider": "deterministic"}
+    return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
+            "provider": "none"}
 
 
 async def conflict_triage(field: str, value_a: str, value_b: str,
@@ -150,9 +187,8 @@ async def conflict_triage(field: str, value_a: str, value_b: str,
     return {"decision": "CONFLICT", "provider": "deterministic"}
 
 
-async def research_continuation(valid: int, requested: int,
-                                missing_fields: list | None = None) -> dict:
-    """D. sufficient/insufficient/uncertain => FETCH/REFINE/REVIEW."""
+def _deterministic_continuation(valid: int, requested: int) -> dict:
+    """The fallback policy. A pure count comparison, always available."""
     if valid >= requested:
         return {"continuation": "sufficient", "action": "FETCH", "provider": "deterministic"}
     if valid == 0:
@@ -162,17 +198,80 @@ async def research_continuation(valid: int, requested: int,
             "action": "REFINE", "provider": "deterministic"}
 
 
+async def research_continuation(valid: int, requested: int,
+                                missing_fields: list | None = None,
+                                evidence_summary: str = "",
+                                rounds_used: int = 0,
+                                max_rounds: int = 0) -> dict:
+    """D. Is the collected evidence enough, and if not, what now?
+
+    This was a pure function of `valid >= requested` with no model call at all,
+    while the graph documented it as the coverage judge. Counting is necessary but
+    not sufficient: a run that found 3 of 5 rows and has run out of plausible
+    leads should stop, and one that has found 4 of 5 but is missing a required
+    field should keep going. Neither is visible to a count, which is why the
+    function now asks.
+
+    Jev judges; it does not execute. The returned `action` is advice, and the
+    caller (supervisor_step) remains the thing that actually decides - the
+    deterministic policy is kept as the fallback so a missing judge never
+    changes behaviour, only speeds it up.
+    """
+    fallback = _deterministic_continuation(valid, requested)
+    if not requested:
+        return fallback
+
+    state_bits = [
+        f"Target records: {requested}",
+        f"Records collected and verified: {valid}",
+        f"Missing records: {max(0, requested - valid)}",
+    ]
+    if missing_fields:
+        state_bits.append("Fields never evidenced: " + ", ".join(map(str, missing_fields))[:400])
+    if rounds_used:
+        state_bits.append(f"Search rounds used: {rounds_used} of {max_rounds or 'unbounded'}")
+    if evidence_summary:
+        state_bits.append("Evidence so far: " + evidence_summary[:1200])
+
+    ans = await _jev_call(
+        "\n".join(state_bits),
+        {"continuation": {
+            "type": "choice",
+            "instructions": (
+                "Is the evidence collected so far sufficient to answer, or should "
+                "research continue? Answer 'sufficient' when what is missing is "
+                "unlikely to be found by more searching (the target does not "
+                "exist, or the requirement is not satisfiable). Answer "
+                "'insufficient' when another search round would plausibly help. "
+                "Answer 'uncertain' when you cannot tell."),
+            "criteria": {"sufficient": "enough; stop searching",
+                         "insufficient": "more searching would help",
+                         "uncertain": "cannot tell"}},
+         "action": {
+            "type": "choice",
+            "instructions": "What should happen next?",
+            "criteria": {"FETCH": "proceed to fetch and extract the sources found",
+                         "REFINE": "search again with better queries",
+                         "REVIEW": "stop and surface the gap for a human"}}})
+
+    cont, c_conf = _choice(ans or {}, "continuation",
+                           {"sufficient", "insufficient", "uncertain"})
+    if not cont:
+        return fallback
+    action, _ = _choice(ans or {}, "action", {"FETCH", "REFINE", "REVIEW"})
+    if not action:
+        # A continuation without a usable action still needs one; never invent
+        # FETCH for an insufficient result.
+        action = "FETCH" if cont == "sufficient" else fallback["action"]
+    return {"continuation": cont, "action": action, "provider": "jev",
+            "confidence": round(c_conf, 3),
+            "fallback": fallback["continuation"]}
+
+
 async def coverage_gate(valid: int, requested: int, missing_fields: list | None = None) -> dict:
+    """Legacy alias. Kept for callers outside this package; nothing in `app/`
+    uses it, and `FINALIZE`/`CONTINUE` are not decisions the supervisor makes."""
     r = await research_continuation(valid, requested, missing_fields)
     legacy = "FINALIZE" if r["continuation"] == "sufficient" else (
         "REFINE" if r["action"] == "REFINE" else "CONTINUE")
     return {"decision": legacy, "continuation": r["continuation"], "provider": r["provider"]}
-
-
-async def decide_record(record: dict, question: str = "Should this record pass?") -> dict:
-    _ = question
-    fields = record.get("fields", {})
-    if any(isinstance(v, dict) and v.get("verification_status") == "unverified"
-           for v in fields.values()):
-        return {"decision": "review", "score": 0.5, "provider": "deterministic"}
-    return {"decision": "accept", "score": 0.9, "provider": "deterministic"}

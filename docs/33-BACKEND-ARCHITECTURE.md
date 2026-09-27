@@ -1,6 +1,6 @@
 # 33 — COMPLETE BACKEND ARCHITECTURE (lean freeze: GENERATE→ORCHESTRATE→JUDGE→EXECUTE→PROVE)
 
-MVP = 12 (FastAPI, Supabase, Gemini, Groq, Instructor+Pydantic, Tavily, HTTPX, Trafilatura+BS4, Crawl4AI, LangGraph, Jev, RapidFuzz). Later adapters dotted, never in MVP path. No stealth/proxy/bypass ever.
+MVP = 12 (FastAPI, Postgres, Gemini, Groq, Instructor+Pydantic, Tavily, HTTPX, Trafilatura+BS4, Crawl4AI, LangGraph, Jev, RapidFuzz). Later adapters dotted, never in MVP path. No stealth/proxy/bypass ever.
 
 ## 1. Full backend drawing (mermaid — copy into any mermaid renderer)
 
@@ -105,18 +105,19 @@ flowchart TB
 
 | Layer | Files |
 |---|---|
-| API | `backend/app/main.py` (11 endpoints + SSE EventSourceResponse ping 15) |
-| Config/constants | `core/config.py` (caps 5/5/15/2, 50/5/20s/2), `core/constants.py` (11 states, 14 events), `core/logging.py` |
+| API | `backend/app/main.py` (13 endpoints + SSE EventSourceResponse ping 15) |
+| Config/constants | `core/config.py` (caps: RUN_MAX_PAGES 12, RUN_MAX_DEPTH 2, EXTRACT_PAGE_CONCURRENCY 3, RUN_MAX_JUDGE_CALLS 400, RUN_MAX_RUNTIME_S, FETCH_* timeouts), `core/constants.py` (11 RunStages, 13 emitted event types - see docs/16), `core/logging.py` |
 | Schemas | `schemas/plan.py` (WorkflowPlan/ProvenanceField/RunEvent mirror contracts), `schemas/base.py` (Search/PageFetcher/LLM/Dedup protocols) |
 | Planner/LLM | `providers/llm/generate.py` (Gemini→Groq fallback, identity stamps) + `providers/llm/langchain_client.py` (supervisor structured output seam) |
 | Planner | `services/planner.py` (Instructor `from_provider` + `response_model` + `max_retries` primary; direct-SDK second; marked fallback last) |
 | Discovery | `services/discovery.py` (run_id-stamped, Tavily include_domains from seed/allowed, drives `run_supervisor`) |
 | Triage/fetch | `services/source_router.py` (scheme allowlist; full SSRF in fetcher) + `providers/crawl/fetcher.py` (pooled httpx, robots cache+delay, per-host throttle, backoff, content-type guard, sha256 content_hash, same-host link extractor) + `services/crawler.py` (backoff-alternate-skip, depth<2 + per-domain + global budgets, progressive persist with hash) |
-| Agentic | `agents/state.py` (reducers incl. last_searched), `agents/decisions.py` (validated SupervisorDecision), `agents/tools.py` (6 shims), `agents/policies.py` (budgets), `agents/graph.py` (search→screen→decide→refine/fetch; compiled LangGraph w/ InMemorySaver+thread_id or identical manual stepping; no-progress exit) |
-| Decisions | `providers/decision/jev.py` (CORE 4 families + real `/v1/systemone` path + deterministic stubs) |
-| Pipeline | `services/reducer.py`, `services/extractor.py` (capped, envelope-validated), `services/validator.py` (RecordRow-guarded wrap), `services/normalizer.py`, `services/deduper.py` (L1→L2, rivals preserved, `adjudicate_conflicts` JUDGE step), `services/provenance.py`, `services/exporter.py` (caps, CSV-injection guard), `services/runner.py` (JUDGE block emits stats, runtime-capped, cancel-aware) |
-| DB | Supabase tables per §DB above (sources now carry content_hash; exports rows written per download) + `local_repo.py` dev mirror; in-memory dicts in main.py = Day-1 swap target |
+| Agentic | `agents/state.py` (reducers incl. last_searched), `agents/decisions.py` (validated SupervisorDecision), `agents/tools.py` (DEAD CODE - no production importer), `agents/policies.py` (budgets), `agents/graph.py` (search→screen→decide→refine/fetch; compiled LangGraph w/ InMemorySaver+thread_id or identical manual stepping; no-progress exit) |
+| Decisions | `providers/decision/jev.py` (CORE 4 families + real `/v1/systemone` path + deterministic stubs; free Zen `jev-1.13-free` tried before the paid OpenRouter rung) |
+| Free LLM fan-out | `providers/llm/zen.py` (curated 10 text + 1 decision registry; direct Zen REST for the one ungated model, OpenCode for the nine the policy gates, `/systemone` for Jev) + `providers/llm/opencode.py` (1.18.32 wire protocol: `POST /session` → `POST /session/{id}/message`, model in the body, synchronous; exclusive-checkout session pool; a shared session cross-served concurrent callers) + `providers/llm/classify.py` (shared transient/fatal) + `services/fanout.py` (bounded concurrency, per-model isolation, semantic-keyed agreement clusters) — see §23-ENVIRONMENT |
+| Pipeline | `services/reducer.py` (`page_evidence_text`: the one definition of quotable text, shared with the store), `services/extractor.py` (capped, envelope-validated, chunks AND pages concurrent), `services/validator.py` (required+type enforced, records DROPPED not annotated, `judgment_unavailable` when no judge ruled), `services/normalizer.py`, `services/deduper.py` (L1→L2, rivals preserved, `adjudicate_conflicts` JUDGE step), `services/provenance.py`, `services/exporter.py` (caps, CSV-injection guard), `services/runner.py` (runtime budget checked per stage AND per page; records published per page so a timeout keeps them; JUDGE emits stats; cancel-aware) |
+| DB | `repositories/postgres_repo.py` (psycopg against `DATABASE_URL`; one COPY for records, atomic finalize) + `local_repo.py` JSONL as **explicit** `PERSISTENCE=local` opt-in; adapter reported by `/api/health`. Tables per 14-DATABASE-SCHEMA. |
 
 ## 3. Runtime path (one run)
 
-compile → plan → POST /runs → DISCOVERING (Tavily ≤5q, triage each URL, Jev-A screens pre-fetch) → FETCHING (MVP http→crawl4ai; Later +docling/jina/browser) → REDUCING → EXTRACTING (LLM+quotes) → JUDGE (Jev-B evidence, Jev-C conflicts) → VALIDATING (guard+policy → verified/unverified/conflicting) → Jev-D continuation inside supervisor loop (≤3 iters) → NORMALIZE → DEDUPLICATING (L1/L2 STOP; L3 Later) → FINALIZING (persist + counts attempted/successful/failed) → COMPLETED/FAILED/CANCELLED. Every step emits SSE; cancel preserves partial; all-fail → FAILED, some-fail → partial.
+Every step emits SSE. A budget-stopped run stores what it already validated and reports PARTIAL (run row FAILED + partial=true); all-fail -> FAILED. A run is never COMPLETED with missing work, and 'partial kept' is never reported when nothing was kept.

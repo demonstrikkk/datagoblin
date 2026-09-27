@@ -4,6 +4,7 @@ import New from './routes/New.jsx';
 import Run from './routes/Run.jsx';
 import Dataset from './routes/Dataset.jsx';
 import History from './routes/History.jsx';
+import Intel from './routes/Intel.jsx';
 
 function Sidebar() {
   const link = ({ isActive }) =>
@@ -17,6 +18,7 @@ function Sidebar() {
       </div>
       <nav className="flex flex-col gap-1">
         <NavLink to="/" end className={link}><span aria-hidden>+</span> New collection</NavLink>
+        <NavLink to="/intel" className={link}><span aria-hidden>?</span> Intel</NavLink>
         <NavLink to="/history" className={link}><span aria-hidden>◷</span> Runs</NavLink>
       </nav>
       <div className="mt-auto space-y-4 pt-6">
@@ -46,6 +48,7 @@ export default function App() {
             <p className="font-display text-xl font-bold">Fieldwork</p>
             <nav className="flex gap-4 text-sm">
               <NavLink to="/">New</NavLink>
+              <NavLink to="/intel">Intel</NavLink>
               <NavLink to="/history">Runs</NavLink>
             </nav>
           </div>
@@ -55,6 +58,7 @@ export default function App() {
             <Route path="/runs/:id" element={<Run />} />
             <Route path="/datasets/:id" element={<Dataset />} />
             <Route path="/history" element={<History />} />
+            <Route path="/intel" element={<Intel />} />
           </Routes>
         </div>
       </div>

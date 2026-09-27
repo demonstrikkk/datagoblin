@@ -114,6 +114,33 @@ async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
         return None
 
 
+#: How many fields may be required at once. A record is dropped when a required
+#: field has no evidence, so a plan requiring everything guarantees an empty
+#: dataset. Two is enough to identify a record; the rest are enrichment.
+MAX_REQUIRED_FIELDS = 2
+
+
+def _cap_required(plan: dict) -> dict:
+    """Demote surplus equired\ flags, keeping the identifying ones.
+
+    Applied to every rung, LLM and rule-based alike, so a plan can never be
+    unpassable by construction. A measured run marked all 6 generated fields
+    required and the validation gate then dropped all 24 extracted records,
+    almost all of them solely for a missing \website\. An empty dataset is a
+    worse failure than a missing optional column.
+    """
+    fields = plan.get("fields") or []
+    required = [f for f in fields if f.get("required")]
+    if len(required) <= MAX_REQUIRED_FIELDS:
+        return plan
+    # Keep the first ones in declaration order: a planner lists the identifying
+    # attribute first in practice, and stable order beats guessing importance
+    # from the field name.
+    for f in required[MAX_REQUIRED_FIELDS:]:
+        f["required"] = False
+    return plan
+
+
 async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
     """Returns (plan_dict, provider). Raises E_VALIDATION on empty prompt."""
     if not (prompt or "").strip():
@@ -130,15 +157,27 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
             out = await llm(
                 "Convert to WorkflowPlan JSON {goal, entity, requested_count<=50, fields[{name snake_case, "
                 "type: string|number|boolean|date|array|url, description, required}], "
-                f"search_queries[1..5], dedupe_keys, max_pages<=15, allowed_sources[]}}. Prompt: {prompt[:2000]}",
+                f"search_queries[1..5], dedupe_keys, max_pages<=15, allowed_sources[]}}. Prompt: {prompt[:2000]}\n"
+                # A field is only required if EVERY page is expected to carry it
+                # with a quotable quote. Validation drops any record missing a
+                # required field, so marking all of them required makes a plan
+                # unpassable by construction: a live run marked 6 of 6 required
+                # and the gate then dropped all 24 extracted records, almost
+                # all for an absent `website`. Require the identifying field(s);
+                # leave enrichments optional.
+                "IMPORTANT: set required=true ONLY for the fields that identify "
+                "the record (typically the name/company/title). Set required=false "
+                "for enrichment fields like website, revenue, dates, counts, which "
+                "are frequently absent from a page. Never mark every field required.",
                 WorkflowPlan.model_json_schema())
             data = out.get("data", out) if isinstance(out, dict) else {}
             plan = WorkflowPlan(**data).model_dump()
-            return plan, out.get("provider", "llm") if isinstance(out, dict) else "llm"
+            return _cap_required(plan), (out.get("provider", "llm")
+                                         if isinstance(out, dict) else "llm")
         except Exception:
             pass  # fall through to rule-based compiler (honest, marked)
     try:
-        return WorkflowPlan(**_rule_plan(prompt)).model_dump(), "rule-based"
+        return _cap_required(WorkflowPlan(**_rule_plan(prompt)).model_dump()), "rule-based"
     except Exception:
         return _fallback_plan(prompt), "fallback"
 

@@ -5,6 +5,8 @@ chunk-parallel extract (bounded calls) -> deterministic merge -> ONE bounded
 regen when the tripwire says content exists but nothing extracted -> coerce to
 the ExtractionEnvelope contract. Empty list (never prose, never guesses).
 """
+import asyncio
+
 from app.core.config import settings
 from app.core.logging import log
 from app.schemas.evidence import (ExtractedRecord, coverage_tripwire,
@@ -53,25 +55,10 @@ def build_prompt(plan: dict, url: str, title: str, clean: str, part: str = "") -
 
 
 def media_block(page: dict, max_items: int = 30) -> str:
-    """Grounded media appendix: image alts + media URLs (binaries never fetched).
-
-    Appended to the clean text so alt text is quotable evidence exactly like
-    body copy. Empty string when the page carries no media.
-    """
-    images = page.get("images", []) or []
-    videos = page.get("videos", []) or []
-    if not images and not videos:
-        return ""
-    lines = ["", "Media on this page (URLs with alt text; binaries not fetched):"]
-    for img in images[:max_items]:
-        if isinstance(img, dict):
-            alt, src = str(img.get("alt", "") or "").strip(), str(img.get("src", ""))
-        else:
-            alt, src = "", str(img)
-        lines.append(f"- image: {alt} <{src}>" if alt else f"- image: <{src}>")
-    for v in videos[:max_items]:
-        lines.append(f"- video: <{str(v)}>")
-    return "\n".join(lines)
+    """Re-exported from reducer. It lives there so the evidence store and the
+    extractor build byte-identical text; see reducer.page_evidence_text."""
+    from app.services.reducer import media_block as _mb
+    return _mb(page, max_items)
 
 
 def split_chunks(clean: str, size: int = _CHUNK_CHARS,                 overlap: int = _CHUNK_OVERLAP,
@@ -202,31 +189,28 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
     "selectors:<domain>"); anything less falls through to the LLM path.
     """
     from app.services import selectors as selectors_svc
-    from app.services.reducer import reduce_html
+    from app.services.reducer import page_evidence_text, reduce_html
     dom_source = page.get("html", "") or page.get("rendered_html", "")
     if dom_source or page.get("markdown"):
         det_records, det_coverage, _debug = selectors_svc.deterministic_extract(plan, page)
         if det_records and det_coverage == "full":
             # Gate text spans both HTML-derived text (CSS quotes) and clean
             # markdown (regex quotes) so every evidence quote locates.
-            text = selectors_svc.page_text(dom_source)
-            clean_text = page.get("markdown") or reduce_html(dom_source)
-            source_text = (text + "\n" + clean_text).strip()
+            # Shared with the evidence store so a verified quote always
+            # resolves against the stored page.
+            source_text = page_evidence_text(page)
             for r in det_records:
                 r["source_text"] = source_text
                 r["source_title"] = page.get("title", "")
                 r["references"] = page.get("references", "")
+                r["page_id"] = page.get("page_id", "")
+                r["content_hash"] = page.get("content_hash", "")
             domain = selectors_svc.domain_of(page.get("url", ""))
             return det_records, f"selectors:{domain or 'unknown'}"
-    clean = (page.get("markdown") or reduce_html(page.get("html", ""))
-             or reduce_html(page.get("rendered_html", "")))
-    clean = (clean + media_block(page)).strip()
-    dom_html = page.get("html", "") or page.get("rendered_html", "")
-    if dom_html:
-        from app.services.reducer import extract_structured
-        structured = extract_structured(dom_html)
-        if structured["text"]:
-            clean = (clean + "\n\n" + structured["text"]).strip()
+    # The same text the evidence store persists, so every quote this page yields
+    # resolves against the stored copy. Built by one function precisely so the
+    # store and the extractor cannot drift apart again.
+    clean = page_evidence_text(page)
     if llm is None:
         return [], "none"
     fields = plan.get("fields", [])
@@ -237,14 +221,41 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
               else [c[:limit] for c in split_chunks(clean)][: _MAX_CHUNKS])
     provider = "llm"
     batches: list[list[dict]] = []
+
+    async def _one(i: int, chunk: str) -> tuple[list[dict], str]:
+        part = f"{i + 1}/{len(chunks)}" if len(chunks) > 1 else ""
+        recs, _, prov = await _call_llm(
+            llm, build_prompt(plan, page["url"], page.get("title", ""), chunk, part),
+            schema, page["url"])
+        return recs, prov
+
     try:
-        for i, chunk in enumerate(chunks):
-            part = f"{i + 1}/{len(chunks)}" if len(chunks) > 1 else ""
-            recs, _, prov = await _call_llm(
-                llm, build_prompt(plan, page["url"], page.get("title", ""), chunk, part),
-                schema, page["url"])
+        # Chunks are independent and the runner processes pages concurrently, so
+        # running them one after another made a page cost the SUM of its chunk
+        # calls: measured, 4 chunks x ~50s exceeded EXTRACT_PAGE_TIMEOUT_S and
+        # every one of 8 pages returned zero records with provider "timeout".
+        # gather keeps the wall cost at the SLOWEST chunk instead of the total.
+        # A failing chunk degrades to its own empty result rather than sinking
+        # the page, which is what the sequential loop's single try/except did.
+        results = await asyncio.gather(
+            *(_one(i, c) for i, c in enumerate(chunks)),
+            return_exceptions=True)
+        failed = 0
+        for item in results:
+            if isinstance(item, BaseException):
+                failed += 1
+                log.warning("extract chunk failed",
+                            extra={"data": {"url": page.get("url", "")[:200],
+                                            "error": str(item)[:200]}})
+                continue
+            recs, prov = item
             provider = prov
             batches.append(recs)
+        # Every chunk failing is a broken call, not an empty page. Saying
+        # "no records here" for a provider error would report a fetchable page
+        # as genuinely devoid of the requested entities.
+        if chunks and failed == len(chunks):
+            return [], "error"
     except Exception as e:  # noqa: BLE001 (cause logged; caller sees ([], "error"))
         log.warning("extract chunks failed",
                     extra={"data": {"url": page.get("url", "")[:200],
@@ -272,4 +283,6 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
         r["source_text"] = clean
         r["source_title"] = page.get("title", "")
         r["references"] = page.get("references", "")
+        r["page_id"] = page.get("page_id", "")
+        r["content_hash"] = page.get("content_hash", "")
     return records, provider

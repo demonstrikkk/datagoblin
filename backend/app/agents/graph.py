@@ -18,18 +18,34 @@ from app.core.config import settings
 
 
 async def supervisor_step(state: dict, llm_strategy: Any, jev_continuation: Any) -> SupervisorDecision:
-    """Jev-D judgment first (cheap); LangChain schema-enforced strategy, then raw
-    llm_strategy fallback; deterministic break when nothing usable returns.
+    """Jev-D coverage judgement first; then the LangChain schema-enforced strategy,
+    then a raw llm_strategy fallback, then a deterministic break.
 
     Strict reader mode: the LangChain cloud rung (Groq/Gemini) never fires —
     llm_strategy (opencode) decides directly, so supervisor iterations cannot
-    burn cloud quota either."""
+    burn cloud quota either.
+
+    Jev judges coverage and says whether more searching could plausibly help;
+    it does not choose the next queries. That stays with the strategy model, and
+    when neither is usable the deterministic policy breaks the loop rather than
+    spinning to the iteration cap."""
     j = await jev_continuation(state.get("valid_count", 0),
                                max(1, state.get("requested_count", 20)),
-                               state.get("missing_fields", []))
+                               state.get("missing_fields", []),
+                               evidence_summary=state.get("evidence_summary", ""),
+                               rounds_used=int(state.get("iteration", 0) or 0),
+                               max_rounds=int(state.get("max_iterations", 0) or 0))
     if j.get("continuation") == "sufficient":
-        return SupervisorDecision(decision="FETCH", reason="coverage sufficient",
+        return SupervisorDecision(decision="FETCH",
+                                  reason=f"coverage sufficient ({j.get('provider', '?')})",
                                   missing_coverage=[], next_queries=[], confidence=0.9)
+    if j.get("action") == "REVIEW":
+        # A judged dead end. Surfacing it beats burning the remaining rounds on
+        # searches the judge expects to find nothing.
+        return SupervisorDecision(decision="FETCH",
+                                  reason=f"stop and surface the coverage gap: {j.get('continuation')}",
+                                  missing_coverage=list(state.get("missing_fields", [])),
+                                  next_queries=[], confidence=0.6)
     prompt = (f"Goal: {state.get('goal','')}. Valid {state.get('valid_count',0)}/"
               f"{state.get('requested_count',20)}. Searched: {state.get('searched_queries',[])}. "
               f"Missing: {state.get('missing_fields',[])}. "
@@ -129,17 +145,44 @@ async def screen_node(state: dict, deps: Any) -> dict:
     return {"screened_urls": done, "accepted_sources": accepted}
 
 
+def _coverage_summary(state: dict) -> str:
+    """What discovery actually knows, in one string, for the coverage judge.
+
+    The judge was called with `valid_count` and `missing_fields`, neither of
+    which any node has ever written - so it was always asked about 0 valid
+    records out of 20 while holding no information at all. Records are not
+    extracted until after this loop, so the honest signal here is source
+    coverage, not record counts.
+    """
+    accepted = state.get("accepted_sources", []) or []
+    tried = state.get("searched_queries", []) or []
+    cands = state.get("candidate_urls", []) or []
+    titles = [str(s.get("title", "")).strip() for s in accepted[:12]
+              if str(s.get("title", "")).strip()]
+    bits = [
+        f"Search rounds completed: {int(state.get('iteration', 0) or 0)}",
+        f"Queries run: {len(tried)}",
+        f"Candidate URLs seen: {len(cands)}",
+        f"Sources accepted for fetching: {len(accepted)}",
+    ]
+    if titles:
+        bits.append("Accepted source titles: " + "; ".join(titles)[:800])
+    return "\n".join(bits)
+
+
 async def decide_node(state: dict, deps: Any) -> dict:
     """supervisor_step judgment -> validated decision fields. No fresh queries and
     no new ones proposed => FETCH (refining with nothing to search is waste)."""
     dec = await supervisor_step(state, deps.llm_strategy, deps.jev_continuation)
-    update: dict = {"decision": dec.decision, "decision_reason": dec.reason[:500]}
+    update: dict = {"decision": dec.decision, "decision_reason": dec.reason[:500],
+                    "evidence_summary": _coverage_summary(state)}
     if dec.decision == "REFINE_SEARCH" and dec.next_queries:
         update["queries"] = list(dec.next_queries)
     if update["decision"] == "REFINE_SEARCH" and not update.get("queries"):
         tried = set(state.get("searched_queries", []))
         if not [q for q in state.get("queries", []) if q not in tried]:
-            update = {"decision": "FETCH", "decision_reason": "no fresh queries; proceed"}
+            update = {"decision": "FETCH", "decision_reason": "no fresh queries; proceed",
+                      "evidence_summary": _coverage_summary(state)}
     return update
 
 

@@ -31,8 +31,71 @@ class LocalRepo:
         self._append("runs", {"id": run_id, "workflow_id": workflow_id,
                               "status": "DISCOVERING", "plan": plan})
 
+    def save_plan(self, plan_id: str, plan: dict) -> None:
+        self._append("plans", {"id": plan_id, "plan": plan})
+
+    def get_plan(self, plan_id: str) -> dict | None:
+        rows = [r for r in self._scan("plans") if r.get("id") == plan_id]
+        return (rows[-1].get("plan") if rows else None) or None
+
+    def update_run(self, run_id: str, *, status: str | None = None,
+                   stage: str | None = None, progress: int | None = None,
+                   partial: bool | None = None, error: str | None = None,
+                   stats: dict | None = None, terminal: bool = False) -> None:
+        """Advance run state.
+
+        Append-only JSONL has no UPDATE, so this writes a new line and reads
+        the last one per id. That is also how status finally becomes truthful
+        here: this adapter previously had no status write at all, so a
+        completed run reported DISCOVERING forever.
+        """
+        prev = self.get_run(run_id) or {}
+        row = {"id": run_id,
+               "workflow_id": prev.get("workflow_id", ""),
+               "status": status if status is not None else prev.get("status", "DISCOVERING"),
+               "current_stage": stage if stage is not None else prev.get("current_stage", ""),
+               "progress": progress if progress is not None else prev.get("progress", 0),
+               "partial": partial if partial is not None else prev.get("partial", False),
+               "error": error if error is not None else prev.get("error", ""),
+               "stats": stats if stats is not None else prev.get("stats", {}),
+               "plan": prev.get("plan", {})}
+        if terminal:
+            row["completed_at"] = (datetime.datetime.utcnow().isoformat() + "Z")
+        self._append("runs", row)
+
     def upsert_source(self, run_id: str, source: dict) -> None:
         self._append("sources", {"run_id": run_id, **source})
+
+    def upsert_page(self, run_id: str, page: dict) -> str:
+        """Store the evidence. Returns the page id records cite.
+
+        Mirrors PostgresRepo: markdown is the reduced text the LLM saw, so
+        quotes and offsets resolve against it; raw_html is the snapshot.
+        """
+        prev = [p for p in self._scan("pages")
+                if p.get("run_id") == run_id and p.get("url") == page.get("url", "")]
+        pid = (prev[-1]["id"] if prev else None) or page.get("page_id") or str(uuid.uuid4())
+        self._append("pages", {"id": pid, "run_id": run_id,
+                               "url": page.get("url", ""),
+                               "final_url": page.get("final_url", ""),
+                               "parent_url": page.get("parent_url", ""),
+                               "depth": int(page.get("depth", 0) or 0),
+                               "method": page.get("method", ""),
+                               "status": page.get("status", "ok"),
+                               "error": page.get("error", ""),
+                               "content_hash": page.get("content_hash", ""),
+                               "markdown": page.get("markdown", ""),
+                               "raw_html": page.get("raw_html", ""),
+                               "snapshot_chars": int(page.get("snapshot_chars", 0) or 0)})
+        return pid
+
+    def get_pages(self, run_id: str, limit: int = 200) -> list[dict]:
+        rows = [p for p in self._scan("pages") if p.get("run_id") == run_id]
+        return rows[-max(1, min(int(limit), 500)):]
+
+    def get_page(self, page_id: str) -> dict | None:
+        rows = [p for p in self._scan("pages") if p.get("id") == page_id]
+        return rows[-1] if rows else None
 
     def append_event(self, run_id: str, event: dict) -> None:
         self._append("events", {"run_id": run_id, **event})
@@ -42,6 +105,15 @@ class LocalRepo:
         self._append("datasets", {"id": did, "run_id": run_id, "name": plan.get("goal", ""),
                                   "schema": plan.get("fields", []), "records": rows,
                                   "counts": counts})
+        # Without this the run stayed DISCOVERING forever in local mode: reads
+        # take the last line per id, and nothing ever wrote a terminal one.
+        # A budget-limited run is FAILED + partial, never COMPLETED.
+        partial = bool(counts.get("partial"))
+        self.update_run(run_id, status="FAILED" if partial else "COMPLETED",
+                        stage="FAILED" if partial else "COMPLETED", progress=100,
+                        partial=partial,
+                        error=str(counts.get("partial_reason", ""))[:500],
+                        stats={"counts": counts, "records": len(rows)}, terminal=True)
         return did
 
     # -- reads (scan jsonl; dev-scale only) -----------------------------------

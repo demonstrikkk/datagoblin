@@ -141,3 +141,76 @@ impersonation rung (allowlist empty = inert); politeness/stats; selectors +
 001/002; db_* scripts; bench script; all 143 tests; `jina_fetch`,
 `langchain_client`, `file_fetch` (gated/dormant-by-design adapters with live
 dispatch paths, not dead code).
+
+---
+
+# ADDENDUM — corrections, measured 2026-09-27
+
+This audit was accurate about the repo it inspected. Several of its conclusions
+are now **wrong**, because the code they described has been fixed or replaced.
+Corrections first, so nobody acts on a stale verdict.
+
+## R1 — `jina_fetch` was called "live … not dead code" (was: line 141-143)
+
+**Wrong.** `jina_fetch` is complete and gated, but `"jina"` is absent from the
+crawl order table in `services/crawler.py`, and `method` is only ever drawn from
+that table. No dispatch can select it. The `JINA_API_KEY` in `.env` is unused.
+The audit counted the presence of a `if method == "jina"` branch as a live path;
+the branch is unreachable.
+
+## R2 — `FEATURE_DOCLING/JINA/SEMANTIC_DEDUP` are "live gates - KEEP" (line 76)
+
+**Half wrong.**
+- `FEATURE_JINA` gates a real function that nothing can reach (R1).
+- `FEATURE_DOCLING` is read by **nothing** in executable code. Its only mention
+  is a comment string in the order table. `docling.py` has zero callers, so
+  PDF/JSON sources are **always skipped**.
+- `FEATURE_SEMANTIC_DEDUP` is not a gate but a **kill-switch**: setting it
+  `true` raises on purpose, before any merge work.
+
+## R3 — dead budget settings were not listed (line 73 area)
+
+Three settings documented in `docs/09-CRAWLING-POLICY.md` as hard limits have
+**zero readers** anywhere in `app/`:
+
+- `RUN_MAX_REQUESTS`
+- `RUN_MAX_PAGES_PER_SOURCE`
+- `RUN_MAX_SEARCH_QUERIES` (the live budget is `SUPERVISOR_MAX_QUERIES`)
+
+`docs/09` has been corrected; see its "Hard limits — corrected" table.
+
+## R4 — `DATABASE_URL` was dead; the app wrote JSONL (undocumented)
+
+The audit flagged `QDRANT_*`, `DB_POOL_*`, `LANGSMITH_*` as unused but **missed
+the largest one**: `DATABASE_URL` was never read by `app/` at all. With
+`SUPABASE_URL`/`SUPABASE_KEY` empty, `build_repo()` silently selected
+`LocalRepo`, so the app wrote 379KB of JSONL while a fully migrated, empty
+Postgres sat unused with nothing reporting it.
+
+`SupabaseRepo` has since been **deleted** and replaced by
+`PostgresRepo` (psycopg against `DATABASE_URL`). `PERSISTENCE` is now explicit
+and reported by `GET /api/health`; the silent fallback is gone.
+
+## R5 — `RAG/vector` status was correct and is still correct
+
+`QDRANT_*` remain read by nothing. There is no embedding provider. Semantic
+dedup is an explicit fail-fast stub. This audit was right.
+
+## R6 — the "143 tests" line
+
+The suite is now 361 tests, including regression coverage for every defect
+above. The count itself is not interesting; the point is that the three worst
+bugs had the same shape — **a check that could not fail was reported as a
+pass** — and the new tests assert the *absence* of false claims (no event type
+emitted but undeclared, no "verified" without a verdict, no declared type
+nothing sends).
+
+## Still open from this audit
+
+- `.env` is committed-readable with live secrets; `.gitignore` is proposed, not
+  present. **Largest outstanding risk.**
+- No frontend browser tests.
+- `run_events` has no `type` column, so the persisted audit trail cannot
+  distinguish event kinds after the fact.
+- `REDUCING` / `FINALIZING` stages are declared in the enum and the transition
+  table but never emitted.

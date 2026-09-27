@@ -25,3 +25,7 @@ class ResearchState(TypedDict):
     attempted: int
     decision: str
     decision_reason: str
+    #: What discovery knows, rendered for the coverage judge. Without it the
+    #: judge was asked about 0 valid records out of 20 and told nothing else,
+    #: so it had no basis beyond a count it could not influence.
+    evidence_summary: str

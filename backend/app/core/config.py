@@ -4,6 +4,8 @@ Fail-fast: `require()` raises named errors for absent secrets at first use.
 Bounds are enforced here so hot paths never parse or trust env.
 No module outside core may call os.getenv directly.
 """
+from typing import Literal
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,8 +21,14 @@ class Settings(BaseSettings):
     VITE_API_URL: str = "http://localhost:8000"
     API_KEY: str = ""
 
-    # Supabase / DB
+    # Persistence
+    # Which store the app writes to. Previously inferred from whether Supabase
+    # keys were present, which silently downgraded to JSONL and left a migrated
+    # Postgres unused. `postgres` is now the default whenever DATABASE_URL is
+    # set; `local` is the explicit opt-in for the JSONL dev store.
+    PERSISTENCE: Literal["postgres", "local"] = "postgres"
     DATABASE_URL: str = ""
+    # Retained for the REST client's benefit only; the app reads DATABASE_URL.
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
     DB_POOL_MIN: int = Field(default=1, ge=1, le=10)
@@ -47,6 +55,10 @@ class Settings(BaseSettings):
     OPENCODE_BASE_URL: str = "http://127.0.0.1:4096"
     OPENCODE_PASSWORD: str = ""
     OPENCODE_MODEL: str = ""
+    # Provider id the server expects in the per-message model pin. Zen models
+    # are addressed as opencode/<model-id> in opencode config and
+    # {"providerID": "opencode", "modelID": "<id>"} on the wire.
+    OPENCODE_PROVIDER_ID: str = "opencode"
     # Strict reader mode: opencode is THE reader — its failure raises instead
     # of billing cloud fallbacks. Use with a pinned free Zen model
     # (e.g. opencode/muse-spark-1.3-contributor-free). False = cascade.
@@ -55,6 +67,26 @@ class Settings(BaseSettings):
     OPENCODE_TIMEOUT_S: int = Field(default=240, ge=30, le=1200)
     LLM_TIMEOUT_S: int = Field(default=60, ge=5, le=300)
     LLM_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
+
+    # --- OpenCode Zen: one key, the whole model gateway --------------------
+    # Zen serves OpenAI/Anthropic/Google-shaped REST under /zen/v1. Free-tier
+    # models are gated: 7 of the 9 answer 403 FreeTierError ("can only be used
+    # from within OpenCode") on direct REST, so those ride the local server
+    # (OPENCODE_* above) while ungated ones are called straight from here.
+    ZEN_ENABLED: bool = True
+    ZEN_API_KEY: str = ""
+    ZEN_BASE_URL: str = "https://opencode.ai/zen/v1"
+    ZEN_MODEL: str = "space-bunny-free"
+    ZEN_TIMEOUT_S: int = Field(default=120, ge=10, le=600)
+    ZEN_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
+    ZEN_MAX_TOKENS: int = Field(default=4000, ge=64, le=64000)
+    # Fan-out: ask N free models the same question, compare their answers.
+    ZEN_FANOUT_CONCURRENCY: int = Field(default=4, ge=1, le=16)
+    # Empty = the built-in free set (see providers/llm/zen.py FREE_MODELS).
+    ZEN_FANOUT_MODELS: str = ""
+    # Also try Zen's free Jev before the paid OpenRouter judge.
+    ZEN_JEV_ENABLED: bool = True
+    JEV_ZEN_MODEL: str = "jev-1.13-free"
 
     # Fetch
     FETCH_HTTP_TIMEOUT_S: int = Field(default=20, ge=1, le=120)
@@ -96,6 +128,20 @@ class Settings(BaseSettings):
     # back-to-back page calls stall in queue and die at EXTRACT_PAGE_TIMEOUT_S.
     # A short breath between pages keeps calls under the limit (6 RPM at 10s).
     EXTRACT_PAGE_SPACING_S: int = Field(default=10, ge=0, le=120)
+    # How many pages may be extracted at once. Pages used to be extracted
+    # strictly one after another, so a run's extraction cost was the SUM of
+    # every page's LLM latency and 8 pages could not finish inside the runtime
+    # budget however much was already done. Kept low deliberately: the free tier
+    # is rate limited, and the transport retries 429s, but inviting a storm to
+    # save wall time is a bad trade.
+    EXTRACT_PAGE_CONCURRENCY: int = Field(default=3, ge=1, le=8)
+    # Hard ceiling on judge calls per run. Verification asks a judge about every
+    # field of every extracted record, and that count is a function of how much
+    # the extractor found: a live run reached 728 records, which is thousands of
+    # round trips and a guaranteed budget overrun. Past the cap, fields are
+    # reported `judgment_unavailable` - kept, but never counted as verified.
+    # 0 = unlimited.
+    RUN_MAX_JUDGE_CALLS: int = Field(default=400, ge=0, le=100000)
     # Phase-5 metering: per-run credit budget. 0 = unlimited (record-only).
     RUN_CREDIT_BUDGET: int = Field(default=0, ge=0, le=100000)
     SUPERVISOR_MAX_ITERATIONS: int = Field(default=3, ge=1, le=5)

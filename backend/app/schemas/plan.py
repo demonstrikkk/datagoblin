@@ -3,7 +3,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 FieldType = Literal["string","number","boolean","date","array","url"]
-Verification = Literal["verified","unverified","conflicting"]
+#: `judgment_unavailable` is deliberately distinct from `verified`. It means the
+#: quote was found in the page but no judge was reachable to rule on it, which
+#: used to be reported as `verified` and inflated every verification summary.
+Verification = Literal["verified", "unverified", "conflicting", "judgment_unavailable"]
 
 
 class FieldSpec(BaseModel):
@@ -39,6 +42,11 @@ class SourceRef(BaseModel):
     reference_id: str = ""  # <n> citation marker from Crawl4AI references
     start: int | None = None  # char offset of quote in the preserved source text
     end: int | None = None
+    # The stored page this claim came from. `start`/`end` above are only
+    # meaningful against text that still exists; this is how a reader gets to
+    # it. Empty when the run stored no evidence (probe/tests, no repo method).
+    page_id: str = ""
+    content_hash: str = ""  # re-fetch and confirm the page has not changed
 
 
 class ProvenanceField(BaseModel):
