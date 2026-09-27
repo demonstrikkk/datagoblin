@@ -63,7 +63,44 @@ def _methods_for(route: str, url: str) -> tuple[str, ...]:
 
 
 def _domain(url: str) -> str:
-    return (urlparse(url).hostname or "").lower()
+    """Registrable-ish host for per-domain caps and round-robin.
+
+    A leading `www.` is stripped because it is a DNS convention, not a
+    different site: one run spent fifteen candidate slots on `csr.gov.in` as
+    `http://`, `https://`, `www.`, trailing-slash and query-string variants,
+    each counting as its own domain against the per-domain cap.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def canonical_url(url: str) -> str:
+    """The URL as the *server* sees it: no fragment, no HTML entities.
+
+    A fragment is resolved by the browser, never sent to the server, so
+    `page`, `page#/about-us`, `page#/login` and `page#/` are one resource.
+    Treating them as distinct wasted a whole page budget on a single document:
+    one live run stored five "pages" that were byte-identical copies of the
+    same 7,915-character response, 80% of its budget, and extracted nothing
+    because four of the five were the same nav-only page.
+
+    `&amp;` is also decoded: it arrives as a literal entity from scraped HTML,
+    and `?a=1&amp;b=2` is a different key to the server than `?a=1&b=2`.
+
+    The query string is preserved — it genuinely selects content. Only the
+    fragment is dropped.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    raw = raw.replace("&amp;", "&").replace("&#38;", "&")
+    try:
+        p = urlparse(raw)
+    except ValueError:
+        return raw.split("#", 1)[0]
+    if not p.netloc:
+        return raw.split("#", 1)[0]
+    return p._replace(fragment="").geturl()
 
 
 def _plan_domains(plan: dict) -> list[str]:
@@ -243,11 +280,21 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     ok = fail = skipped = 0
     seen: set[str] = set()
     domain_count: dict[str, int] = {}
-    queue: list[tuple[dict, int]] = [(u, 0) for u in urls]
+    # Seeds are canonicalised on entry so a seeded fragment variant cannot
+    # spend a slot the base URL already occupies.
+    queue: list[tuple[dict, int]] = [
+        ({**u, "url": canonical_url(u.get("url", ""))}, 0)
+        for u in urls if canonical_url(u.get("url", ""))
+    ]
 
     async def _settle(item: dict, depth: int) -> None:
         nonlocal ok, fail, skipped
-        url = item["url"]
+        # Canonical before anything keys off the URL: the seen set, the
+        # per-domain cap, the stored row and the crawl all agree on one
+        # identity per resource.
+        url = canonical_url(item.get("url", ""))
+        if not url:
+            return
         dom = _domain(url)
         if depth > 0 and domain_count.get(dom, 0) >= per_domain_cap:
             return  # traversal cap (seeds always allowed); uncounted, unpersisted
@@ -328,7 +375,12 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         # levels below the seeds.
         if depth < max_depth:
             for link in _child_links(page):
-                if link not in seen and traversal_allowed(link, plan):
+                # Canonical before the seen check: a client-side route such as
+                # `/#/login` is the same document as the page we are on, and
+                # following it costs a fetch and a budget slot for a byte-
+                # identical response.
+                link = canonical_url(link)
+                if link and link not in seen and traversal_allowed(link, plan):
                     queue.append(({"url": link, "title": "",
                                    "parent_url": url}, depth + 1))
                 if len(queue) >= budget + 100:
@@ -346,8 +398,13 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             pick: tuple[dict, int] | None = None
             if queue and ok + fail + skipped + in_flight < budget:
                 item, depth = queue.pop(_pick_index(queue, settled))
-                if item["url"] not in seen:
-                    seen.add(item["url"])
+                # Claimed on the canonical form, matching the key traversal
+                # checks and the key `_settle` persists under. Keying the
+                # claim on the raw URL would let a fragment variant through
+                # both checks and spend a slot on the same document.
+                key = canonical_url(item["url"])
+                if key and key not in seen:
+                    seen.add(key)
                     in_flight += 1
                     pick = (item, depth)
             if pick is None:

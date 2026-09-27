@@ -148,11 +148,35 @@ def parse_llm_json(text: str) -> Any:
     raise ValueError(f"LLM returned non-JSON output: {str(last)[:120]}")
 
 
+def _norm_with_map(src: str) -> tuple[str, list[int]]:
+    """Whitespace-collapsed `src` plus, for each collapsed char, its index in
+    the original. Needed because the verification gate matches quotes with
+    whitespace collapsed, so the locator has to agree with it."""
+    out: list[str] = []
+    idx: list[int] = []
+    prev_space = True  # also collapses a leading run
+    for i, ch in enumerate(src):
+        if ch.isspace():
+            if not prev_space:
+                out.append(" ")
+                idx.append(i)
+            prev_space = True
+        else:
+            out.append(ch)
+            idx.append(i)
+            prev_space = False
+    return "".join(out), idx
+
+
 def locate_quote(quote: str, source_text: str) -> tuple[int | None, int | None]:
     """Character offsets of quote within source_text, or (None, None).
 
-    Exact match first, then case-insensitive. Offsets pin the evidence to the
-    preserved source text — the machine-checkable half of the proof chain.
+    Exact match first, then case-insensitive, then whitespace-collapsed. The
+    third pass exists because the verification gate matches a quote against the
+    source with whitespace collapsed - a quote the model emitted as one line
+    matches a span laid out over several. The gate and the locator must agree,
+    or a field is admitted as verified and then handed offsets of (None, None),
+    which makes the citation unusable. Offsets address the ORIGINAL text.
     """
     q = quote or ""
     src = source_text or ""
@@ -164,4 +188,15 @@ def locate_quote(quote: str, source_text: str) -> tuple[int | None, int | None]:
     low = src.lower().find(q.lower())
     if low >= 0:
         return low, low + len(q)
-    return None, None
+    # Whitespace-collapsed search, mapped back to original offsets.
+    nq = " ".join(q.split())
+    if not nq:
+        return None, None
+    norm_src, imap = _norm_with_map(src.lower())
+    npos = norm_src.find(nq.lower())
+    if npos < 0 or not imap:
+        return None, None
+    s_idx = imap[npos]
+    e_pos = npos + len(nq) - 1
+    e_idx = imap[min(e_pos, len(imap) - 1)]
+    return s_idx, e_idx + 1

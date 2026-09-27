@@ -29,3 +29,12 @@ class ResearchState(TypedDict):
     #: judge was asked about 0 valid records out of 20 and told nothing else,
     #: so it had no basis beyond a count it could not influence.
     evidence_summary: str
+    #: Hosts rejected by the robots gate or the per-domain cap. Fed back into
+    #: search as -site: exclusions so a re-query surfaces secondary sources
+    #: instead of the same blocked official portal.
+    blocked_domains: list[str]
+    #: Re-queries spent so far, bounded by DISCOVERY_MAX_REQUERIES.
+    requery_count: int
+    #: Terminal signal: every candidate was blocked or filtered and the
+    #: re-query budget is spent, so the run stops instead of looping.
+    all_blocked: bool

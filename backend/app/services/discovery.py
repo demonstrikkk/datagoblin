@@ -11,6 +11,8 @@ from typing import Any
 
 from app.agents.graph import run_supervisor
 from app.core.config import settings
+from app.core.logging import log
+from app.providers.crawl import fetcher
 from app.providers.decision import jev
 from app.services.source_router import triage_source
 
@@ -59,11 +61,36 @@ async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any)
         except Exception:
             raise  # transient: propagate for bounded loop-level retry
 
+    async def _robots_ok(url: str) -> bool:
+        """Is this URL crawlable at all? Cached per host for 1h by the fetcher.
+
+        Checked during discovery rather than at fetch time, because a candidate
+        we may not crawl is dead on arrival: one live run accepted two sources,
+        both `robots-disallowed`, spent the whole budget, and returned 0 records
+        with nothing to backfill from. Screening them here frees the slot for
+        the next candidate instead.
+
+        Placed BEFORE the Jev-A screen deliberately - the robots cache makes it
+        nearly free, while a judge call is a real round trip to spend on a URL
+        that was never going to be fetched.
+        """
+        getter = getattr(fetcher, "robots_allowed", None)
+        if not callable(getter):
+            return True  # no gate available => do not block the run
+        try:
+            allowed, _delay = await getter(url)
+            return bool(allowed)
+        except Exception as e:  # noqa: BLE001 (uncertain => allow; the fetch re-checks)
+            log.info("robots check failed; allowing for the fetch to re-check",
+                     extra={"data": {"url": url[:200], "error": str(e)[:120]}})
+            return True
+
     deps = SimpleNamespace(
         search_fn=_search_capped,
         llm_strategy=_llm_strategy,
         jev_screen=jev.source_screening,
         jev_continuation=jev.research_continuation,
+        robots_ok=_robots_ok,
         triage_fn=triage_source,
         include_domains=include_domains,
         exclude_domains=exclude_domains,
@@ -94,7 +121,24 @@ async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any)
                "last_searched": 1, "decision": "", "decision_reason": ""}
     final = await run_supervisor(initial, deps, run_id)
     accepted = list(final.get("accepted_sources", []))[:max_pages]
+    # Surfaced, not swallowed: "every candidate was blocked and we re-queried
+    # twice" is a materially different failure from "the web has nothing", and
+    # the two call for different responses from the user.
+    blocked = list(final.get("blocked_domains", []) or [])
+    if not accepted and blocked:
+        await emit({"type": "source.discovered", "run_id": run_id,
+                    "stage": "DISCOVERING",
+                    "message": (f"Found 0 sources: every candidate was blocked or "
+                                f"filtered ({len(blocked)} site(s): "
+                                f"{', '.join(blocked[:6])})"),
+                    "progress": 25, "timestamp": _now(),
+                    "data": {"count": 0, "blocked_domains": blocked[:50],
+                             "all_candidates_blocked_or_filtered": True,
+                             "requery_count": int(final.get("requery_count", 0) or 0)}})
+        return accepted
     await emit({"type": "source.discovered", "run_id": run_id,
                 "stage": "DISCOVERING", "message": f"Found {len(accepted)} sources",
-                "progress": 25, "timestamp": _now(), "data": {"count": len(accepted)}})
+                "progress": 25, "timestamp": _now(),
+                "data": {"count": len(accepted),
+                         "blocked_domains": blocked[:50]}})
     return accepted

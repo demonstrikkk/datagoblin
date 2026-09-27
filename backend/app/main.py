@@ -151,6 +151,9 @@ def _run_view(run_id: str) -> dict:
             # Whether this run finished everything. A PARTIAL run stored real
             # records but did not complete, and the flag is what says so.
             "partial": bool(r.get("partial", False)),
+            # Why a zero-record run found nothing. A bare "0 records" is
+            # indistinguishable from a broken app.
+            "no_yield_reason": r.get("no_yield_reason", ""),
             "error": r.get("error", "")}
 
 
@@ -253,10 +256,13 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
                         "records_needing_review": data.get("records_needing_review", 0),
                         "fields_verified": data.get("fields_verified", 0),
                         "fields_judgment_unavailable": data.get(
-                            "fields_judgment_unavailable", 0)}
+                            "fields_judgment_unavailable", 0),
+                        "fields_rate_limited": data.get("fields_rate_limited", 0)}
             if ev["type"] == "run.completed":
                 st.update(status="COMPLETED", dataset_id=data.get("dataset_id"),
-                          partial=False, counters=counters)
+                          partial=False,
+                          no_yield_reason=data.get("no_yield_reason", ""),
+                          counters=counters)
             elif ev["type"] == "run.partial":
                 # A budget-stopped run stores what it earned. It was not handled
                 # here, so a partial run sat at its initial status forever and
@@ -490,13 +496,18 @@ async def history(cid: str = Depends(correlation_id)) -> dict:
 
 @app.get("/api/health")
 async def health() -> dict:
+    from app.providers.llm import zen as _zen
     return {"data": {"status": "ok", "version": "0.1.0",
                      "time": datetime.datetime.utcnow().isoformat() + "Z",
                      # Which store this process is actually writing to. The
                      # adapter used to be inferred from absent keys and fall
                      # back silently, so a real database could be bypassed
                      # with nothing reporting it.
-                     "persistence": dict(factory_repo.ACTIVE)},
+                     "persistence": dict(factory_repo.ACTIVE),
+                     # Judge throttling, made observable. A run whose fields all
+                     # came back unverified could be a throttled judge, and that
+                     # is an operational fact worth seeing without reading logs.
+                     "jev": dict(_zen.JEV_HEALTH)},
             "error": None, "meta": {}}
 
 

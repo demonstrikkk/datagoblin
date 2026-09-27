@@ -25,6 +25,21 @@ Stated plainly because the docs previously implied otherwise:
   Playwright via Crawl4AI, which covers JS rendering. Do not add Selenium
   without a reason Playwright does not serve.
 
+## Robots gate at discovery
+
+Candidates are checked for crawl permission **during discovery**, before the
+Jev-A screen, and a disallowed URL is dropped from the candidate set and marked
+screened so a later round never reconsiders it. The per-host robots cache (1h)
+makes repeat checks effectively free, and placing the cheap check first means no
+judge call is spent on a URL that was never going to be fetched.
+
+One live run accepted two sources, both `robots-disallowed`, spent the entire
+runtime budget, and returned 0 records with nothing to backfill from. The
+crawler was right to refuse them; the waste was accepting them. Dropping them
+at discovery frees the cap for the next candidate. An uncertain check (network
+error) allows through — the fetcher re-checks anyway, and guessing "blocked"
+would cost yield.
+
 ## Escalation to a renderer
 
 Measured on the **clean text**, never on raw HTML (a JS shell is huge HTML and

@@ -11,10 +11,13 @@ mutate-and-return-full-state). List fields carry reducers (state.py).
 from functools import partial
 from typing import Any, Literal
 import asyncio
+import re
+from urllib.parse import urlparse
 
 from app.agents.decisions import SupervisorDecision
 from app.agents.policies import POLICIES
 from app.core.config import settings
+from app.core.logging import log
 
 
 async def supervisor_step(state: dict, llm_strategy: Any, jev_continuation: Any) -> SupervisorDecision:
@@ -93,8 +96,14 @@ async def search_node(state: dict, deps: Any) -> dict:
     succeeded: list[str] = []
     for q in pending:
         try:
+            # Blocked hosts are excluded at the provider, not filtered after the
+            # fact: re-searching while telling the engine which sites to skip is
+            # what surfaces secondary sources instead of the same portal again.
+            exclude = list(deps.exclude_domains or []) + [
+                d for d in (state.get("blocked_domains", []) or [])
+                if d and d not in (deps.exclude_domains or [])]
             results = await deps.search_fn(q, deps.results_per_query,
-                                           deps.include_domains, deps.exclude_domains)
+                                          deps.include_domains, exclude or None)
         except Exception:
             continue  # untried: eligible again next round (max_iterations bounds it)
         succeeded.append(q)
@@ -107,19 +116,55 @@ async def search_node(state: dict, deps: Any) -> dict:
 
 
 async def screen_node(state: dict, deps: Any) -> dict:
-    """Jev-A screen on unscreened candidates; triage route attached. Single NO-path.
+    """Robots gate, then Jev-A screen on unscreened candidates; triage attached.
 
     Screens run in concurrent batches of 5 (the 282s-discovery fix: sequential
     Jev calls at ~10s each stalled whole runs). Decisions still apply in
     original order with the same cap, and every fresh URL is still marked
     screened. Batches stop once the cap fills, so at most one partial batch
     of calls is ever spent past the cap.
+
+    The robots gate runs FIRST and is not a judge call. A candidate we may not
+    crawl is dead on arrival, and one live run accepted two sources, both
+    robots-disallowed, spent the entire budget and returned 0 records with
+    nothing to backfill from. Dropping them here marks them screened (so they
+    are never retried) and frees the cap for the next candidate. The per-host
+    robots cache makes repeat checks for the same domain effectively free.
     """
     screened = set(state.get("screened_urls", []))
     fresh = [r for r in state.get("candidate_urls", [])
              if r.get("url") and r["url"] not in screened]
     base = len(state.get("accepted_sources", []))
-    done = [r["url"] for r in fresh]
+    blocked: list[str] = []
+    crawlable: list[dict] = []
+    robots_gate = getattr(deps, "robots_ok", None)
+    for r in fresh:
+        url = r["url"]
+        if callable(robots_gate):
+            try:
+                ok = await robots_gate(url)
+            except Exception:  # noqa: BLE001 (uncertain => let the fetch decide)
+                ok = True
+            if not ok:
+                blocked.append(url)
+                continue
+        crawlable.append(r)
+    if blocked:
+        # Marked screened so a later round does not reconsider them.
+        screened.update(blocked)
+        # Hosts, not URLs: the re-query excludes the whole site, because every
+        # variant of one blocked portal will be blocked too.
+        hosts = []
+        for u in blocked:
+            host = (urlparse(u).hostname or "").lower()
+            host = host[4:] if host.startswith("www.") else host
+            if host and host not in hosts:
+                hosts.append(host)
+        log.info("discovery dropped robots-disallowed candidates",
+                 extra={"data": {"count": len(blocked), "domains": hosts,
+                                 "urls": [u[:200] for u in blocked[:10]]}})
+    fresh = crawlable
+    done = [r["url"] for r in fresh] + blocked
     accepted: list[dict] = []
     sem = asyncio.Semaphore(5)
 
@@ -142,7 +187,15 @@ async def screen_node(state: dict, deps: Any) -> dict:
                              "snippet": str(r.get("snippet", ""))[:2000],
                              "route": deps.triage_fn(url),
                              "screen_confidence": (screen or {}).get("confidence", 0.0)})
-    return {"screened_urls": done, "accepted_sources": accepted}
+    prior_hosts = list(state.get("blocked_domains", []) or [])
+    hosts = list(prior_hosts)
+    for u in blocked:
+        h = (urlparse(u).hostname or "").lower()
+        h = h[4:] if h.startswith("www.") else h
+        if h and h not in hosts:
+            hosts.append(h)
+    return {"screened_urls": done, "accepted_sources": accepted,
+            "blocked_domains": hosts}
 
 
 def _coverage_summary(state: dict) -> str:
@@ -170,9 +223,72 @@ def _coverage_summary(state: dict) -> str:
     return "\n".join(bits)
 
 
+#: Terms that broaden a query toward aggregators and directories, which is
+#: where a crawlable source lives when the primary portal is not crawlable.
+_BROADEN_TERMS = ("directory", "list", "database")
+
+
+def _requery_query(state: dict, mutate: bool = False) -> str:
+    """Rebuild the last query with the rejected sites excluded.
+
+    Deterministic rather than model-generated: the LLM does not know which
+    hosts were just rejected, and a call that cannot see the failure would only
+    re-run the same search and return the same blocked portal. `-site:` terms
+    from a previous attempt are stripped first so exclusions never accumulate
+    across rounds.
+    """
+    tried = [q for q in (state.get("searched_queries", []) or []) if q.strip()]
+    base = (tried[-1] if tried else (state.get("queries", []) or [""])[0] or "")
+    base = re.split(r"\s+-site:", base, maxsplit=1)[0].strip() or base
+    blocked = [d for d in (state.get("blocked_domains", []) or []) if d]
+    limit = int(getattr(settings, "DISCOVERY_MAX_SITE_EXCLUSIONS", 6) or 0)
+    parts = [base]
+    for host in blocked[:limit]:
+        parts.append(f"-site:{host}")
+    if mutate:
+        # Final attempt: widen toward list-shaped sources, since a portal that
+        # disallows crawling is very unlikely to be mirrored anywhere useful.
+        term = _BROADEN_TERMS[min(len(tried), len(_BROADEN_TERMS) - 1)]
+        parts.append(term)
+    return " ".join(p for p in parts if p).strip()[:300]
+
+
 async def decide_node(state: dict, deps: Any) -> dict:
     """supervisor_step judgment -> validated decision fields. No fresh queries and
-    no new ones proposed => FETCH (refining with nothing to search is waste)."""
+    no new ones proposed => FETCH (refining with nothing to search is waste).
+
+    When every candidate was blocked or filtered out, the loop re-queries once
+    with the rejected sites excluded, then once more with a broadened query, and
+    then stops and says so. Bounded by DISCOVERY_MAX_REQUERIES: a topic can
+    genuinely have no crawlable source, and discovering that must not cost the
+    whole search budget.
+    """
+    blocked = list(state.get("blocked_domains", []) or [])
+    spent = int(state.get("requery_count", 0) or 0)
+    cap = int(getattr(settings, "DISCOVERY_MAX_REQUERIES", 2) or 0)
+    have_sources = bool(state.get("accepted_sources"))
+    starved = not have_sources and bool(blocked)
+
+    if starved and spent < cap:
+        q = _requery_query(state, mutate=(spent >= 1))
+        log.info("discovery re-querying with blocked sites excluded",
+                 extra={"data": {"attempt": spent + 1, "of": cap,
+                                 "excluded": len(blocked), "query": q[:160]}})
+        return {"decision": "REFINE_SEARCH",
+                "decision_reason": (f"all {len(blocked)} candidate site(s) blocked; "
+                                    f"re-querying without them"),
+                "queries": [q],
+                "requery_count": spent + 1,
+                "evidence_summary": _coverage_summary(state)}
+    if starved:
+        # Budget spent and still nothing crawlable. Say so and stop.
+        log.info("discovery exhausted: every candidate blocked or filtered",
+                 extra={"data": {"requeries": spent, "domains": blocked[:20]}})
+        return {"decision": "FETCH",
+                "decision_reason": "all_candidates_blocked_or_filtered",
+                "all_blocked": True,
+                "evidence_summary": _coverage_summary(state)}
+
     dec = await supervisor_step(state, deps.llm_strategy, deps.jev_continuation)
     update: dict = {"decision": dec.decision, "decision_reason": dec.reason[:500],
                     "evidence_summary": _coverage_summary(state)}
@@ -195,7 +311,7 @@ def _route(state: dict) -> Literal["refine", "fetch", "finish"]:
         return "fetch"  # budget exhausted => proceed with what exists (partial, honest)
     if not state.get("queries"):
         return "fetch"
-    if state.get("attempted", 1) == 0:
+    if state.get("attempted", 1) == 0 and not state.get("requery_count"):
         return "fetch"  # no fresh queries attempted => looping is waste; proceed
     return "refine"
 

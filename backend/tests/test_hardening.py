@@ -249,7 +249,9 @@ def test_langchain_decide_no_keys_raises():
 # -- supervisor end-to-end (stub deps, no network/keys) --------------------------------------
 def _deps(results):
     async def _search(q, limit, include=None, exclude=None):
-        assert include == [] and exclude == []
+        # exclude is None or [] when nothing is blocked; blocked hosts are
+        # added later by the re-query path. Tavily treats both as "no filter".
+        assert include == [] and exclude in ([], None), (include, exclude)
         return results[:limit]
     from app.providers.decision import jev
     from app.services.source_router import triage_source

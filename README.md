@@ -64,6 +64,8 @@ proof-first rule: no claim without a stored citation.
                     └─────────┬─────────┘
                               │
                     ┌─────────▼─────────┐
+                    │  robots gate       │  uncrawlable ⇒ drop, backfill
+                    ├─────────────────────┤
                     │  JEV-A  screen    │  NO ⇒ skip fetch+extract entirely
                     └─────────┬─────────┘
                               │
@@ -165,6 +167,7 @@ a fabricated judgment.
 |---|---|---|
 | **A** source screening | `jev.source_screening()` | plural-tolerant entity match |
 | **B** evidence verification | `jev.evidence_verification()` | `judgment_unavailable` — **never** "verified" |
+| **B** throttled | HTTP 429 ⇒ `rate_limited` | retries w/ backoff, then `rate_limited` |
 | **C** conflict resolution | `jev.conflict_triage()` | `CONFLICT` — never merged |
 | **D** research continuation | `jev.research_continuation()` | count comparison |
 
@@ -287,7 +290,7 @@ error in the UI.
 
 | method | path | purpose |
 |---|---|---|
-| GET | `/api/health` | liveness **+ the active persistence adapter** |
+| GET | `/api/health` | liveness **+ persistence adapter + judge counters** |
 | POST | `/api/workflows/compile` | prompt → plan (returns `plan_id`) |
 | POST | `/api/runs` | start a run from a `plan_id` |
 | GET | `/api/runs/{id}` | run state, `partial` flag, counters |
@@ -322,7 +325,7 @@ usage_ledger  credit metering (idempotent on charge_id)
 ```
 
 Verification statuses: `verified` · `unverified` · `conflicting` ·
-`judgment_unavailable`.
+`judgment_unavailable` (no judge reachable) · `rate_limited` (judge said wait).
 
 `judgment_unavailable` is deliberately not `verified`: the quote *is* on the
 page, but **nothing ruled on it**. That distinction is the whole point.
@@ -441,7 +444,7 @@ into validation. Details: [`docs/23-ENVIRONMENT.md`](docs/23-ENVIRONMENT.md).
 ## Tests
 
 ```bash
-python -m pytest backend/tests -q          # 361 passed, hermetic, no credits
+python -m pytest backend/tests -q          # 389 passed, hermetic, no credits
 cd frontend && npm run build               # production build
 ```
 

@@ -25,9 +25,11 @@ long-lived pool is a worse failure mode than a connect cost.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import threading
 import uuid
+from decimal import Decimal
 from typing import Any, Iterable
 
 from app.core.errors import dependency
@@ -39,6 +41,42 @@ def _jsonb(value: Any) -> Any:
     if value is None:
         return None
     return json.dumps(value, default=str)
+
+
+def _plain(value: Any) -> Any:
+    """Coerce a driver-native value into something JSON can carry.
+
+    psycopg returns real `UUID` and `datetime` objects for `uuid` and
+    `timestamptz` columns. The REST adapter this replaced handed back JSON
+    strings, so every typed view downstream was written against strings and
+    nothing noticed - until a `DatasetView` was handed a `UUID` and raised a
+    pydantic `string_type` error, i.e. a 500 on a dataset the user had just
+    finished creating.
+
+    Normalising at this choke point means every read path is JSON-safe, not just
+    the one that happened to break.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, datetime.time):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", "replace")
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_plain(v) for v in value]
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
 
 
 class PostgresRepo:
@@ -68,11 +106,17 @@ class PostgresRepo:
             raise dependency(f"Postgres {op} failed: {str(e)[:200]}")
 
     def _rows(self, op: str, sql: str, params: Iterable = ()) -> list[dict]:
+        """Every read goes through here, so every read is JSON-safe.
+
+        Normalising once at the choke point is deliberate: doing it per-endpoint
+        means the next typed view added anywhere downstream re-breaks on a bare
+        `UUID` or `datetime` from the driver.
+        """
         def _fn(cur):
             cur.execute(sql, tuple(params))
             if cur.description is None:
                 return []
-            return list(cur.fetchall())
+            return [{k: _plain(v) for k, v in dict(r).items()} for r in cur.fetchall()]
         return self._run(op, _fn) or []
 
     # -- writes ---------------------------------------------------------------

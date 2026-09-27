@@ -142,9 +142,23 @@ class Settings(BaseSettings):
     # reported `judgment_unavailable` - kept, but never counted as verified.
     # 0 = unlimited.
     RUN_MAX_JUDGE_CALLS: int = Field(default=400, ge=0, le=100000)
+    # Retries for a throttled (HTTP 429) judge, with exponential backoff.
+    # Quitting on the first 429 made a busy run report every field as
+    # unverified, which is indistinguishable from having no evidence.
+    JEV_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
     # Phase-5 metering: per-run credit budget. 0 = unlimited (record-only).
     RUN_CREDIT_BUDGET: int = Field(default=0, ge=0, le=100000)
     SUPERVISOR_MAX_ITERATIONS: int = Field(default=3, ge=1, le=5)
+    # Re-query when every candidate was blocked or filtered out. Queries aimed at
+    # official data sources fail often: search engines rank .gov and primary
+    # registries highest, and those enforce the strictest robots.txt. So the
+    # rejected domains are excluded and the search is repeated - bounded, because
+    # a topic can genuinely have no accessible source and an unbounded loop
+    # would drain the search budget discovering that the slow way.
+    DISCOVERY_MAX_REQUERIES: int = Field(default=2, ge=0, le=5)
+    # At most this many -site: terms per re-query, so the query stays inside a
+    # sane length instead of growing with every rejected host.
+    DISCOVERY_MAX_SITE_EXCLUSIONS: int = Field(default=6, ge=0, le=25)
     SUPERVISOR_MAX_QUERIES: int = Field(default=8, ge=1, le=12)
 
     # Caps

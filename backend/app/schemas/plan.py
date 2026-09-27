@@ -6,7 +6,10 @@ FieldType = Literal["string","number","boolean","date","array","url"]
 #: `judgment_unavailable` is deliberately distinct from `verified`. It means the
 #: quote was found in the page but no judge was reachable to rule on it, which
 #: used to be reported as `verified` and inflated every verification summary.
-Verification = Literal["verified", "unverified", "conflicting", "judgment_unavailable"]
+#: `rate_limited` is distinct again: the judge was there and said "wait". That
+#: is an operational condition worth retrying, not an absence of evidence.
+Verification = Literal["verified", "unverified", "conflicting",
+                       "judgment_unavailable", "rate_limited"]
 
 
 class FieldSpec(BaseModel):

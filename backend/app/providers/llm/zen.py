@@ -329,29 +329,87 @@ async def structured(prompt: str, schema: dict, *, model: str | None = None,
             "latency_ms": out["latency_ms"], "usage": out["usage"]}
 
 
+class JevRateLimited(Exception):
+    """The judge answered 429: throttled, not absent.
+
+    Raised rather than folded into "unavailable" so the run can tell the
+    difference between *nothing to judge* and *told to wait*. The distinction
+    matters operationally: a throttled judge is worth backing off and retrying,
+    and a run that was throttled should say so instead of reporting its fields
+    as simply unverified.
+    """
+
+
+#: Live counters, surfaced by /api/health so throttling is observable rather
+#: than something you notice in a log 400 lines later.
+JEV_HEALTH: dict[str, int] = {"calls": 0, "rate_limited": 0, "unavailable": 0,
+                              "retried": 0, "succeeded": 0}
+
+
 async def systemone(state: str, questions: dict, *,
-                    model: str | None = None) -> dict | None:
+                    model: str | None = None,
+                    retries: int | None = None) -> dict | None:
     """Jev typed decisions over Zen. {"answers": {...}} or None.
 
     None means unavailable (no key, refusal, transport error) so the caller
-    keeps its deterministic policy — never a fabricated judgment.
+    keeps its deterministic policy — never a fabricated judgment. A 429 is
+    different and raises `JevRateLimited` after bounded exponential backoff:
+    throttling is a "wait", not a "no".
     """
     if not settings.ZEN_ENABLED or not settings.ZEN_JEV_ENABLED or not _key():
+        JEV_HEALTH["unavailable"] += 1
         return None
     body = {"model": model or settings.JEV_ZEN_MODEL,
             "state": (state or "")[:30000], "questions": questions}
-    try:
-        async with httpx.AsyncClient(timeout=min(settings.ZEN_TIMEOUT_S, 60)) as c:
-            r = await c.post(f"{_base()}/systemone", headers=_headers(), json=body)
-        if r.status_code >= 400:
-            log.info("zen jev refused", extra={"data": {"status": r.status_code,
-                                                       "model": body["model"]}})
+    attempts = max(0, int(retries if retries is not None
+                          else settings.JEV_MAX_RETRIES))
+    JEV_HEALTH["calls"] += 1
+    for attempt in range(attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=min(settings.ZEN_TIMEOUT_S, 60)) as c:
+                r = await c.post(f"{_base()}/systemone", headers=_headers(), json=body)
+            if r.status_code == 429:
+                JEV_HEALTH["rate_limited"] += 1
+                if attempt < attempts:
+                    # Honour Retry-After when the server states it; otherwise
+                    # back off. Quitting on the first 429 is what made a busy
+                    # run report every field as unverified.
+                    delay = _retry_after_s(r) or (2 ** attempt)
+                    JEV_HEALTH["retried"] += 1
+                    log.info("zen jev throttled; backing off",
+                             extra={"data": {"status": 429, "model": body["model"],
+                                             "attempt": attempt + 1,
+                                             "delay_s": round(delay, 2)}})
+                    await asyncio.sleep(delay)
+                    continue
+                raise JevRateLimited(
+                    f"judge throttled (HTTP 429) after {attempts + 1} attempts")
+            if r.status_code >= 400:
+                log.info("zen jev refused", extra={"data": {"status": r.status_code,
+                                                           "model": body["model"]}})
+                JEV_HEALTH["unavailable"] += 1
+                return None
+            JEV_HEALTH["succeeded"] += 1
+            return (r.json() or {}).get("answers") or None
+        except JevRateLimited:
+            raise
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as e:  # noqa: BLE001 (judge degrades to deterministic policy)
+            log.info("zen jev failed", extra={"data": {"error": str(e)[:150]}})
+            JEV_HEALTH["unavailable"] += 1
             return None
-        return (r.json() or {}).get("answers") or None
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        raise
-    except Exception as e:  # noqa: BLE001 (judge degrades to deterministic policy)
-        log.info("zen jev failed", extra={"data": {"error": str(e)[:150]}})
+    return None
+
+
+def _retry_after_s(r: Any) -> float | None:
+    """Server-stated cool-down, capped so a hostile value cannot stall a run."""
+    raw = (r.headers or {}).get("Retry-After") if hasattr(r, "headers") else None
+    if not raw:
+        return None
+    try:
+        return min(30.0, max(0.0, float(raw)))
+    except (TypeError, ValueError):
         return None
 
 

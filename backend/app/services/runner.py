@@ -120,11 +120,27 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
 
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.DISCOVERING,
                        "message": "Discovering sources", "progress": 10, "timestamp": _now()})
-    sources = await discovery_svc.discover(run_id, plan, search_fn, llm, _emit_stamped(emit, run_id))
+    async def _discover_emit(ev: dict) -> None:
+        """Pass discovery events through, capturing the all-blocked signal.
+
+        "Every candidate was blocked or filtered, and we re-queried twice" is a
+        materially different failure from "the web has nothing", and only one of
+        them is worth re-running the user's question.
+        """
+        if ev.get("type") == "source.discovered":
+            data = ev.get("data", {}) or {}
+            if data.get("all_candidates_blocked_or_filtered"):
+                progress["no_yield_reason"] = (
+                    f"every candidate was blocked or filtered "
+                    f"({len(data.get('blocked_domains') or [])} site(s)) and "
+                    f"re-querying did not surface a crawlable source")
+            progress["blocked_domains"] = list(data.get("blocked_domains") or [])
+        await _emit_stamped(emit, run_id)(ev)
+
+    sources = await discovery_svc.discover(run_id, plan, search_fn, llm, _discover_emit)
     await _bill("discover_query", projection["queries"])
     if cancelled():
         return {"status": "CANCELLED", "records": []}
-
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.FETCHING,
                        "message": f"Fetching {len(sources)} pages", "progress": 30, "timestamp": _now()})
 
@@ -356,20 +372,35 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     summary = provenance_svc.summarize(canonical)
     partial = bool(progress.get("partial_reason"))
     reason = progress.get("partial_reason", "")
+    no_yield = ""
+    if not canonical:
+        no_yield = progress.get("no_yield_reason", "") or _explain_zero_yield(
+            pages, extract_providers)
     dataset_id = await store(run_id, plan, canonical,
                              {**counts, "records": len(canonical),
                               "partial": partial, "partial_reason": reason,
+                              "no_yield_reason": no_yield,
                               **summary})
+    if partial:
+        headline = f"Partial: {len(canonical)} records kept. {reason}"
+    elif canonical:
+        headline = (f"Done: {len(canonical)} records "
+                    f"({counts['successful']}/{counts['attempted']} sources)")
+    else:
+        # "0 records" alone reads as a failure of the app. Saying WHY it found
+        # nothing is the difference between "this is broken" and "these pages
+        # simply do not contain that data".
+        headline = (f"Done: 0 records "
+                    f"({counts['successful']}/{counts['attempted']} sources) "
+                    f"— {no_yield}")
     await _emit(emit, {"type": "run.completed" if not partial else "run.partial",
                        "run_id": run_id, "stage": RunStage.COMPLETED,
-                       "message": (f"Done: {len(canonical)} records "
-                                   f"({counts['successful']}/{counts['attempted']} sources)")
-                       if not partial else
-                       (f"Partial: {len(canonical)} records kept. {reason}"),
+                       "message": headline,
                        "progress": 100, "timestamp": _now(),
                        "data": {"dataset_id": dataset_id, **counts,
                                 "records": len(canonical),
                                 "partial": partial, "partial_reason": reason,
+                                "no_yield_reason": no_yield,
                                 # Named counts, not "verified"/"needs_review":
                                 # those conflated records with fields and
                                 # counted unjudged claims as verified.
@@ -414,6 +445,36 @@ async def _finish_partial(emit: object, run_id: str, plan: dict, store: object,
     return {"status": "PARTIAL" if rows else "FAILED",
             "records": len(rows), "dataset_id": did, "partial": True,
             "error": reason}
+
+
+def _explain_zero_yield(pages: list, providers: list) -> str:
+    """Why a run produced no records, in words a user can act on.
+
+    A bare "0 records" is indistinguishable from a broken app. The provider
+    tally already knows what happened per page; this turns it into a sentence.
+    Measured cases: every page timed out; the LLM was absent; the pages fetched
+    fine but were nav-only dashboards with no per-entity rows (the extractor was
+    right to find nothing, and the run should say so).
+    """
+    if not pages:
+        return "no page was fetched successfully"
+    provs = [str(p or "") for p in providers]
+    n = len(provs)
+    if not provs:
+        return "no page was processed"
+    if all(p == "timeout" for p in provs):
+        return (f"extraction timed out on all {n} page(s) "
+                f"(EXTRACT_PAGE_TIMEOUT_S)")
+    if all(p == "none" for p in provs):
+        return f"no LLM was available to extract from {n} page(s)"
+    if all(p == "error" for p in provs):
+        return f"the extraction provider failed on all {n} page(s)"
+    thin = sum(1 for p in pages
+               if len(p.get("markdown") or p.get("text") or "") < 2000)
+    detail = (f"; {thin} of {len(pages)} were near-empty"
+              if thin else "")
+    return (f"the pages were read but contained no matching records "
+            f"({n} page(s) checked, provider {provs[0] or 'none'}){detail}")
 
 
 async def execute_run(run_id: str, plan: dict, ctx: dict, emit: object) -> dict:

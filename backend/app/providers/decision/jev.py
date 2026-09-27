@@ -19,7 +19,8 @@ import httpx
 from app.core.config import settings
 
 Screening = Literal["YES", "NO", "UNCERTAIN"]
-Support = Literal["SUPPORTED", "NOT_SUPPORTED", "UNCERTAIN"]
+Support = Literal["SUPPORTED", "NOT_SUPPORTED", "UNCERTAIN",
+                 "JUDGMENT_UNAVAILABLE", "RATE_LIMITED"]
 Conflict = Literal["A", "B", "CONFLICT", "INSUFFICIENT"]
 Continuation = Literal["sufficient", "insufficient", "uncertain"]
 
@@ -31,11 +32,16 @@ def _key() -> str:
 
 
 async def _jev_call(state: str, questions: dict) -> dict | None:
-    """Returns parsed answers or None (key absent/failure => deterministic policy).
+    """Returns parsed answers, or None (key absent/failure => deterministic policy).
 
     Free Zen Jev is tried before the paid OpenRouter judge: same contract, no
     cost, measured reachable. A paid call only happens when the free one is
     unavailable, so a key-less deployment never silently bills.
+
+    A throttled free judge does NOT fall through to the paid rung by default:
+    throttling is a "wait", and burning a paid call because the free tier is
+    busy is a surprise bill. It raises `JevRateLimited` so the caller can
+    report throttling distinctly from absence.
     """
     from app.providers.llm import zen
 
@@ -43,7 +49,6 @@ async def _jev_call(state: str, questions: dict) -> dict | None:
         answers = await zen.systemone(state, questions)
         if answers is not None:
             return answers
-
     key = _key()
     if not key:
         return None
@@ -121,7 +126,8 @@ async def source_relevance(url: str, title: str, snippet: str, entity: str) -> d
 
 
 async def evidence_verification(value: str, quote: str, source_text: str) -> dict:
-    """B. SUPPORTED/NOT_SUPPORTED/UNCERTAIN/JUDGMENT_UNAVAILABLE.
+    """B. SUPPORTED / NOT_SUPPORTED / UNCERTAIN / JUDGMENT_UNAVAILABLE /
+    RATE_LIMITED.
 
     The deterministic substring pre-check runs first and is free. When it passes
     but no judge is reachable, the answer is JUDGMENT_UNAVAILABLE - explicitly
@@ -129,6 +135,10 @@ async def evidence_verification(value: str, quote: str, source_text: str) -> dic
     meant a dead or unconfigured judge silently promoted every substring-matching
     claim to "verified" and the verification summary counted them as checked.
     A judgement that never happened must not be reported as one that did.
+
+    A throttled judge (HTTP 429) is reported as RATE_LIMITED rather than lumped
+    in with absence: "told to wait" and "nothing to judge" call for different
+    responses, and a busy run should be able to say it was throttled.
     """
     import re
     norm = lambda s: re.sub(r"\s+", " ", (s or "").strip().lower())
@@ -144,9 +154,15 @@ async def evidence_verification(value: str, quote: str, source_text: str) -> dic
         # the substring is the claim.
         return {"judgment": "SUPPORTED", "confidence": 0.95,
                 "provider": "deterministic"}
-    ans = await _jev_call(
-        f"Claim: {value}\nEvidence: {quote}",
-        {"support": {"type": "noul", "instructions": "Does the evidence support the claim?"}})
+    from app.providers.llm import zen
+    try:
+        ans = await _jev_call(
+            f"Claim: {value}\nEvidence: {quote}",
+            {"support": {"type": "noul",
+                         "instructions": "Does the evidence support the claim?"}})
+    except zen.JevRateLimited:
+        return {"judgment": "RATE_LIMITED", "confidence": 0.0,
+                "provider": "throttled"}
     if ans is not None:
         node = ans.get("support", {})
         if not isinstance(node, dict) or node.get("type", "noul") != "noul":

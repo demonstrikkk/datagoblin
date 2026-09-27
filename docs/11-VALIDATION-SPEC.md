@@ -41,7 +41,8 @@ door rather than catch anything.
 | `verified` | judged, or deduced (see below) |
 | `unverified` | not supported by a quotable page; value is `null` |
 | `conflicting` | two sources disagree; both provenances kept, never averaged |
-| `judgment_unavailable` | the quote **is** on the page, but nothing ruled on it |
+| `judgment_unavailable` | the quote **is** on the page, but no judge was reachable |
+| `rate_limited` | the judge was there and said "wait" (HTTP 429) |
 
 `judgment_unavailable` is deliberately not `verified`. The judge used to return
 `SUPPORTED` whenever it was unreachable, so a dead or unconfigured judge
@@ -65,6 +66,11 @@ used to be treated as support.
 
 `RUN_MAX_JUDGE_CALLS` (default 400) caps judge calls per run. Past the cap,
 fields are kept but marked `judgment_unavailable` — never counted as verified.
+
+A throttled judge is reported as `rate_limited` rather than `judgment_unavailable`:
+"come back later" and "we had no judge to ask" call for different responses, and
+collapsing them made a busy run look like one with poor evidence. The transport
+retries 429s with exponential backoff before giving up (docs/32).
 Uncapped, the call count is a function of how much the extractor found, which
 is not something a run should be able to overrun on.
 
@@ -76,7 +82,8 @@ when it is one record with four unproven fields.
 
 ```
 records, records_fully_verified, records_needing_review,
-fields_verified, fields_unverified, fields_judgment_unavailable, fields_conflicting
+fields_verified, fields_unverified, fields_judgment_unavailable,
+fields_conflicting, fields_rate_limited
 ```
 
 ## Events

@@ -151,6 +151,11 @@ async def verify_field(value: object, quote: str, source_text: str,
     judgment = verdict.get("judgment")
     if judgment == "NOT_SUPPORTED":
         return None, "unverified"
+    if judgment == "RATE_LIMITED":
+        # Throttled, not absent. Kept with its value and reported as its own
+        # status so a busy run is visible as throttled rather than looking like
+        # the evidence was never good enough.
+        return value, "rate_limited"
     if judgment == "JUDGMENT_UNAVAILABLE":
         # Keep the value - the quote genuinely is on the page - but never count
         # it as verified. Reporting this as verified is what made a dead judge

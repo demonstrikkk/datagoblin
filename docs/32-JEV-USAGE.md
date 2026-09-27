@@ -37,6 +37,13 @@ shortcut, then the judge. See docs/11.
 > `JUDGMENT_UNAVAILABLE`, which the validator records as its own status and
 > never counts as verified.
 
+> **Throttled is not absent.** A 429 raises `JevRateLimited` after bounded
+> exponential backoff (honouring `Retry-After`, capped at 30s) and is recorded as
+> `RATE_LIMITED` → stored status `rate_limited`. It deliberately does **not**
+> fall through to the paid OpenRouter rung: throttling is a "wait", and
+> billing a paid call because the free tier is busy is a surprise charge.
+> Counters are live at `GET /api/health` under `jev`.
+
 ## C. Conflict resolution — `jev.conflict_triage()`
 
 Q: which evidence state? → `A` / `B` / `CONFLICT` / `INSUFFICIENT`. `CONFLICT`

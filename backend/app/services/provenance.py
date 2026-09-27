@@ -22,13 +22,15 @@ def summarize(rows: list[dict]) -> dict:
     `fully_verified` when every one of its fields is.
     """
     fully = partial = 0
-    f_verified = f_unverified = f_unjudged = f_conflicting = 0
+    f_verified = f_unverified = f_unjudged = f_conflicting = f_throttled = 0
     for r in rows:
         statuses = [v.get("verification_status")
                     for v in r.get("fields", {}).values() if isinstance(v, dict)]
         for st in statuses:
             if st == "verified":
                 f_verified += 1
+            elif st == "rate_limited":
+                f_throttled += 1
             elif st == "judgment_unavailable":
                 f_unjudged += 1
             elif st == "conflicting":
@@ -45,4 +47,7 @@ def summarize(rows: list[dict]) -> dict:
             "fields_verified": f_verified,
             "fields_unverified": f_unverified,
             "fields_judgment_unavailable": f_unjudged,
-            "fields_conflicting": f_conflicting}
+            "fields_conflicting": f_conflicting,
+            # Throttled is reported separately from unjudged: one is "come back
+            # later", the other is "we had no judge to ask".
+            "fields_rate_limited": f_throttled}

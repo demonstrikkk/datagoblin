@@ -5,6 +5,23 @@ Tests that need provider behavior inject fakes explicitly. See docs/24.
 """
 import pytest
 
+#: The pristine `_jev_call`, stashed by `_judge_available` before it installs the
+#: stub. Fixture order means a lazy capture inside `real_judge` would grab the
+#: stub instead, so it has to be saved on the way past.
+_REAL_JEV_CALL: list = []
+
+
+@pytest.fixture
+def real_judge(monkeypatch):
+    """Undo the autouse judge stub, so `_jev_call` really runs.
+
+    Needed by anything testing transport behaviour — throttling, retries, the
+    free-then-paid rung order — which the default stub would otherwise hide.
+    """
+    from app.providers.decision import jev
+    assert _REAL_JEV_CALL, "the real judge was not captured"
+    monkeypatch.setattr(jev, "_jev_call", _REAL_JEV_CALL[0])
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _no_env_file():
@@ -53,6 +70,9 @@ def _judge_available(monkeypatch):
     `no_judge`.
     """
     from app.providers.decision import jev
+
+    if not _REAL_JEV_CALL:
+        _REAL_JEV_CALL.append(jev._jev_call)
 
     async def _supported(prompt, schema, **kw):
         key = next(iter(schema), "support")

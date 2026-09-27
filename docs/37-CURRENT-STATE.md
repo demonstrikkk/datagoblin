@@ -49,7 +49,21 @@ answered, all **8 distinct models** (`distinct_models: 8`, `independent: true`).
 The 2 failures are genuine upstream `UnknownError` 500s on `mimo-v2.5-free` and
 `muse-spark-1.2-contributor-free`, retried and still failing.
 
-**Suites**: 361 backend tests pass. Frontend builds. `git diff --check` clean.
+**Suites**: 389 backend tests pass. Frontend builds. `git diff --check` clean.
+
+## Fixed since the last update
+
+- **`DatasetView` 500.** psycopg returns native `UUID`/`datetime`; the REST adapter
+  it replaced returned JSON strings, so every typed view had been written against
+  strings and nothing noticed. Two endpoints were affected
+  (`/api/datasets`, `/api/datasets/{did}`). Now normalised at the single read
+  choke point, so the next typed view is already safe.
+- **Robots-disallowed candidates burned whole runs.** Two candidates, both
+  uncrawlable, cost the entire budget and returned 0 records. Now gated at
+  discovery, before the judge, using the existing per-host robots cache.
+- **Judge throttling was invisible.** A 429 was logged and folded into
+  `judgment_unavailable`. It now retries with backoff and reports
+  `rate_limited`, counted in the summary and at `GET /api/health`.
 
 ## What "end to end" does NOT yet mean
 
