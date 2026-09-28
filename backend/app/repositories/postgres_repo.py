@@ -397,6 +397,20 @@ class PostgresRepo:
                                       offset=0)["records"]
         return ds
 
+    def get_dataset_schema(self, dataset_id: str) -> list | None:
+        """Just the declared schema — no record load.
+
+        The coverage and conflict views need the schema (a field can be declared
+        and never extracted, which is the whole point of showing it) but not the
+        rows. Reading them via `get_dataset` meant pulling every record twice
+        per request, which on a remote database is the entire latency of the
+        page: measured at 4-8s, with 74 records, to draw one bar chart.
+        """
+        rows = self._rows("get_dataset_schema",
+                          "SELECT schema_json FROM datasets WHERE id=%s",
+                          (dataset_id,))
+        return (rows[0].get("schema_json") or []) if rows else None
+
     def get_records(self, dataset_id: str, q: str = "", limit: int = 100,
                     offset: int = 0) -> dict:
         return self._records(dataset_id, q, limit, offset)
@@ -422,12 +436,36 @@ class PostgresRepo:
                            params)
         rows = self._rows(
             "records",
-            f"""SELECT row_json FROM dataset_records WHERE {where}
+            f"""SELECT id,row_json FROM dataset_records WHERE {where}
                 ORDER BY id LIMIT %s OFFSET %s""",
             [*params, limit, offset])
+        # `record_id` is the row's own primary key, carried through so a caller
+        # can address exactly one cell later. There was no way to name a record
+        # before: the only handle was its position in a list that re-sorts
+        # whenever the query or the page window changes.
         return {"dataset_id": dataset_id,
                 "total": int(total[0]["n"]) if total else 0,
-                "records": [{"fields": r.get("row_json") or {}} for r in rows]}
+                "records": [{"record_id": str(r["id"]),
+                             "fields": r.get("row_json") or {}} for r in rows]}
+
+    def update_record_cell(self, dataset_id: str, record_id: str,
+                           field: str, cell: dict) -> bool:
+        """Replace one field of one record, addressed by primary key.
+
+        A jsonb_set against the row's own `id`, so this cannot drift onto a
+        neighbour the way a positional write would. Returns False when the row
+        is not in this dataset, which is the honest answer to "you addressed a
+        record that does not exist here" rather than a silent no-op.
+        """
+        def _fn(cur):
+            cur.execute(
+                """UPDATE dataset_records
+                      SET row_json = jsonb_set(row_json, %s, %s::jsonb)
+                    WHERE id=%s AND dataset_id=%s RETURNING id""",
+                ([field], _jsonb(cell), record_id, dataset_id))
+            return bool(cur.fetchall())
+
+        return bool(self._run("update_record_cell", _fn))
 
     def get_sources(self, dataset_id: str) -> dict:
         ds = self._rows("get_sources",

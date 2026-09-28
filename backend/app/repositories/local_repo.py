@@ -149,11 +149,22 @@ class LocalRepo:
         return out
 
     def get_dataset(self, dataset_id: str) -> dict | None:
+        # Last write wins, matching every other read here: a corrected record is
+        # appended as a new line, so returning the first match would serve the
+        # stale copy forever.
+        found = None
         for d in self._scan("datasets"):
             if d.get("id") == dataset_id:
-                return {"id": d["id"], "run_id": d.get("run_id", ""), "name": d.get("name", ""),
-                        "schema": d.get("schema", []), "records": d.get("records", []),
-                        "counts": d.get("counts", {})}
+                found = {"id": d["id"], "run_id": d.get("run_id", ""), "name": d.get("name", ""),
+                         "schema": d.get("schema", []), "records": d.get("records", []),
+                         "counts": d.get("counts", {}), "created_at": d.get("_ts", "")}
+        return found
+
+    def get_dataset_schema(self, dataset_id: str) -> list | None:
+        """Just the declared schema — no record copy. See PostgresRepo."""
+        for d in self._scan("datasets"):
+            if d.get("id") == dataset_id:
+                return d.get("schema", []) or []
         return None
 
     def get_records(self, dataset_id: str, q: str = "", limit: int = 100, offset: int = 0) -> dict:
@@ -164,8 +175,39 @@ class LocalRepo:
         if q:
             ql = q.lower()
             rows = [r for r in rows if ql in json.dumps(r, default=str).lower()]
+        window = rows[offset:offset + max(1, min(limit, 500))]
         return {"dataset_id": dataset_id, "total": len(rows),
-                "records": rows[offset:offset + max(1, min(limit, 500))]}
+                "records": [{"record_id": f"local:{offset + i}",
+                             "fields": r.get("fields", r)}
+                            for i, r in enumerate(window)]}
+
+    def update_record_cell(self, dataset_id: str, record_id: str,
+                           field: str, cell: dict) -> bool:
+        """Write one field of one record by appending a corrected dataset line.
+
+        Append-only like every other write here, and `get_dataset` returns the
+        last line for an id, so the corrected copy supersedes the original
+        without mutating a line that other readers may still be scanning.
+        """
+        ds = self.get_dataset(dataset_id)
+        if ds is None:
+            return False
+        try:
+            idx = int(str(record_id).split(":", 1)[1])
+        except (ValueError, IndexError):
+            return False
+        records = ds.get("records", [])
+        if not 0 <= idx < len(records):
+            return False
+        row = dict(records[idx])
+        fields = dict(row.get("fields", {}))
+        fields[field] = cell
+        row["fields"] = fields
+        records[idx] = row
+        self._append("datasets", {"id": dataset_id, "run_id": ds.get("run_id", ""),
+                                  "name": ds.get("name", ""), "schema": ds.get("schema", []),
+                                  "records": records, "counts": ds.get("counts", {})})
+        return True
 
     def get_sources(self, dataset_id: str) -> dict:
         ds = self.get_dataset(dataset_id)

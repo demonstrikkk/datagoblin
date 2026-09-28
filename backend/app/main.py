@@ -29,6 +29,7 @@ from app.repositories import factory as factory_repo
 from app.repositories.factory import build_repo
 from app.schemas.run import DatasetView, Envelope, RunView
 from app.services import crawler as crawler_svc
+from app.services import coverage as coverage_svc
 from app.services import exporter as exporter_svc
 from app.services import impersonation as impersonation_svc
 from app.services import jobs as jobs_svc
@@ -488,6 +489,80 @@ async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
     if not out:
         raise not_found("dataset", did)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/conflicts", dependencies=[Depends(require_api_key)])
+async def list_conflicts(did: str, cid: str = Depends(correlation_id)) -> dict:
+    """Every disputed cell in the dataset, with both sides and their quotes.
+
+    The UI could already count conflicting cells and stop there, which is how a
+    dataset ended up reporting "8 conflicting" as a headline nobody could act
+    on. The rivals the deduper preserved at merge time are what make each of
+    those eight a decidable question instead of a number.
+    """
+    schema = repo().get_dataset_schema(did)
+    if schema is None:
+        raise not_found("dataset", did)
+    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+    conflicts = coverage_svc.collect_conflicts(rows)
+    return {"data": {"dataset_id": did, "schema": schema,
+                     "conflicts": conflicts,
+                     "open": sum(1 for c in conflicts if not c["decided"])},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/conflicts/resolve",
+          dependencies=[Depends(require_api_key)])
+async def resolve_conflict(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Record a human decision about one disputed cell.
+
+    Two moves, and neither writes a value that was not extracted: keep the
+    incumbent, or adopt a rival that came from a different source. There is no
+    free-text path, because a dataset whose claim is "every value carries its
+    evidence" cannot accept an unquoted one.
+    """
+    if repo().get_dataset_schema(did) is None:
+        raise not_found("dataset", did)
+    record_id = str(body.get("record_id") or "")
+    field = str(body.get("field") or "")
+    choice = str(body.get("choice") or "")
+    if not record_id or not field:
+        raise validation("record_id and field are required")
+    if choice not in ("keep", "adopt"):
+        raise validation("choice must be 'keep' or 'adopt'")
+
+    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+    target = next((r for r in rows if str(r.get("record_id")) == record_id), None)
+    if target is None:
+        raise not_found("record", record_id)
+    cell = (target.get("fields") or {}).get(field)
+    try:
+        updated = coverage_svc.apply_resolution(cell, choice, body.get("rival_index"))
+    except (ValueError, TypeError) as exc:
+        raise validation(str(exc))
+    if not repo().update_record_cell(did, record_id, field, updated):
+        raise not_found("record", record_id)
+    return {"data": {"dataset_id": did, "record_id": record_id, "field": field,
+                     "cell": updated},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/coverage", dependencies=[Depends(require_api_key)])
+async def dataset_coverage(did: str, cid: str = Depends(correlation_id)) -> dict:
+    """Fill/verdict counts per field, plus the ranked backlog of what is missing.
+
+    Derived purely by reading stored records. A declared field that no page ever
+    carried is reported as absent, never defaulted — a coverage number that
+    filled its own gaps would be worse than no number at all.
+    """
+    schema = repo().get_dataset_schema(did)
+    if schema is None:
+        raise not_found("dataset", did)
+    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+    matrix = coverage_svc.field_coverage(rows, schema)
+    conflicts = coverage_svc.collect_conflicts(rows)
+    matrix["backlog"] = coverage_svc.build_backlog(matrix, conflicts)
+    return {"data": matrix, "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.get("/api/runs/{run_id}/pages", dependencies=[Depends(require_api_key)])

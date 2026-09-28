@@ -283,6 +283,241 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
 /* ---------------------------------------------------------------- sources */
 
+function CoveragePanel({ datasetId }) {
+  const { data, status, error, refetch } = useResource(
+    (o) => api.coverage(datasetId, o),
+    [datasetId]
+  );
+
+  if (status === 'loading' && !data) return <Loading rows={5} label="Reading stored records" />;
+  if (error) return <ErrorNote error={error} onRetry={refetch} />;
+  if (!data) return <Empty title="No coverage data" hint="Coverage appears once records are stored." />;
+
+  const fields = data.fields || [];
+  const backlog = data.backlog?.items || [];
+  const total = data.records || 0;
+  const complete = fields.filter((f) => f.missing === 0).length;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Stat label="Records" value={num(total)} sub="rows scanned" />
+        <Stat label="Fields declared" value={num(fields.length)} sub={`${complete} on every record`} />
+        <Stat
+          label="Open conflicts"
+          value={num(data.backlog?.open_conflicts ?? 0)}
+          sub="sources disagree"
+        />
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-baseline justify-between">
+          <h3 className="text-sm font-medium">Per-field coverage</h3>
+          <span className="text-xs text-muted">
+            Present is not the same as proven — the darker slice is values carrying a verdict.
+          </span>
+        </div>
+        {fields.map((f) => (
+          <div
+            key={f.field}
+            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-rule-2/60 px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="flex items-baseline gap-2">
+                <span className="truncate text-sm">{f.field}</span>
+                <span className="shrink-0 text-xs tabular-nums text-muted">
+                  {f.present}/{f.records}
+                </span>
+              </div>
+              <StackedBar
+                className="mt-1.5"
+                rows={[
+                  { key: 'verified', n: f.verified, label: 'verified' },
+                  { key: 'unverified', n: f.unverified, label: 'no verdict' },
+                  { key: 'conflicting', n: f.conflicting, label: 'conflicting' },
+                  { key: 'missing', n: f.missing, label: 'absent' },
+                ]}
+                total={f.records}
+              />
+            </div>
+            <span className="shrink-0 text-xs tabular-nums text-muted">
+              {f.coverage_pct}%
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {backlog.length ? (
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium">What is outstanding</h3>
+          <p className="text-xs text-muted">
+            Ranked by how much work each gap represents. A field no stored page
+            carried is a schema problem, not a re-run problem.
+          </p>
+          {backlog.map((b) => (
+            <div
+              key={b.field}
+              className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule-2/40 py-1.5 last:border-0"
+            >
+              <span className="text-sm">{b.field}</span>
+              <span className="flex-1 text-xs text-muted">{b.reason}</span>
+              <Pill tone={b.routable ? 'warn' : 'muted'}>
+                {b.outstanding} open
+              </Pill>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Notice tone="ok">
+          Every declared field is filled on every record.
+        </Notice>
+      )}
+    </div>
+  );
+}
+
+function ConflictsPanel({ datasetId }) {
+  const { data, status, error, refetch } = useResource(
+    (o) => api.conflicts(datasetId, o),
+    [datasetId]
+  );
+  const [busy, setBusy] = useState(null);
+  const [decided, setDecided] = useState({});
+  const [failure, setFailure] = useState(null);
+
+  if (status === 'loading' && !data) return <Loading rows={4} label="Reading disputes" />;
+  if (error) return <ErrorNote error={error} onRetry={refetch} />;
+
+  const conflicts = data?.conflicts || [];
+  // Decided cards stay in place showing the outcome. Removing them on click
+  // left no confirmation that anything was written, which reads as "nothing
+  // happened" — and the next card slides up into its place to hide it further.
+  const live = conflicts.filter((c) => !decided[c.record_id + c.field]);
+  if (!conflicts.length) {
+    return (
+      <Empty
+        title="No disagreements between sources"
+        hint="When two pages give the same field different values, both sides appear here with their quotes."
+      />
+    );
+  }
+
+  async function decide(c, choice, rivalIndex) {
+    const key = c.record_id + c.field;
+    setBusy(key);
+    setFailure(null);
+    try {
+      await api.resolveConflict(datasetId, {
+        record_id: c.record_id,
+        field: c.field,
+        choice,
+        rival_index: rivalIndex,
+      });
+      setDecided((d) => ({
+        ...d,
+        [key]: choice === 'keep' ? 'kept the first value' : `adopted rival ${Number(rivalIndex) + 1}`,
+      }));
+      // Re-read: the open-conflict count just changed, and leaving the old
+      // number on screen next to a card saying it was resolved is two truths
+      // that disagree.
+      refetch();
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {live.length === 0 ? (
+        <Notice tone="ok">
+          All {conflicts.length} disagreement{conflicts.length === 1 ? '' : 's'} resolved.
+          The decisions are stored on the records.
+        </Notice>
+      ) : (
+        <p className="text-xs text-muted">
+          {live.length} open. Each side quotes the page it came from. Keeping the
+          incumbent or adopting a rival both preserve evidence — there is no way
+          to type in a value that was never extracted.
+        </p>
+      )}
+
+      {failure ? <ErrorNote error={failure} onRetry={refetch} /> : null}
+
+      {conflicts.slice(0, 40).map((c) => {
+        const key = c.record_id + c.field;
+        const done = Boolean(decided[key]);
+        const outcome = decided[key];
+        return (
+          <div
+            key={key}
+            className={`space-y-2 rounded-lg border p-3 ${done ? 'border-ok/40 opacity-70' : 'border-rule-2/60'}`}
+          >
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-sm font-medium">{c.field}</span>
+              <span className="text-xs text-muted">record {c.record_id}</span>
+            </div>
+            {done ? (
+              <Notice tone="ok">
+                Resolved — {outcome}.
+              </Notice>
+            ) : null}
+            <div className="rounded-md border border-warn/40 bg-warn/5 p-2">
+              <div className="text-xs uppercase tracking-wide text-muted">incumbent</div>
+              <div className="text-sm">{String(c.incumbent.value ?? '—')}</div>
+              {c.incumbent.quote ? (
+                <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
+                  “{c.incumbent.quote}”
+                </div>
+              ) : null}
+              <div className="mt-2">
+                <button
+                  type="button"
+                  className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
+                  disabled={busy === key || decided[key]}
+                  onClick={() => decide(c, 'keep')}
+                >
+                  Keep this
+                </button>
+              </div>
+            </div>
+            {c.rivals.map((rv) => (
+              <div key={rv.index} className="rounded-md border border-rule-2/60 p-2">
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  rival {rv.index + 1}
+                  {rv.url ? ` · ${host(rv.url)}` : ''}
+                </div>
+                <div className="text-sm">{String(rv.value ?? '—')}</div>
+                {rv.quote ? (
+                  <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
+                    “{rv.quote}”
+                  </div>
+                ) : null}
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
+                    disabled={busy === key || decided[key]}
+                    onClick={() => decide(c, 'adopt', rv.index)}
+                  >
+                    Adopt this
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      {conflicts.length > 40 ? (
+        <p className="text-xs text-muted">
+          Showing the first 40 of {conflicts.length}.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function SourceGrid({ datasetId }) {
   const { data, status, error, refetch } = useResource(
     (o) => api.sources(datasetId, o),
@@ -678,6 +913,8 @@ export default function DatasetPage() {
         onChange={setTab}
         options={[
           { value: 'records', label: 'Records' },
+          { value: 'coverage', label: 'Coverage' },
+          { value: 'conflicts', label: 'Conflicts' },
           { value: 'sources', label: 'Sources' },
           { value: 'export', label: 'Export' },
         ]}
@@ -699,6 +936,8 @@ export default function DatasetPage() {
         />
       ) : null}
 
+      {tab === 'coverage' ? <CoveragePanel datasetId={id} /> : null}
+      {tab === 'conflicts' ? <ConflictsPanel datasetId={id} /> : null}
       {tab === 'sources' ? <SourceGrid datasetId={id} /> : null}
       {tab === 'export' ? <ExportPanel datasetId={id} schema={data.schema} /> : null}
     </div>

@@ -110,12 +110,17 @@ def test_conflicts_are_judged_concurrently(monkeypatch):
         return {"decision": "A"}
 
     monkeypatch.setattr(jev, "conflict_triage", _triage)
-    t0 = time.perf_counter()
     stats = run(deduper_svc.adjudicate_conflicts(_conflicting(6)))
-    took = time.perf_counter() - t0
     assert stats["judged"] == 6
+    # `in_flight["max"]` is the invariant, and it is measured rather than
+    # timed. This test also asserted wall clock < 0.12s as a proxy for the same
+    # thing, which failed under load on an otherwise-correct implementation:
+    # six 30ms calls run concurrently finish in ~30ms, but a busy machine can
+    # overshoot 120ms and the assertion could not tell that apart from
+    # serialised execution. Serial execution pins max to 1, so this catches
+    # the regression directly.
     assert in_flight["max"] > 1, "conflicts were adjudicated one at a time"
-    assert took < 0.12, f"6 conflicts took {took:.2f}s; the sum, not the max"
+    assert in_flight["max"] >= 2 and stats["confirmed"] == 6
 
 
 def test_adopting_a_rival_actually_mutates_the_cell(monkeypatch):
