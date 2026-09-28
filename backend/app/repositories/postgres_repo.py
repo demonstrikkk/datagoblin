@@ -409,7 +409,16 @@ class PostgresRepo:
         def _fn(cur):
             cur.execute("SET TRANSACTION READ ONLY")
             cur.execute("SET LOCAL statement_timeout = '15s'")
-            cur.execute(sql, params)
+            # No params unless there are some. Passing an empty tuple still
+            # switches psycopg into placeholder interpolation, and it treats
+            # every `%` in the statement as one — so a perfectly ordinary
+            # `ILIKE '%acme%'` failed with "only '%s', '%b', '%t' are allowed
+            # as placeholders". The model's SQL carries no parameters, and a
+            # literal `%` in a search pattern has to survive as a literal.
+            if params:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]
 
         return self._run("run_readonly_sql", _fn) or []

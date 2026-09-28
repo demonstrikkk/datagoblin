@@ -152,6 +152,59 @@ def test_a_zero_or_negative_limit_is_clamped_to_one():
 
 
 # -- the prompt -------------------------------------------------------------
+def test_a_literal_percent_survives_to_execution(monkeypatch):
+    """`ILIKE '%acme%'` is the ordinary way to answer "companies containing X".
+
+    Passing an empty params tuple still puts psycopg into placeholder mode, and
+    it reads every `%` as one — so the query died with "only '%s', '%b', '%t'
+    are allowed as placeholders" on any search term, which is most questions
+    about a specific name.
+    """
+    from app.repositories import postgres_repo
+
+    seen = {}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            seen["sql"] = sql
+            seen["params"] = params
+            if "fetchall" in sql:
+                return None
+
+        def fetchall(self):
+            return [{"company_name": "Acme"}]
+
+    repo = object.__new__(postgres_repo.PostgresRepo)
+    monkeypatch.setattr(postgres_repo.PostgresRepo, "_run",
+                        lambda self, op, fn: fn(_Cur()))
+    sql = sqlq.build_query('SELECT * FROM records WHERE "company_name" ILIKE \'%acme%\'',
+                           "rel", 10)
+    rows = postgres_repo.PostgresRepo.run_readonly_sql(repo, sql)
+    assert rows == [{"company_name": "Acme"}]
+    assert "%acme%" in seen["sql"]
+    # No params object at all, so nothing is interpolated and the literal stays.
+    assert seen["params"] is None
+
+
+def test_readonly_sql_declares_the_transaction_read_only(monkeypatch):
+    from app.repositories import postgres_repo
+
+    stmts = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            stmts.append(sql)
+
+        def fetchall(self):
+            return []
+
+    repo = object.__new__(postgres_repo.PostgresRepo)
+    monkeypatch.setattr(postgres_repo.PostgresRepo, "_run",
+                        lambda self, op, fn: fn(_Cur()))
+    postgres_repo.PostgresRepo.run_readonly_sql(repo, "SELECT 1")
+    assert any("SET TRANSACTION READ ONLY" in s for s in stmts)
+
+
 def test_the_prompt_lists_the_columns_and_forbids_everything_else():
     p = sqlq.build_prompt("which industries", [{"name": "industry"}], 42,
                           sqlq.DEFAULT_EXAMPLES)
