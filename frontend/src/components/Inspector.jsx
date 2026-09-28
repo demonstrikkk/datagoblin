@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useInspector } from '../lib/inspector.jsx';
+import { api } from '../lib/api.js';
 import { Empty, ErrorNote, KeyVal, Pill, SkeletonLines, CopyButton } from './ui.jsx';
 import {
   REC_VERIFY,
@@ -79,14 +80,130 @@ function FieldValue({ raw }) {
   return <span className="break-words">{String(raw)}</span>;
 }
 
+/**
+ * Show a quote sitting inside the stored page it was taken from.
+ *
+ * The offsets a field carries were computed in Python, where every string index
+ * counts a Unicode *code point*. JavaScript counts UTF-16 *code units*, so a
+ * single character outside the Basic Multilingual Plane — an emoji, some CJK —
+ * shifts every later position by one and the wrong span gets highlighted.
+ * Slicing an expanded code-point array keeps the two in step.
+ *
+ * The result is then checked against the quote rather than assumed. If the
+ * stored page has changed, or the offsets address something else, this says so
+ * and shows no highlight — a proof view that highlights plausible-looking text
+ * it cannot verify would be worse than no proof view at all.
+ */
+const PROOF_CONTEXT = 300;
+
+function resolveProof(markdown, start, end) {
+  const chars = [...(markdown || '')];
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > chars.length) {
+    return null;
+  }
+  return {
+    before: chars.slice(Math.max(0, start - PROOF_CONTEXT), start).join(''),
+    hit: chars.slice(start, end).join(''),
+    after: chars.slice(end, Math.min(chars.length, end + PROOF_CONTEXT)).join(''),
+    total: chars.length,
+  };
+}
+
+function ProofView({ src }) {
+  const [state, setState] = useState({ phase: 'loading' });
+
+  useEffect(() => {
+    let alive = true;
+    setState({ phase: 'loading' });
+    api
+      .page(src.page_id)
+      .then((payload) => {
+        if (!alive) return;
+        // api.request already unwraps the envelope's `data`, so the payload IS
+        // the page. Reading `payload.data` here yields undefined, which makes
+        // every proof view claim its offsets fall outside an empty page.
+        const page = payload || {};
+        const markdown = page.markdown || '';
+        const proof = resolveProof(markdown, src.start, src.end);
+        if (!proof) {
+          setState({ phase: 'bad-offsets', markdown });
+        } else if (src.quote && proof.hit !== src.quote) {
+          setState({ phase: 'mismatch', proof, page });
+        } else {
+          setState({ phase: 'ok', proof, page });
+        }
+      })
+      .catch((err) => {
+        if (alive) setState({ phase: 'error', message: err?.message || 'Could not load the page.' });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [src.page_id, src.start, src.end, src.quote]);
+
+  if (state.phase === 'loading') {
+    return <SkeletonLines lines={3} />;
+  }
+  if (state.phase === 'error') {
+    return <ErrorNote title="Stored page unavailable">{state.message}</ErrorNote>;
+  }
+  if (state.phase === 'bad-offsets') {
+    return (
+      <p className="text-[11.5px] text-warn">
+        This quote carries offsets that do not fall inside the stored page, so it cannot be shown in
+        context.
+      </p>
+    );
+  }
+  if (state.phase === 'mismatch') {
+    // The page is there and the offsets resolve, but they select different
+    // text than the quote claims. Report the disagreement instead of
+    // highlighting whichever text the offsets happen to land on.
+    return (
+      <div className="space-y-1.5">
+        <p className="text-[11.5px] text-warn">
+          The stored page no longer matches this quote: the recorded offsets select different text.
+          The page may have been re-crawled since this value was verified.
+        </p>
+        <p className="text-[11px] text-muted">
+          offsets select{' '}
+          <code className="font-mono text-ink-2">“{truncate(state.proof.hit, 160)}”</code>
+        </p>
+      </div>
+    );
+  }
+
+  const { proof, page } = state;
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[10.5px] uppercase tracking-[0.14em] text-muted">
+        {page?.url ? host(page.url) : 'stored page'} · character offsets {src.start}–{src.end} of{' '}
+        {proof.total}
+      </p>
+      <blockquote className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-accent/50 pl-2.5 text-[12px] leading-relaxed text-ink-2">
+        {proof.before ? <span className="text-muted">{proof.before}</span> : null}
+        <mark className="rounded-[2px] bg-accent/20 px-0.5 text-ink">{proof.hit}</mark>
+        <span className="text-muted">{proof.after}</span>
+      </blockquote>
+      <p className="text-[10.5px] text-muted">
+        Verbatim match against the page stored at run time.
+        {page?.retrieved_at ? ` Retrieved ${when(page.retrieved_at)}.` : null}
+      </p>
+    </div>
+  );
+}
+
 function FieldRow({ name, prov }) {
   const [open, setOpen] = useState(false);
+  const [showProof, setShowProof] = useState(false);
   // `ProvenanceField` = { value, verification_status, source, normalized }
   const pf = prov && typeof prov === 'object' ? prov : {};
   const status = pf.verification_status;
   const m = status ? REC_VERIFY[status] : null;
   const src = pf.source || null;
   const hasEvidence = Boolean(src && (src.quote || src.url || src.page_id));
+  // Offsets are only proof if there is a page to resolve them against.
+  const canProve = Boolean(src?.page_id && src?.quote && Number.isInteger(src?.start) && Number.isInteger(src?.end));
 
   return (
     <div className="border-b border-rule last:border-0">
@@ -168,6 +285,25 @@ function FieldRow({ name, prov }) {
               <span className="text-[10px] text-muted">{when(src.retrieved_at)}</span>
             ) : null}
           </div>
+
+          {canProve ? (
+            <div className="pl-2.5">
+              <button
+                type="button"
+                onClick={() => setShowProof((v) => !v)}
+                aria-expanded={showProof}
+                className="rounded border border-rule bg-surface px-2 py-1 text-[11px] text-ink-2 transition-colors hover:border-accent/50 hover:text-ink"
+              >
+                {showProof ? 'Hide the stored page' : 'Show this quote in the stored page'}
+              </button>
+            </div>
+          ) : null}
+
+          {showProof && canProve ? (
+            <div className="animate-fade-in">
+              <ProofView src={src} />
+            </div>
+          ) : null}
 
           {pf.normalized ? (
             <p className="pl-2.5 text-[10.5px] text-muted">

@@ -51,7 +51,27 @@ REPO: object = None
 #: these dicts are live-run state only. Oldest terminal runs evicted first;
 #: active runs are never evicted.
 MAX_KEPT_RUNS = 200
-_TERMINAL = ("COMPLETED", "FAILED", "CANCELLED")
+#: PARTIAL belongs here: a budget-stopped run is finished and persisted, and it
+#: used to be omitted. Because eviction only ever picks from this list, a run
+#: that hit its credit or runtime cap was retained forever while COMPLETED runs
+#: were retired — the one status most likely to repeat in a long session was the
+#: one that leaked.
+_TERMINAL = ("COMPLETED", "FAILED", "CANCELLED", "PARTIAL")
+
+
+def _id_arg(kind: str, value: str) -> str:
+    """Reject a malformed resource id as invalid input, not as an outage.
+
+    Both repositories key on `uuid`. Without this, a value like `not-an-id`
+    reaches Postgres, which fails the cast, and `dependency()` maps that to a
+    503 E_DEPENDENCY — telling the caller the database is broken when the
+    request was simply nonsense. A bad id is a 422.
+    """
+    try:
+        uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        raise validation(f"Malformed {kind} id: expected a UUID")
+    return value
 
 
 def _evict_registries() -> None:
@@ -468,6 +488,45 @@ async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
     if not out:
         raise not_found("dataset", did)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/runs/{run_id}/pages", dependencies=[Depends(require_api_key)])
+async def run_pages(run_id: str, limit: int = Query(default=200, ge=1, le=500),
+                    cid: str = Depends(correlation_id)) -> dict:
+    """Stored evidence for one run, newest first.
+
+    Thin wrapper: both repositories have carried `get_pages` since the beginning
+    and nothing ever called it. That is why the UI could show a quote's
+    `@start-end` offsets with no way to open the page those offsets address —
+    the proof had no retrieval path, so it was decoration.
+    """
+    _id_arg("run", run_id)
+    if not repo().get_run(run_id):
+        raise not_found("run", run_id)
+    return {"data": {"run_id": run_id,
+                     "pages": repo().get_pages(run_id, limit)},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/pages/{page_id}", dependencies=[Depends(require_api_key)])
+async def page_detail(page_id: str, cid: str = Depends(correlation_id)) -> dict:
+    """One stored page, so a quote's offsets can be resolved against it.
+
+    `markdown` holds the evidence text, and it is what `start`/`end` index into:
+    the extractor and the evidence store are built by the same
+    `page_evidence_text`, so a verified quote locates in exactly this string.
+    Returning anything else here would make the offsets meaningless.
+
+    `raw_html` is dropped from the response. It is the original snapshot —
+    routinely megabytes — and quoting a field never needs it; `content_hash`
+    plus `get_pages` already covers re-checking that the page did not change.
+    """
+    _id_arg("page", page_id)
+    page = repo().get_page(page_id)
+    if not page:
+        raise not_found("page", page_id)
+    page.pop("raw_html", None)
+    return {"data": page, "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.post("/api/datasets/{did}/export", dependencies=[Depends(require_api_key)])

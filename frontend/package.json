@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 4173",
-    "e2e": "python e2e/smoke.py && python e2e/interactions.py && python e2e/verify.py && python e2e/partial.py && python e2e/visual.py"
+    "e2e": "python e2e/smoke.py && python e2e/interactions.py && python e2e/verify.py && python e2e/partial.py && python e2e/visual.py && python e2e/proof.py"
   },
   "dependencies": {
     "react": "^18.3.1",

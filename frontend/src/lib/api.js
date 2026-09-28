@@ -185,6 +185,15 @@ export const api = {
   // takes no query parameters; the signature exists for symmetry
   history: (o) => request('/history', o),
 
+  /* --- stored evidence -------------------------------------------------- */
+  // A quote carries page_id + start/end. These are what make that arithmetic
+  // mean something: the offsets address `page.markdown`, which is the same
+  // string the evidence store and the extractor both build, so a quote can be
+  // shown sitting inside the page it was taken from instead of asserted.
+  page: (pageId, o) => request(`/pages/${encodeURIComponent(pageId)}`, { ...o, timeout: o?.timeout ?? 30_000 }),
+  runPages: (runId, params, o) =>
+    request(`/runs/${encodeURIComponent(runId)}/pages${qs(params)}`, o),
+
   /* --- datasets -------------------------------------------------------- */
   datasets: (o) => request('/datasets', o),
   dataset: (id, o) => request(`/datasets/${encodeURIComponent(id)}`, o),
