@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:5173"
     VITE_API_URL: str = "http://localhost:8000"
     API_KEY: str = ""
+    # Explicit opt-in to running without authentication. The gate fails closed
+    # when API_KEY is empty, because an absent key is indistinguishable from a
+    # misconfigured deployment, and an open API spends real provider budget.
+    # Set this to true only for a deliberately open local instance.
+    ALLOW_UNAUTHENTICATED: bool = False
 
     # Persistence
     # Which store the app writes to. Previously inferred from whether Supabase

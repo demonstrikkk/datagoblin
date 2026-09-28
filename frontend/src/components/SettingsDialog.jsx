@@ -101,17 +101,27 @@ export default function SettingsDialog({ onClose }) {
                 label="Compact density"
                 hint="Tighter rows and reduced padding in tables and lists."
               />
+              {/*
+                Reported, not offered. This used to be a Toggle whose onChange
+                was a no-op: a control that looked actionable and did nothing,
+                which is worse than not having it. Reduced motion is an OS
+                accessibility setting and deliberately not overridable here.
+              */}
               <div className="rounded-sm border border-rule bg-warm/40 px-3 py-2">
-                <Toggle
-                  checked={reduced}
-                  onChange={() => {}}
-                  label="Reduced motion"
-                  hint={
-                    reduced
-                      ? 'Active — detected from your OS. Decorative animation is disabled.'
-                      : 'Follows your OS setting. Ambient animation and transitions will stop if you enable it there.'
-                  }
-                />
+                <p className="text-[12.5px] font-medium text-ink">Reduced motion</p>
+                <p className="mt-0.5 text-[11px] leading-snug text-muted">
+                  {reduced ? (
+                    <>
+                      <span className="text-ok">Active</span> — detected from your OS.
+                      Decorative animation and the background field are stopped.
+                    </>
+                  ) : (
+                    <>
+                      Off, following your OS setting. Animation stops here
+                      automatically if you enable it there.
+                    </>
+                  )}
+                </p>
               </div>
             </div>
           </section>
@@ -140,9 +150,11 @@ export default function SettingsDialog({ onClose }) {
           </section>
 
           <Notice tone="muted">
-            Every field shown in this interface comes from the live API. Where the backend
-            has a known gap — PDFs, JSON feeds, cross-run deduplication — the UI says so
-            rather than showing an empty success state.
+            Field values come from the live API. Some of the surrounding chrome does not: the
+            per-dataset verification counters depend on what each run wrote, and older runs wrote
+            none — those say <em>not counted</em> rather than claiming a quality bar they cannot
+            support. Where the backend has a known gap — PDFs, JSON feeds, cross-run deduplication
+            — the UI says so rather than showing an empty success state.
           </Notice>
         </form>
       </div>

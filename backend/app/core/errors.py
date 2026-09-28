@@ -71,3 +71,11 @@ def cancelled(msg: str = "Run cancelled") -> AppError:
 
 def not_found(resource: str, ident: str) -> AppError:
     return AppError("E_NOT_FOUND", f"{resource} {ident} not found", 404)
+
+
+def unauthorized(msg: str = "Invalid API key") -> AppError:
+    return AppError("E_UNAUTHORIZED", msg, 401)
+
+
+def auth_not_configured(msg: str) -> AppError:
+    return AppError("E_AUTH_NOT_CONFIGURED", msg, 503)

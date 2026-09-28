@@ -6,10 +6,11 @@ Wiring: planner/discovery/crawler/extractor/validator/normalizer/deduper Runner
 """
 import asyncio
 import datetime
+import hmac
 import json
 import uuid
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -314,7 +315,7 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
 
 
 # -- jobs + map ---------------------------------------------------------------
-@app.get("/api/jobs/{run_id}")
+@app.get("/api/jobs/{run_id}", dependencies=[Depends(require_api_key)])
 async def job_status(run_id: str, skip: int = Query(default=0, ge=0),
                      limit: int = Query(default=100, ge=1, le=500),
                      cid: str = Depends(correlation_id)) -> dict:
@@ -357,7 +358,7 @@ async def map_url(body: dict, cid: str = Depends(correlation_id)) -> dict:
             "error": None, "meta": {"correlation_id": cid}}
 
 
-@app.get("/api/runs/{run_id}")
+@app.get("/api/runs/{run_id}", dependencies=[Depends(require_api_key)])
 async def run_status(run_id: str, cid: str = Depends(correlation_id)) -> dict:
     if run_id not in RUNS:
         stored = repo().get_run(run_id)
@@ -388,7 +389,18 @@ async def cancel_run(run_id: str, cid: str = Depends(correlation_id)) -> dict:
 
 
 @app.get("/api/runs/{run_id}/stream")
-async def stream(run_id: str, request: Request):
+async def stream(run_id: str, request: Request, key: str | None = Query(default=None)):
+    """Server-sent events for one run.
+
+    Auth: `EventSource` cannot send a custom header, so the key is accepted as
+    a query parameter. That is a deliberate trade — a key in a URL can end up in
+    access logs, which is a worse property than a header, but leaving this
+    endpoint open exposes the full run log and the run ids that reach it. The
+    ids are unguessable UUIDs, so gating here is defence in depth rather than
+    the only control; the enumeration endpoints that leak them are gated too.
+    """
+    await require_api_key(key)
+
     async def _gen():
         idx = 0
         while True:
@@ -398,14 +410,21 @@ async def stream(run_id: str, request: Request):
             for ev in events:
                 yield {"event": ev.get("type", "message"), "data": json.dumps(ev, default=str)}
                 idx += 1
-            if done or (RUNS.get(run_id, {}).get("status") in ("COMPLETED", "FAILED", "CANCELLED") and idx >= total):
+            # PARTIAL was missing here. A budget-stopped run is persisted as
+            # FAILED + partial=true with status PARTIAL, so this loop never
+            # exited: the connection stayed open polling a finished run, and
+            # the client was left waiting on a socket that had nothing left to
+            # send. The client also self-closes, but the server-side generator
+            # was still holding a slot.
+            if done or (RUNS.get(run_id, {}).get("status") in
+                        ("COMPLETED", "FAILED", "CANCELLED", "PARTIAL") and idx >= total):
                 break
             await asyncio.sleep(0.5)
     return EventSourceResponse(_gen(), ping=settings.SSE_PING_S)
 
 
 # -- datasets --------------------------------------------------------------
-@app.get("/api/datasets")
+@app.get("/api/datasets", dependencies=[Depends(require_api_key)])
 async def list_datasets(cid: str = Depends(correlation_id)) -> dict:
     items = []
     for d in repo().list_datasets():
@@ -418,7 +437,7 @@ async def list_datasets(cid: str = Depends(correlation_id)) -> dict:
     return {"data": items, "error": None, "meta": {"correlation_id": cid}}
 
 
-@app.get("/api/datasets/{did}")
+@app.get("/api/datasets/{did}", dependencies=[Depends(require_api_key)])
 async def get_dataset(did: str, cid: str = Depends(correlation_id)) -> dict:
     ds = repo().get_dataset(did)
     if not ds:
@@ -433,7 +452,7 @@ async def get_dataset(did: str, cid: str = Depends(correlation_id)) -> dict:
     return {"data": view, "error": None, "meta": {"correlation_id": cid}}
 
 
-@app.get("/api/datasets/{did}/records")
+@app.get("/api/datasets/{did}/records", dependencies=[Depends(require_api_key)])
 async def get_records(did: str, q: str = "", limit: int = Query(default=100, ge=1, le=500),
                       offset: int = Query(default=0, ge=0),
                       cid: str = Depends(correlation_id)) -> dict:
@@ -443,7 +462,7 @@ async def get_records(did: str, q: str = "", limit: int = Query(default=100, ge=
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
-@app.get("/api/datasets/{did}/sources")
+@app.get("/api/datasets/{did}/sources", dependencies=[Depends(require_api_key)])
 async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
     out = repo().get_sources(did)
     if not out:
@@ -456,10 +475,16 @@ async def export_dataset(did: str, body: dict, cid: str = Depends(correlation_id
     ds = repo().get_dataset(did)
     if not ds:
         raise not_found("dataset", did)
+    # The caller's chosen columns win over the instance default. The frontend
+    # has always sent `fields`; this route ignored it and silently substituted
+    # settings.EXPORT_FIELDS, so a user who unticked columns still received all
+    # of them — an export that did not match what was on screen.
+    req_cols = [str(c).strip() for c in (body.get("fields") or []) if str(c).strip()]
+    cols = req_cols or [c.strip() for c in settings.EXPORT_FIELDS.split(",") if c.strip()] or None
     fmt, content, filename = exporter_svc.export_dataset(
         ds.get("schema", ds.get("schema_json", [])), ds.get("records", []),
         body.get("format", "json"),
-        [c.strip() for c in settings.EXPORT_FIELDS.split(",") if c.strip()] or None,
+        cols,
         {"name": ds.get("name", did), "run_id": ds.get("run_id", did),
          "counts": ds.get("counts", {})})
     try:
@@ -489,29 +514,48 @@ async def export_dataset(did: str, body: dict, cid: str = Depends(correlation_id
     return {"data": {"format": fmt, "content": content}, "error": None, "meta": meta}
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=[Depends(require_api_key)])
 async def history(cid: str = Depends(correlation_id)) -> dict:
     return {"data": repo().run_history(), "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.get("/api/health")
-async def health() -> dict:
+async def health(x_api_key: str | None = Header(default=None)) -> dict:
+    """Liveness, plus diagnostics only for a caller who can prove they are
+    entitled to them.
+
+    This stays ungated so container health checks and load balancers keep
+    working. What it will NOT do is hand configuration to an anonymous caller:
+    the persistence adapter, the judge call counters and the throttle state are
+    reconnaissance, and an unauthenticated `GET /api/health` is the cheapest
+    possible probe for them. So the detail is included only when a valid key is
+    presented, and an unauthenticated caller gets a bare liveness answer.
+    """
     from app.providers.llm import zen as _zen
-    return {"data": {"status": "ok", "version": "0.1.0",
-                     "time": datetime.datetime.utcnow().isoformat() + "Z",
-                     # Which store this process is actually writing to. The
-                     # adapter used to be inferred from absent keys and fall
-                     # back silently, so a real database could be bypassed
-                     # with nothing reporting it.
-                     "persistence": dict(factory_repo.ACTIVE),
-                     # Judge throttling, made observable. A run whose fields all
-                     # came back unverified could be a throttled judge, and that
-                     # is an operational fact worth seeing without reading logs.
-                     "jev": dict(_zen.JEV_HEALTH)},
-            "error": None, "meta": {}}
+
+    data: dict = {"status": "ok", "version": "0.1.0",
+                  "time": datetime.datetime.utcnow().isoformat() + "Z"}
+
+    authorised = bool(settings.API_KEY) and bool(x_api_key) and hmac.compare_digest(
+        x_api_key, settings.API_KEY)
+    if settings.ALLOW_UNAUTHENTICATED and not settings.API_KEY:
+        authorised = True
+
+    if authorised:
+        # Which store this process is actually writing to. The adapter used to
+        # be inferred from absent keys and fall back silently, so a real
+        # database could be bypassed with nothing reporting it.
+        data["persistence"] = dict(factory_repo.ACTIVE)
+        # Judge throttling, made observable. A run whose fields all came back
+        # unverified could be a throttled judge, and that is an operational fact
+        # worth seeing without reading logs.
+        data["jev"] = dict(_zen.JEV_HEALTH)
+    else:
+        data["detail"] = "authenticated"
+    return {"data": data, "error": None, "meta": {}}
 
 
-@app.get("/api/models/free")
+@app.get("/api/models/free", dependencies=[Depends(require_api_key)])
 async def free_models(cid: str = Depends(correlation_id)) -> dict:
     """The free-model registry, annotated with live transport reachability.
 

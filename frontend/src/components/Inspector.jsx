@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useInspector } from '../lib/inspector.jsx';
 import { Empty, ErrorNote, KeyVal, Pill, SkeletonLines, CopyButton } from './ui.jsx';
-import { REC_VERIFY, RUN_STATUS, host, num, toneClass, truncate, when } from '../lib/format.js';
+import {
+  REC_VERIFY,
+  host,
+  isPartialRun,
+  num,
+  runStatusMeta,
+  toneClass,
+  truncate,
+  when,
+} from '../lib/format.js';
 
 /* ------------------------------------------------------------- primitives */
 
@@ -381,15 +390,19 @@ function EventView({ event }) {
 
 function RunView({ run }) {
   if (!run) return <Empty title="No run loaded" />;
-  const key = run.status === 'FAILED' && run.partial ? 'FAILED+partial' : run.status;
-  const meta = RUN_STATUS[key] || RUN_STATUS.QUEUED;
+  // A stored run can carry any stage name as its status (e.g. "DISCOVERING"
+  // for an interrupted run), so this must never assume the key is in the map.
+  // runStatusMeta falls back to a neutral "Unknown" pill; indexing RUN_STATUS
+  // directly and then reading meta.label threw for any unrecognised status.
+  const meta = runStatusMeta(run);
+  const partial = isPartialRun(run);
   return (
     <>
       <div className="flex items-center gap-1.5 border-b border-rule px-4 py-2.5">
         <Pill tone={meta.tone} glyph={meta.glyph} live={meta.live}>
           {meta.label}
         </Pill>
-        {run.partial ? (
+        {partial ? (
           <Pill tone="warn" glyph="◐" title="A dataset was written before the run budget ran out">
             partial saved
           </Pill>

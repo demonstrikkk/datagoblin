@@ -279,7 +279,7 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
             references=raw.get("references", ""),
             # The stored page this record came from, so its quote and offsets
             # address evidence that still exists after the run.
-            page_id=raw.get("page_id", ""))
+            page_id=raw.get("page_id", ""), budget=judge_budget)
         # The gate. Previously nothing ever raised DropItem, so a record whose
         # every field failed verification was still written to the dataset with
         # null values - the pipeline annotated failures instead of rejecting
@@ -300,10 +300,13 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
 
     # Phase-3 item pipeline: validate -> normalize with bounded Jev concurrency
     # (ITEM_CONCURRENCY), order-preserving kept[], cancel-responsive batches.
-    # The judge budget is per RUN, so concurrent runs in one process cannot
-    # starve each other.
-    validator_svc.JUDGE_BUDGET = validator_svc.JudgeBudget(
-        settings.RUN_MAX_JUDGE_CALLS)
+    #
+    # The budget is created here and passed down rather than assigned to
+    # validator.JUDGE_BUDGET. That assignment made the cap a process-wide
+    # mutable, so two runs at once would overwrite each other's counter on
+    # startup — the comment that used to sit here claimed it was per-run, which
+    # is exactly what it was not.
+    judge_budget = validator_svc.JudgeBudget(settings.RUN_MAX_JUDGE_CALLS)
     pipe = pipeline_svc.ItemPipeline([("validate", _validate_stage),
                                       ("normalize", _normalize_stage)],
                                      max_concurrency=settings.ITEM_CONCURRENCY)

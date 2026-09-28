@@ -23,6 +23,21 @@ def real_judge(monkeypatch):
     monkeypatch.setattr(jev, "_jev_call", _REAL_JEV_CALL[0])
 
 
+@pytest.fixture(autouse=True)
+def _open_local_gate(monkeypatch):
+    """Route tests exercise route logic; they do not carry an API key.
+
+    The gate fails closed by default, so without this every authenticated route
+    would answer 503 and the suite would test only the gate. `tests/
+    test_api_key_gate.py` covers the fail-closed behaviour directly, including a
+    real 503 on a real route, so the two concerns stay separate.
+
+    Scoped per test and applied in place, matching how the autouse fixtures
+    below reach `config_mod.settings`.
+    """
+    from app.core import config as config_mod
+    monkeypatch.setattr(config_mod.settings, "ALLOW_UNAUTHENTICATED", True)
+
 @pytest.fixture(autouse=True, scope="session")
 def _no_env_file():
     """Rebuild settings from defaults + process env, ignoring .env.

@@ -123,13 +123,25 @@ def to_markdown_report(schema: list[dict], rows: list[dict],
             else:
                 cells.append(str(cell or "").replace("|", "\\|")[:200])
                 statuses.append("")
-        worst = "unverified"
+        worst = "not_proven"
         for s in statuses:
             if s == "verified":
                 worst = "verified"
                 break
             if s == "needs_review":
                 worst = "needs_review"
+            elif s in ("conflicting", "judgment_unavailable", "rate_limited"):
+                # These were all being written as "unverified", which told a
+                # reader the source had been checked and come up short. They
+                # are different facts: "conflicting" means two sources
+                # disagreed, "judgment_unavailable" means the judge never ran,
+                # "rate_limited" means the judge was throttled. Collapsing them
+                # discards the reason a value is not proven, which is the one
+                # thing the reader needs to know.
+                if worst not in ("needs_review",):
+                    worst = s
+            elif s == "unverified" and worst == "not_proven":
+                worst = "unverified"
         lines.append(f"| {i} | " + " | ".join(cells) + f" | {worst} |")
     lines.append("")
     for i, r in enumerate(clipped, 1):

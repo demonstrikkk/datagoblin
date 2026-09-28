@@ -308,14 +308,25 @@ body {
   animation: pulse-ring 1.8s var(--e-swift) infinite;
 }
 
-/* proof highlight */
+/* Proof highlight.
+   Applied by the dataset proof view when a stored page is opened and the
+   cited quote is highlighted at its character offsets. It was previously
+   defined here and never rendered anywhere, which is dead weight in a
+   design system that claims to be the product's visual identity. */
 mark.proof {
-  background: rgba(154, 107, 63, 0.2);
+  background: rgba(154, 107, 63, 0.22);
   color: inherit;
-  box-shadow: 0 1px 0 rgba(154, 107, 63, 0.5);
+  box-shadow: 0 1px 0 rgba(154, 107, 63, 0.55);
   border-radius: 2px;
   padding: 0 1px;
   animation: fade-in 0.3s var(--e-swift) both;
+}
+
+/* The cited span inside a larger page, so a reader can see how much of the
+   page the claim actually rests on. */
+mark.proof.context {
+  background: rgba(154, 107, 63, 0.1);
+  box-shadow: none;
 }
 
 /* ============================================================================

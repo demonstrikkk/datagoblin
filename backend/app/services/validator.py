@@ -122,7 +122,8 @@ JUDGE_BUDGET = JudgeBudget(0)
 
 async def verify_field(value: object, quote: str, source_text: str,
                        required: bool, ftype: str, reference_id: str = "",
-                       references: str = "") -> tuple[object | None, str]:
+                       references: str = "",
+                       budget: JudgeBudget | None = None) -> tuple[object | None, str]:
     """Grade one field. Returns (value_to_store, status).
 
     Order matters: the cheap deterministic gates come first, the judge last,
@@ -141,11 +142,17 @@ async def verify_field(value: object, quote: str, source_text: str,
         return None, "unverified"
     if not reference_known(reference_id, references):
         return None, "unverified"
-    if JUDGE_BUDGET.exhausted:
+    # The budget is passed in, not read from the module global. As a global it
+    # was shared by every concurrent run in the process: run B overwrote run
+    # A's counter on startup, so one run's cap counted against another's and
+    # the docstring's claim of "per-run" was simply untrue. The module-level
+    # default remains only for callers that never had a budget to give.
+    budget = budget if budget is not None else JUDGE_BUDGET
+    if budget.exhausted:
         # The cap is spent. Keep the value - the quote genuinely is on the page
         # - but do not claim a ruling that never happened.
         return value, "judgment_unavailable"
-    if not JUDGE_BUDGET.spend():
+    if not budget.spend():
         return value, "judgment_unavailable"
     verdict = await jev.evidence_verification(str(value), quote, source_text)
     judgment = verdict.get("judgment")
@@ -170,7 +177,8 @@ async def verify_field(value: object, quote: str, source_text: str,
 
 async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
                       source_url: str, source_title: str, now: str = "",
-                      references: str = "", page_id: str = "") -> dict:
+                      references: str = "", page_id: str = "",
+                      budget: JudgeBudget | None = None) -> dict:
     from app.schemas.run import RecordRow  # local import: schemas must not import services
 
     ts = now or (datetime.datetime.utcnow().isoformat() + "Z")
@@ -182,7 +190,8 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
         ref_id = ev.get("reference_id", "")
         v, st = await verify_field(raw.get("fields", {}).get(name), quote,
                                    source_text, f.get("required", False),
-                                   f.get("type", "string"), ref_id, references)
+                                   f.get("type", "string"), ref_id, references,
+                                   budget=budget)
         start, end = locate_quote(quote, source_text) if st == "verified" else (None, None)
         wrapped[name] = {"value": v, "verification_status": st,
                          # page_id makes the claim re-checkable: the offsets

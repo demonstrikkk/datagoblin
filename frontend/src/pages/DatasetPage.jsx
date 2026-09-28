@@ -170,12 +170,39 @@ function RecordsTable({ datasetId, schema, onPick }) {
             ))}
           </div>
         ) : !shown.length ? (
+          // "No records stored" and "no records matched your search" are
+          // different facts, and conflating them told a user their run had
+          // failed when the run was fine and their query was simply too narrow.
           <Empty
-            title={rows.length ? 'No records match this filter' : 'No records stored'}
+            title={
+              rows.length
+                ? 'No records match this filter'
+                : debounced
+                ? `No record contains "${truncate(debounced, 40)}"`
+                : 'No records stored'
+            }
             hint={
               rows.length
                 ? 'Status filters apply to the rows on this page. Switch back to All to see every one.'
-                : 'This dataset has no stored rows.'
+                : debounced
+                ? 'The dataset has records, but none match that text. Clear the search to see them.'
+                : 'This dataset has no stored rows. Open the run view for the reason it produced none.'
+            }
+            action={
+              rows.length || debounced ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQ('');
+                    setDebounced('');
+                    setPage(0);
+                    setStatusFilter('all');
+                  }}
+                  className="btn-outline btn-xs"
+                >
+                  Clear search and filters
+                </button>
+              ) : null
             }
           />
         ) : !columns.length ? (

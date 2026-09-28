@@ -6,13 +6,13 @@ import { useLocalStore } from '../hooks/useUi.js';
 import RunView from '../components/RunView.jsx';
 import {
   Dot,
+  Empty,
   ErrorNote,
   Field,
   Kbd,
   Notice,
   Pill,
   Reveal,
-  Select,
   Spinner,
   Textarea,
   Toggle,
@@ -41,8 +41,6 @@ function AskPanel({
   setUseSeeds,
 }) {
   const [advanced, setAdvanced] = useState(false);
-  const [domain, setDomain] = useState('');
-  const [depth, setDepth] = useState('standard');
   const ref = useRef(null);
 
   const seedList = seeds
@@ -147,30 +145,6 @@ function AskPanel({
                   />
                 </Field>
               ) : null}
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field
-                  label="Restrict to domain"
-                  hint="Sent as a planning hint, not a hard filter."
-                >
-                  <input
-                    value={domain}
-                    onChange={(e) => setDomain(e.target.value)}
-                    placeholder="e.g. ngoforum.or.ke"
-                    className="input-sm input font-mono text-[11.5px]"
-                  />
-                </Field>
-                <Field label="Crawl depth" hint="Pages fetched per domain.">
-                  <Select
-                    value={depth}
-                    onChange={(e) => setDepth(e.target.value)}
-                    options={[
-                      { value: 'shallow', label: 'Shallow — 1 page per domain' },
-                      { value: 'standard', label: 'Standard — 3 pages per domain' },
-                      { value: 'deep', label: 'Deep — 8 pages per domain' },
-                    ]}
-                  />
-                </Field>
-              </div>
               <Field
                 label="Credit budget"
                 hint="Caps spend for this run. A run that hits the budget stops and saves what it already verified."
@@ -205,7 +179,6 @@ function AskPanel({
         {budget ? (
           <span className="text-[11.5px] text-muted">
             Budget {budget} credits
-            {domain ? ` · ${domain}` : ''}
           </span>
         ) : null}
       </div>

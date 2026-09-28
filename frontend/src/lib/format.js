@@ -45,14 +45,59 @@ export const runStatusMeta = (run) => {
   return RUN_STATUS[key] || { label: key || 'Unknown', tone: 'muted', glyph: '?' };
 };
 
+/**
+ * What each verification status actually means, in the words a reviewer needs.
+ *
+ * `verified` deliberately does NOT say "the judge agreed". Per docs/11 the
+ * validator short-circuits on verbatim containment — when the value appears
+ * inside its own quote there is nothing left to judge, so the judge is never
+ * called. That is the common path, and describing it as judge-confirmed
+ * overstated the strongest claim the product makes. A technically-literate
+ * buyer will find that gap in the first demo.
+ */
 export const REC_VERIFY = {
-  verified:             { label: 'Verified',      tone: 'ok',     glyph: '✓', hint: 'Judge agreed and the quote re-locates in stored page text.' },
-  unverified:           { label: 'Unverified',    tone: 'muted',  glyph: '?', hint: 'No judge confirmation yet. Not a claim of correctness.' },
-  conflicting:          { label: 'Conflicting',   tone: 'danger', glyph: '≠', hint: 'Sources or judges disagree.' },
-  judgment_unavailable: { label: 'No judgment',   tone: 'info',   glyph: '–', hint: 'Judge was unavailable or the call budget was spent.' },
-  rate_limited:         { label: 'Rate limited',  tone: 'judge',  glyph: '⏱', hint: 'Judge provider throttled the request.' },
-  rejected:             { label: 'Rejected',      tone: 'danger', glyph: '✕', hint: 'Failed schema, type or support validation.' },
-  needs_review:         { label: 'Needs review',  tone: 'warn',   glyph: '!', hint: 'A human should look at this record.' },
+  verified: {
+    label: 'Verified',
+    tone: 'ok',
+    glyph: '✓',
+    hint: 'The value appears verbatim in its own quote, and that quote re-locates in the stored page text at the cited offsets.',
+  },
+  unverified: {
+    label: 'Unverified',
+    tone: 'muted',
+    glyph: '?',
+    hint: 'No evidence check passed. Not a claim of correctness, and not a claim it is wrong.',
+  },
+  conflicting: {
+    label: 'Conflicting',
+    tone: 'danger',
+    glyph: '≠',
+    hint: 'Sources or the judge disagree about this value.',
+  },
+  judgment_unavailable: {
+    label: 'No judgment',
+    tone: 'info',
+    glyph: '–',
+    hint: 'The quote was found in the stored page, but no judge was reachable to rule on it. Deliberately not counted as verified.',
+  },
+  rate_limited: {
+    label: 'Rate limited',
+    tone: 'judge',
+    glyph: '⏱',
+    hint: 'The judge provider throttled the request. An operational condition worth retrying, not an absence of evidence.',
+  },
+  rejected: {
+    label: 'Rejected',
+    tone: 'danger',
+    glyph: '✕',
+    hint: 'Failed schema, type or support validation. Dropped rather than softened.',
+  },
+  needs_review: {
+    label: 'Needs review',
+    tone: 'warn',
+    glyph: '!',
+    hint: 'A human should look at this record.',
+  },
 };
 
 export const SOURCE_STATUS = {

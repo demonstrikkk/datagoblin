@@ -32,6 +32,7 @@ import uuid
 from decimal import Decimal
 from typing import Any, Iterable
 
+from app.core.config import settings
 from app.core.errors import dependency
 from app.core.logging import log
 
@@ -337,7 +338,11 @@ class PostgresRepo:
             return None
         ds = rows[0]
         ds["schema"] = ds.pop("schema_json", None) or []
-        ds["records"] = self._records(dataset_id, limit=100, offset=0)["records"]
+        # Was a literal `100`, so a dataset reporting 112 records exported 100
+        # of them with no indication anything was missing. The ceiling is now
+        # the configured export ceiling, which is where this list is consumed.
+        ds["records"] = self._records(dataset_id, limit=settings.EXPORT_MAX_ROWS,
+                                      offset=0)["records"]
         return ds
 
     def get_records(self, dataset_id: str, q: str = "", limit: int = 100,
@@ -352,7 +357,7 @@ class PostgresRepo:
         Python, so `total` under-reported past that ceiling and `offset` was
         applied after the fact. Here both are the database's job.
         """
-        limit = max(1, min(int(limit), 500))
+        limit = max(1, min(int(limit), settings.EXPORT_MAX_ROWS))
         offset = max(0, int(offset))
         ql = (q or "").strip().lower()
         where = "dataset_id=%s"
