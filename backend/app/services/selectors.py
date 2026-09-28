@@ -324,16 +324,47 @@ def deterministic_extract(plan: dict, page: dict) -> tuple[list[dict], str, dict
     return records, overall, debug
 
 
+def html_sample(html: str, budget: int = 12_000) -> str:
+    """A sample that actually contains the page's data.
+
+    Taking the first N characters is the obvious thing and it is wrong: on a
+    modern server-rendered page the first 8k is almost entirely `<head>`,
+    script tags, and the site nav. The listing a selector needs to target sits
+    tens of thousands of characters later, so the model designed selectors
+    against markup containing no records at all — and it was impossible for it
+    to do otherwise.
+
+    So: the head (hooks, ids, class conventions), a window from the middle
+    where repeated content lives, and the tail. Marked so the model knows it is
+    looking at an excerpt rather than the whole document.
+    """
+    text = html or ""
+    if len(text) <= budget:
+        return text
+    head = budget // 4
+    mid = budget // 2
+    start = max(0, (len(text) - mid) // 2)
+    return (
+        text[:head]
+        + f"\n\n<!-- ... {len(text) - head - mid} characters omitted ... -->\n\n"
+        + text[start:start + mid]
+        + f"\n\n<!-- ... {len(text) - start - mid} characters omitted ... -->\n\n"
+        + text[-head:]
+    )
+
+
 def build_schema_prompt(fields_spec: list[dict], html: str, url: str) -> str:
     """One-shot prompt: propose 2-3 CSS selector alternates per field.
 
-    Used by the gen_selectors script (human reviews before check-in). The
-    sample HTML is truncated — selector design needs structure, not content.
+    Used by the gen_selectors script (human reviews before check-in) and by
+    the in-app learner, which then verifies every proposal against the real
+    page. The sample is an excerpt of structure plus content — selector design
+    needs both, and a head-only excerpt has neither.
     """
     from app.schemas.evidence import simplify_schema
     schema = simplify_schema(fields_spec)
     lines = [f"{n} ({s['type']})" for n, s in schema.items()]
-    sample = (html or "")[:8000]
+    sample = html_sample(html)
     return (
         "Propose CSS selectors that extract each field from pages with this "
         "structure. Return JSON {\"fields\": {\"<name>\": {\"selectors\": "
@@ -344,4 +375,5 @@ def build_schema_prompt(fields_spec: list[dict], html: str, url: str) -> str:
         "avoid nth-of-type unless structural. 2-3 alternates per field, most "
         "specific first.\n"
         f"Fields:\n" + "\n".join(lines) +
-        f"\nURL: {url}\nHTML sample:\n{sample}")
+        f"\nURL: {url}\nHTML sample (an excerpt — the document is longer, and "
+        f"the head and tail are shown around the content):\n{sample}")

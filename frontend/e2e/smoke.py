@@ -7,6 +7,7 @@ page error, or failed request.
 """
 import asyncio
 import os
+import re
 
 BASE = os.environ.get("DG_BASE_URL", "http://localhost:4173")
 OUT = os.environ.get(
@@ -20,6 +21,11 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from playwright.async_api import async_playwright
+
+# Google Fonts is reached over the public internet, and when it is slow the
+# networkidle waits below never resolve: a hermetic failure that looks like the
+# app hanging. Stub it so the suite needs no network.
+OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
 
 ROUTES = [
     ("/", "Collect"),
@@ -38,6 +44,7 @@ async def main() -> int:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         page = await browser.new_page(viewport={"width": 1440, "height": 900})
+        await page.route(OFFLINE_FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
 
         console: list[str] = []
         page.on(

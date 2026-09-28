@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 
 BASE = os.environ.get("DG_BASE_URL", "http://localhost:4173")
 OUT = os.environ.get(
@@ -13,6 +14,11 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from playwright.async_api import async_playwright
 
+# Google Fonts is reached over the public internet, and when it is slow the
+# networkidle waits below never resolve: a hermetic failure that looks like the
+# app hanging. Stub it so the suite needs no network.
+OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
+
 
 
 async def main():
@@ -22,6 +28,7 @@ async def main():
     async with async_playwright() as pw:
         b = await pw.chromium.launch(args=["--use-gl=swiftshader", "--enable-unsafe-swiftshader"])
         p = await b.new_page(viewport={"width": 1600, "height": 1000}, device_scale_factor=1)
+        await p.route(OFFLINE_FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
 
         await p.goto(f"{BASE}/", wait_until="networkidle")
         await p.wait_for_timeout(2500)
@@ -118,6 +125,7 @@ async def main():
         # mobile
         await p.keyboard.press("Escape")
         m = await b.new_page(viewport={"width": 390, "height": 844})
+        await m.route(OFFLINE_FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
         await m.goto(f"{BASE}/", wait_until="networkidle")
         await m.wait_for_timeout(2000)
         await m.screenshot(path=f"{OUT}/10-mobile.png")

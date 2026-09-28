@@ -12,6 +12,7 @@ position and the wrong span gets marked.
 """
 import asyncio
 import os
+import re
 import sys
 
 BASE = os.environ.get("DG_BASE_URL", "http://localhost:4173")
@@ -24,6 +25,11 @@ os.makedirs(OUT, exist_ok=True)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from playwright.async_api import async_playwright
 
+# Google Fonts is reached over the public internet, and when it is slow the
+# networkidle waits below never resolve: a hermetic failure that looks like the
+# app hanging. Stub it so the suite needs no network.
+OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
+
 DS = "4d347326-7675-4179-858c-f22d04255e9a"
 PROOF_BTN = "Show this quote in the stored page"
 
@@ -33,6 +39,7 @@ async def main() -> int:
     async with async_playwright() as pw:
         b = await pw.chromium.launch()
         p = await b.new_page(viewport={"width": 1600, "height": 1000})
+        await p.route(OFFLINE_FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
         p.on("pageerror", lambda e: (print("PAGEERROR:", e), fails.append(str(e))))
 
         await p.goto(f"{BASE}/library/{DS}", wait_until="networkidle")

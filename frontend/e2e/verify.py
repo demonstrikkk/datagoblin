@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 
 BASE = os.environ.get("DG_BASE_URL", "http://localhost:4173")
 OUT = os.environ.get(
@@ -12,6 +13,11 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from playwright.async_api import async_playwright
+
+# Google Fonts is reached over the public internet, and when it is slow the
+# networkidle waits below never resolve: a hermetic failure that looks like the
+# app hanging. Stub it so the suite needs no network.
+OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
 
 DS = "4d347326-7675-4179-858c-f22d04255e9a"
 

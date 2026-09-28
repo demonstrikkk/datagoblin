@@ -36,6 +36,8 @@ from app.services import jobs as jobs_svc
 from app.services import metering as metering_svc
 from app.services import planner as planner_svc
 from app.services import runner as runner_svc
+from app.services import selector_learn as selector_learn_svc
+from app.services import selectors as selectors_svc
 
 set_level(settings.LOG_LEVEL)
 
@@ -382,7 +384,7 @@ async def map_url(body: dict, cid: str = Depends(correlation_id)) -> dict:
 @app.get("/api/runs/{run_id}", dependencies=[Depends(require_api_key)])
 async def run_status(run_id: str, cid: str = Depends(correlation_id)) -> dict:
     if run_id not in RUNS:
-        stored = repo().get_run(run_id)
+        stored = await asyncio.to_thread(repo().get_run, run_id)
         if stored is None:
             raise not_found("run", run_id)
         return {"data": stored, "error": None, "meta": {"correlation_id": cid}}
@@ -448,7 +450,7 @@ async def stream(run_id: str, request: Request, key: str | None = Query(default=
 @app.get("/api/datasets", dependencies=[Depends(require_api_key)])
 async def list_datasets(cid: str = Depends(correlation_id)) -> dict:
     items = []
-    for d in repo().list_datasets():
+    for d in await asyncio.to_thread(repo().list_datasets):
         items.append(DatasetView(id=d.get("id", ""), run_id=d.get("run_id", ""),
                                  name=d.get("name", ""),
                                  schema=d.get("schema", d.get("schema_json", [])),
@@ -460,7 +462,7 @@ async def list_datasets(cid: str = Depends(correlation_id)) -> dict:
 
 @app.get("/api/datasets/{did}", dependencies=[Depends(require_api_key)])
 async def get_dataset(did: str, cid: str = Depends(correlation_id)) -> dict:
-    ds = repo().get_dataset(did)
+    ds = await asyncio.to_thread(repo().get_dataset, did)
     if not ds:
         raise not_found("dataset", did)
     view = DatasetView(id=ds.get("id", did), run_id=ds.get("run_id", ""),
@@ -477,7 +479,7 @@ async def get_dataset(did: str, cid: str = Depends(correlation_id)) -> dict:
 async def get_records(did: str, q: str = "", limit: int = Query(default=100, ge=1, le=500),
                       offset: int = Query(default=0, ge=0),
                       cid: str = Depends(correlation_id)) -> dict:
-    out = repo().get_records(did, q[:200], limit, offset)
+    out = await asyncio.to_thread(repo().get_records, did, q[:200], limit, offset)
     if not out:
         raise not_found("dataset", did)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
@@ -485,10 +487,75 @@ async def get_records(did: str, q: str = "", limit: int = Query(default=100, ge=
 
 @app.get("/api/datasets/{did}/sources", dependencies=[Depends(require_api_key)])
 async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
-    out = repo().get_sources(did)
+    out = await asyncio.to_thread(repo().get_sources, did)
     if not out:
         raise not_found("dataset", did)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/selectors", dependencies=[Depends(require_api_key)])
+async def list_selectors(cid: str = Depends(correlation_id)) -> dict:
+    """Checked-in domain schemas, each with whether it still loads.
+
+    `valid: false` means the file is on disk but no longer passes
+    shape-validation, so extraction is silently skipping it. Reporting the
+    count without that flag is how a dead schema looks like a live one.
+    """
+    return {"data": selector_learn_svc.list_schemas(),
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/selectors/propose", dependencies=[Depends(require_api_key)])
+async def propose_selectors(body: dict,
+                            cid: str = Depends(correlation_id)) -> dict:
+    """Learn CSS selectors for a domain, verified against a real page.
+
+    Nothing is saved. The response carries, per field, the text each selector
+    actually produced, so the decision to keep a schema is made by reading a
+    sample rather than by trusting a CSS string.
+    """
+    url = str(body.get("url") or "").strip()
+    fields = body.get("fields") or []
+    if not url:
+        raise validation("url is required")
+    if not isinstance(fields, list) or not fields:
+        raise validation("fields is required: a list of {name, type}")
+
+    html = ""
+    page_id = ""
+    stored_id = str(body.get("page_id") or "").strip()
+    if stored_id:
+        # Reuse the page the run already stored. Re-fetching would cost another
+        # request and could learn from a different rendering than the one
+        # extraction will actually see.
+        page = await asyncio.to_thread(repo().get_page, stored_id)
+        if not page:
+            raise not_found("page", stored_id)
+        html = page.get("raw_html") or ""
+        if not html:
+            raise validation(f"page {stored_id} stored no raw_html to learn from")
+        page_id = stored_id
+
+    try:
+        draft = await selector_learn_svc.propose(url, fields, html=html, page_id=page_id)
+    except ValueError as exc:
+        raise validation(str(exc))
+    return {"data": draft, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/selectors/save", dependencies=[Depends(require_api_key)])
+async def save_selectors(body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Check in a verified draft.
+
+    Refuses to replace an existing schema without `overwrite: true`, because
+    silently clobbering a working selector set makes a domain regress with no
+    record that it ever worked.
+    """
+    try:
+        saved = selector_learn_svc.save(body, overwrite=bool(body.get("overwrite")))
+    except ValueError as exc:
+        raise validation(str(exc))
+    return {"data": saved, "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.get("/api/datasets/{did}/conflicts", dependencies=[Depends(require_api_key)])
@@ -500,10 +567,10 @@ async def list_conflicts(did: str, cid: str = Depends(correlation_id)) -> dict:
     on. The rivals the deduper preserved at merge time are what make each of
     those eight a decidable question instead of a number.
     """
-    schema = repo().get_dataset_schema(did)
+    schema = await asyncio.to_thread(repo().get_dataset_schema, did)
     if schema is None:
         raise not_found("dataset", did)
-    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+    rows = (await asyncio.to_thread(repo().get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
     conflicts = coverage_svc.collect_conflicts(rows)
     return {"data": {"dataset_id": did, "schema": schema,
                      "conflicts": conflicts,
@@ -521,7 +588,7 @@ async def resolve_conflict(did: str, body: dict, cid: str = Depends(correlation_
     free-text path, because a dataset whose claim is "every value carries its
     evidence" cannot accept an unquoted one.
     """
-    if repo().get_dataset_schema(did) is None:
+    if await asyncio.to_thread(repo().get_dataset_schema, did) is None:
         raise not_found("dataset", did)
     record_id = str(body.get("record_id") or "")
     field = str(body.get("field") or "")
@@ -531,7 +598,7 @@ async def resolve_conflict(did: str, body: dict, cid: str = Depends(correlation_
     if choice not in ("keep", "adopt"):
         raise validation("choice must be 'keep' or 'adopt'")
 
-    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+    rows = (await asyncio.to_thread(repo().get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
     target = next((r for r in rows if str(r.get("record_id")) == record_id), None)
     if target is None:
         raise not_found("record", record_id)
@@ -540,7 +607,7 @@ async def resolve_conflict(did: str, body: dict, cid: str = Depends(correlation_
         updated = coverage_svc.apply_resolution(cell, choice, body.get("rival_index"))
     except (ValueError, TypeError) as exc:
         raise validation(str(exc))
-    if not repo().update_record_cell(did, record_id, field, updated):
+    if not await asyncio.to_thread(repo().update_record_cell, did, record_id, field, updated):
         raise not_found("record", record_id)
     return {"data": {"dataset_id": did, "record_id": record_id, "field": field,
                      "cell": updated},
@@ -555,10 +622,10 @@ async def dataset_coverage(did: str, cid: str = Depends(correlation_id)) -> dict
     carried is reported as absent, never defaulted — a coverage number that
     filled its own gaps would be worse than no number at all.
     """
-    schema = repo().get_dataset_schema(did)
+    schema = await asyncio.to_thread(repo().get_dataset_schema, did)
     if schema is None:
         raise not_found("dataset", did)
-    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+    rows = (await asyncio.to_thread(repo().get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
     matrix = coverage_svc.field_coverage(rows, schema)
     conflicts = coverage_svc.collect_conflicts(rows)
     matrix["backlog"] = coverage_svc.build_backlog(matrix, conflicts)
@@ -576,10 +643,10 @@ async def run_pages(run_id: str, limit: int = Query(default=200, ge=1, le=500),
     the proof had no retrieval path, so it was decoration.
     """
     _id_arg("run", run_id)
-    if not repo().get_run(run_id):
+    if not await asyncio.to_thread(repo().get_run, run_id):
         raise not_found("run", run_id)
-    return {"data": {"run_id": run_id,
-                     "pages": repo().get_pages(run_id, limit)},
+    pages = await asyncio.to_thread(repo().get_pages, run_id, limit)
+    return {"data": {"run_id": run_id, "pages": pages},
             "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -597,7 +664,7 @@ async def page_detail(page_id: str, cid: str = Depends(correlation_id)) -> dict:
     plus `get_pages` already covers re-checking that the page did not change.
     """
     _id_arg("page", page_id)
-    page = repo().get_page(page_id)
+    page = await asyncio.to_thread(repo().get_page, page_id)
     if not page:
         raise not_found("page", page_id)
     page.pop("raw_html", None)
@@ -606,7 +673,7 @@ async def page_detail(page_id: str, cid: str = Depends(correlation_id)) -> dict:
 
 @app.post("/api/datasets/{did}/export", dependencies=[Depends(require_api_key)])
 async def export_dataset(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
-    ds = repo().get_dataset(did)
+    ds = await asyncio.to_thread(repo().get_dataset, did)
     if not ds:
         raise not_found("dataset", did)
     # The caller's chosen columns win over the instance default. The frontend
@@ -622,7 +689,7 @@ async def export_dataset(did: str, body: dict, cid: str = Depends(correlation_id
         {"name": ds.get("name", did), "run_id": ds.get("run_id", did),
          "counts": ds.get("counts", {})})
     try:
-        export_id = repo().save_export(did, fmt, len(content.encode("utf-8")))
+        export_id = await asyncio.to_thread(repo().save_export, did, fmt, len(content.encode("utf-8")))
         persisted: bool | str = True
     except Exception as e:  # noqa: BLE001 (download must survive persist failure; labeled)
         export_id, persisted = "", f"persist failed: {str(e)[:150]}"
@@ -631,7 +698,7 @@ async def export_dataset(did: str, body: dict, cid: str = Depends(correlation_id
     credits = 0
     try:
         run_id = ds.get("run_id", did)
-        prior = [e for e in repo().ledger(run_id) if e.get("stage") == "export"]
+        prior = [e for e in await asyncio.to_thread(repo().ledger, run_id) if e.get("stage") == "export"]
         entry = metering_svc.Ledger().bill(run_id, "export", 1, seq=len(prior) + 1)
         repo().record_charge(run_id, entry)
         credits = entry["credits"]

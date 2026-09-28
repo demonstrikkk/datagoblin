@@ -15,6 +15,11 @@ API = os.environ.get("DG_API_URL", "http://127.0.0.1:8000")
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
+# Google Fonts is reached over the public internet, and when it is slow the
+# networkidle waits below never resolve: a hermetic failure that looks like the
+# app hanging. Stub it so the suite needs no network.
+OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
+
 fails = []
 
 
@@ -44,7 +49,16 @@ def main() -> int:
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
-        page.goto(f"{BASE}/library/{ds}", wait_until="networkidle")
+        page.route(OFFLINE_FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
+        page.goto(f"{BASE}/library/{ds}", wait_until="domcontentloaded")
+        # Not `networkidle`: this page issues several slow reads (every stored
+        # record, once per view) and waiting for 500ms of total silence kept
+        # timing out before the UI ever appeared. Wait for the control instead.
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('button')]"
+            ".some(b => b.textContent.trim() === 'Coverage')",
+            timeout=30_000,
+        )
         page.wait_for_timeout(1500)
 
         # -- coverage tab -----------------------------------------------------
@@ -100,11 +114,20 @@ def main() -> int:
                 else:
                     print("  conflicts tab: cards offer keep/adopt")
                     adopt.click()
-                    page.wait_for_function(
-                        "() => /Resolved —/.test(document.body.innerText)",
-                        timeout=30_000,
-                    )
-                    print("  resolve: recorded and reflected in the UI")
+                    try:
+                        page.wait_for_function(
+                            "() => /Resolved/.test(document.body.innerText)",
+                            timeout=30_000,
+                        )
+                        print("  resolve: recorded and reflected in the UI")
+                    except Exception:
+                        # Report what the panel actually said. A bare Playwright
+                        # timeout here hid whether the write failed, the card
+                        # stayed put, or the copy changed.
+                        fails.append(
+                            "after adopting, the panel did not confirm it. It said: "
+                            f"{page.inner_text('body')[-300:]!r}"
+                        )
 
         browser.close()
 

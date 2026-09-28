@@ -203,6 +203,11 @@ export const api = {
   conflicts: (id, o) => request(`/datasets/${encodeURIComponent(id)}/conflicts`, o),
   resolveConflict: (id, body, o) =>
     request(`/datasets/${encodeURIComponent(id)}/conflicts/resolve`, { ...o, method: 'POST', body }),
+  selectors: (o) => request('/selectors', o),
+  proposeSelectors: (body, o) =>
+    request('/selectors/propose', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
+  saveSelectors: (body, o) =>
+    request('/selectors/save', { ...o, method: 'POST', body, timeout: o?.timeout ?? 30_000 }),
 
   /**
    * Export. Deliberately asymmetric: `csv` and `md` come back as a raw

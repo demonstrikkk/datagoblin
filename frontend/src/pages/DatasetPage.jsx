@@ -33,7 +33,7 @@ function Cell({ prov }) {
 
   const text =
     raw === null || raw === undefined || raw === ''
-      ? '—'
+      ? 'â€”'
       : typeof raw === 'object'
       ? Array.isArray(raw)
         ? raw.join(', ')
@@ -47,7 +47,7 @@ function Cell({ prov }) {
         title={m?.hint || 'No judge assessment for this field'}
         aria-hidden="true"
       >
-        {m ? m.glyph : '·'}
+        {m ? m.glyph : 'Â·'}
       </span>
       <span className="sr-only">{m ? m.label : 'unjudged'}: </span>
       <span className="truncate" title={text}>
@@ -76,7 +76,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
     [datasetId, page, debounced]
   );
 
-  // The endpoint returns `{dataset_id, total, records}` — not a bare array.
+  // The endpoint returns `{dataset_id, total, records}` â€” not a bare array.
   // `total` is the whole dataset, which is what makes real pagination possible.
   const rows = useMemo(() => data?.records || [], [data]);
   const total = data?.total ?? 0;
@@ -114,7 +114,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
   const shown = useMemo(() => {
     if (statusFilter === 'all') return rows;
-    // Status filters run over the current page only — the API filters on `q`,
+    // Status filters run over the current page only â€” the API filters on `q`,
     // not on verification status, so claiming a dataset-wide count here would
     // be a lie. The footer says "filtered to N on this page" for that reason.
     if (statusFilter === 'proven')
@@ -146,7 +146,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search records…"
+            placeholder="Search recordsâ€¦"
             aria-label="Search records"
             className="input-sm input w-44"
           />
@@ -244,12 +244,12 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
             <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-rule px-3.5 py-2">
               <span className="text-[11px] text-muted">
-                {isStale ? 'refreshing… · ' : ''}
-                showing {(page * PAGE + 1).toLocaleString()}–
+                {isStale ? 'refreshingâ€¦ Â· ' : ''}
+                showing {(page * PAGE + 1).toLocaleString()}â€“
                 {(page * PAGE + rows.length).toLocaleString()} of{' '}
                 <span className="font-mono tnum text-ink-2">{total.toLocaleString()}</span>
                 {statusFilter !== 'all' ? (
-                  <span className="text-warn"> · filtered to {shown.length} on this page</span>
+                  <span className="text-warn"> Â· filtered to {shown.length} on this page</span>
                 ) : null}
               </span>
               <div className="flex items-center gap-1">
@@ -259,7 +259,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                   className="btn-outline btn-xs"
                 >
-                  ← Prev
+                  â† Prev
                 </button>
                 <span className="px-1 font-mono text-[10.5px] text-muted">
                   {page + 1}/{pages}
@@ -270,7 +270,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
                   onClick={() => setPage((p) => p + 1)}
                   className="btn-outline btn-xs"
                 >
-                  Next →
+                  Next â†’
                 </button>
               </div>
             </footer>
@@ -283,7 +283,156 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
 /* ---------------------------------------------------------------- sources */
 
-function CoveragePanel({ datasetId }) {
+function SelectorLearner({ runId, neverExtracted }) {
+  const { data: pages } = useResource((o) => api.runPages(runId, o), [runId]);
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const [failure, setFailure] = useState(null);
+  const [saved, setSaved] = useState(null);
+  const [overwrite, setOverwrite] = useState(false);
+
+  if (!neverExtracted.length) return null;
+
+  // Learn from a page this run actually stored. Re-fetching would cost another
+  // request and could teach selectors from a different rendering than the one
+  // extraction will see.
+  const page = (pages?.pages || [])[0];
+  const domain = page ? host(page.url) : '';
+
+  async function propose() {
+    if (!page) return;
+    setBusy(true);
+    setFailure(null);
+    setSaved(null);
+    try {
+      const res = await api.proposeSelectors({
+        url: page.url,
+        page_id: page.id,
+        fields: neverExtracted.map((f) => ({ name: f, type: 'string' })),
+      });
+      setDraft(res);
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function persist() {
+    setBusy(true);
+    setFailure(null);
+    try {
+      const res = await api.saveSelectors(
+        { domain: draft.domain, page_url: draft.page_url, provider: draft.provider, fields: draft.fields },
+        { overwrite }
+      );
+      setSaved(res);
+      setDraft(null);
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-medium">Learn selectors</h3>
+          <p className="text-xs text-muted">
+            {neverExtracted.length} field{neverExtracted.length === 1 ? '' : 's'} nothing
+            extracted.{' '}
+            {domain
+              ? `Proposed CSS is checked against a stored ${domain} page and only offered if it returns real text.`
+              : 'No stored page to learn from â€” run a collection first.'}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
+            disabled={!page || busy}
+            onClick={propose}
+          >
+            {busy ? 'Workingâ€¦' : 'Propose selectors'}
+          </button>
+        </div>
+      </div>
+
+      {saved ? (
+        <Notice tone="ok">
+          Saved {saved.fields} field selector{saved.fields === 1 ? '' : 's'} for{' '}
+          {saved.domain}{saved.replaced ? ' (replaced the previous schema).' : '.'}
+        </Notice>
+      ) : null}
+      {failure ? <ErrorNote error={failure} compact onRetry={propose} /> : null}
+
+      {draft ? (
+        <div className="space-y-2 rounded-lg border border-rule-2/60 p-3">
+          <div className="text-xs text-muted">
+            {Object.keys(draft.fields || {}).length} of {neverExtracted.length} verified
+            against {draft.page_url} Â· via {draft.provider}
+          </div>
+          {Object.entries(draft.fields || {}).map(([name, spec]) => (
+            <div key={name} className="border-b border-rule-2/40 py-1.5 last:border-0">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="text-sm">{name}</span>
+                {spec.multiple ? <Pill tone="info">multiple</Pill> : null}
+              </div>
+              <code className="mt-1 block text-xs text-muted">{spec.selectors.join(' , ')}</code>
+              <div className="mt-1 text-xs">
+                yields:{' '}
+                <span className="text-ink">{Object.values(spec.samples || {})[0] || 'â€”'}</span>
+              </div>
+            </div>
+          ))}
+          {(draft.rejected || []).length ? (
+            <div className="space-y-1 pt-1">
+              {(draft.rejected || []).map((r, i) => (
+                <p key={i} className="text-xs text-muted">
+                  {r.field}: {r.reason}
+                  {(r.selectors || (r.selector ? [r.selector] : [])).length ? (
+                    <span className="block opacity-80">
+                      tried: {(r.selectors || [r.selector]).join(' , ')}
+                    </span>
+                  ) : null}
+                </p>
+              ))}
+            </div>
+          ) : null}
+          {draft.usable ? (
+            <div className="flex items-center gap-3 pt-1">
+              <label className="flex items-center gap-1.5 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={overwrite}
+                  onChange={(e) => setOverwrite(e.target.checked)}
+                />
+                replace any existing schema for {draft.domain}
+              </label>
+              <button
+                type="button"
+                className="ml-auto rounded border border-rule-2 px-2 py-1 text-xs"
+                disabled={busy}
+                onClick={persist}
+              >
+                Check in
+              </button>
+            </div>
+          ) : (
+            <Notice tone="warn">
+              Nothing verified, so nothing is offered. Saving this would replace
+              extraction with selectors known not to work.
+            </Notice>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CoveragePanel({ datasetId, runId }) {
   const { data, status, error, refetch } = useResource(
     (o) => api.coverage(datasetId, o),
     [datasetId]
@@ -314,7 +463,7 @@ function CoveragePanel({ datasetId }) {
         <div className="flex items-baseline justify-between">
           <h3 className="text-sm font-medium">Per-field coverage</h3>
           <span className="text-xs text-muted">
-            Present is not the same as proven — the darker slice is values carrying a verdict.
+            Present is not the same as proven â€” the darker slice is values carrying a verdict.
           </span>
         </div>
         {fields.map((f) => (
@@ -346,6 +495,11 @@ function CoveragePanel({ datasetId }) {
           </div>
         ))}
       </div>
+
+      <SelectorLearner
+        runId={runId}
+        neverExtracted={fields.filter((f) => f.present === 0).map((f) => f.field)}
+      />
 
       {backlog.length ? (
         <div className="space-y-2">
@@ -382,18 +536,25 @@ function ConflictsPanel({ datasetId }) {
     [datasetId]
   );
   const [busy, setBusy] = useState(null);
-  const [decided, setDecided] = useState({});
   const [failure, setFailure] = useState(null);
+  // Above the early returns on purpose: a hook declared after them is skipped
+  // on the loading render and present on the loaded one, which React reports as
+  // "rendered more hooks than during the previous render" and which blanks the
+  // whole panel.
+  // Resolved conflicts stop coming back from the server — that is what
+  // "resolved" means. So decided cards are kept from a local snapshot;
+  // rendering only the server list made a card vanish at the moment the user
+  // confirmed it, which reads as the action having failed.
+  const [resolved, setResolved] = useState({});
 
   if (status === 'loading' && !data) return <Loading rows={4} label="Reading disputes" />;
   if (error) return <ErrorNote error={error} onRetry={refetch} />;
 
   const conflicts = data?.conflicts || [];
-  // Decided cards stay in place showing the outcome. Removing them on click
-  // left no confirmation that anything was written, which reads as "nothing
-  // happened" — and the next card slides up into its place to hide it further.
-  const live = conflicts.filter((c) => !decided[c.record_id + c.field]);
-  if (!conflicts.length) {
+  const keyOf = (c) => `${c.record_id}|${c.field}`;
+  const live = conflicts.filter((c) => !resolved[keyOf(c)]);
+  const rows = [...live, ...Object.values(resolved).map((r) => r.conflict)];
+  if (!conflicts.length && !Object.keys(resolved).length) {
     return (
       <Empty
         title="No disagreements between sources"
@@ -403,7 +564,7 @@ function ConflictsPanel({ datasetId }) {
   }
 
   async function decide(c, choice, rivalIndex) {
-    const key = c.record_id + c.field;
+    const key = keyOf(c);
     setBusy(key);
     setFailure(null);
     try {
@@ -413,9 +574,12 @@ function ConflictsPanel({ datasetId }) {
         choice,
         rival_index: rivalIndex,
       });
-      setDecided((d) => ({
+      setResolved((d) => ({
         ...d,
-        [key]: choice === 'keep' ? 'kept the first value' : `adopted rival ${Number(rivalIndex) + 1}`,
+        [key]: {
+          conflict: c,
+          outcome: choice === 'keep' ? 'kept the first value' : `adopted rival ${Number(rivalIndex) + 1}`,
+        },
       }));
       // Re-read: the open-conflict count just changed, and leaving the old
       // number on screen next to a card saying it was resolved is two truths
@@ -438,17 +602,17 @@ function ConflictsPanel({ datasetId }) {
       ) : (
         <p className="text-xs text-muted">
           {live.length} open. Each side quotes the page it came from. Keeping the
-          incumbent or adopting a rival both preserve evidence — there is no way
+          incumbent or adopting a rival both preserve evidence â€” there is no way
           to type in a value that was never extracted.
         </p>
       )}
 
       {failure ? <ErrorNote error={failure} onRetry={refetch} /> : null}
 
-      {conflicts.slice(0, 40).map((c) => {
-        const key = c.record_id + c.field;
-        const done = Boolean(decided[key]);
-        const outcome = decided[key];
+      {rows.slice(0, 40).map((c) => {
+        const key = keyOf(c);
+        const done = Boolean(resolved[key]);
+        const outcome = resolved[key]?.outcome;
         return (
           <div
             key={key}
@@ -460,22 +624,22 @@ function ConflictsPanel({ datasetId }) {
             </div>
             {done ? (
               <Notice tone="ok">
-                Resolved — {outcome}.
+                Resolved â€” {outcome}.
               </Notice>
             ) : null}
             <div className="rounded-md border border-warn/40 bg-warn/5 p-2">
               <div className="text-xs uppercase tracking-wide text-muted">incumbent</div>
-              <div className="text-sm">{String(c.incumbent.value ?? '—')}</div>
+              <div className="text-sm">{String(c.incumbent.value ?? 'â€”')}</div>
               {c.incumbent.quote ? (
                 <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
-                  “{c.incumbent.quote}”
+                  â€œ{c.incumbent.quote}â€
                 </div>
               ) : null}
               <div className="mt-2">
                 <button
                   type="button"
                   className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
-                  disabled={busy === key || decided[key]}
+                  disabled={busy === key || done}
                   onClick={() => decide(c, 'keep')}
                 >
                   Keep this
@@ -486,19 +650,19 @@ function ConflictsPanel({ datasetId }) {
               <div key={rv.index} className="rounded-md border border-rule-2/60 p-2">
                 <div className="text-xs uppercase tracking-wide text-muted">
                   rival {rv.index + 1}
-                  {rv.url ? ` · ${host(rv.url)}` : ''}
+                  {rv.url ? ` Â· ${host(rv.url)}` : ''}
                 </div>
-                <div className="text-sm">{String(rv.value ?? '—')}</div>
+                <div className="text-sm">{String(rv.value ?? 'â€”')}</div>
                 {rv.quote ? (
                   <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
-                    “{rv.quote}”
+                    â€œ{rv.quote}â€
                   </div>
                 ) : null}
                 <div className="mt-2">
                   <button
                     type="button"
                     className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
-                    disabled={busy === key || decided[key]}
+                    disabled={busy === key || done}
                     onClick={() => decide(c, 'adopt', rv.index)}
                   >
                     Adopt this
@@ -599,7 +763,7 @@ function SourceGrid({ datasetId }) {
                           title={good ? 'Fetched and stored' : s.error || 'Failed'}
                           aria-label={good ? 'Fetched' : 'Failed'}
                         >
-                          {good ? '✓' : '✕'}
+                          {good ? 'âœ“' : 'âœ•'}
                         </span>
                         <div className="min-w-0 flex-1">
                           <a
@@ -615,7 +779,7 @@ function SourceGrid({ datasetId }) {
                           {s.content_hash ? (
                             <span
                               className="font-mono text-[9.5px] text-muted"
-                              title="Content hash — re-fetch and confirm the page has not changed"
+                              title="Content hash â€” re-fetch and confirm the page has not changed"
                             >
                               {String(s.content_hash).slice(0, 12)}
                             </span>
@@ -696,9 +860,9 @@ function ExportPanel({ datasetId, schema }) {
               value={format}
               onChange={(e) => setFormat(e.target.value)}
               options={[
-                { value: 'csv', label: 'CSV — spreadsheet ready' },
-                { value: 'md', label: 'Markdown — human readable' },
-                { value: 'json', label: 'JSON — full provenance' },
+                { value: 'csv', label: 'CSV â€” spreadsheet ready' },
+                { value: 'md', label: 'Markdown â€” human readable' },
+                { value: 'json', label: 'JSON â€” full provenance' },
               ]}
             />
           </label>
@@ -709,7 +873,7 @@ function ExportPanel({ datasetId, schema }) {
                 ? 'JSON always carries every field and its full evidence chain.'
                 : fields.length
                 ? `${fields.length} of ${schema?.length || 0} fields`
-                : 'None selected — the server will use its default set.'}
+                : 'None selected â€” the server will use its default set.'}
             </p>
           </div>
         </div>
@@ -731,7 +895,7 @@ function ExportPanel({ datasetId, schema }) {
                       : 'border-rule bg-warm/50 text-muted hover:text-ink'
                   }`}
                 >
-                  {on ? '✓ ' : ''}
+                  {on ? 'âœ“ ' : ''}
                   {name}
                 </button>
               );
@@ -745,7 +909,7 @@ function ExportPanel({ datasetId, schema }) {
           <button type="button" onClick={go} disabled={busy} className="btn-accent">
             {busy ? (
               <>
-                <Spinner /> Exporting…
+                <Spinner /> Exportingâ€¦
               </>
             ) : (
               `Download ${format.toUpperCase()}`
@@ -753,7 +917,7 @@ function ExportPanel({ datasetId, schema }) {
           </button>
           {done ? (
             <span className="text-[12px] text-ok animate-fade-in">
-              ✓ {done} downloaded
+              âœ“ {done} downloaded
             </span>
           ) : null}
         </div>
@@ -778,7 +942,7 @@ export default function DatasetPage() {
       <div className="space-y-4">
         <ErrorNote error={error} onRetry={refetch} />
         <Link to="/library" className="btn-outline btn-xs">
-          ← Back to library
+          â† Back to library
         </Link>
       </div>
     );
@@ -875,7 +1039,7 @@ export default function DatasetPage() {
           )}
           <Stat
             label="Schema"
-            value={data.schema?.length ? num(data.schema.length) : '—'}
+            value={data.schema?.length ? num(data.schema.length) : 'â€”'}
             sub={data.schema?.length ? 'fields' : 'not persisted'}
           />
         </div>
@@ -936,7 +1100,7 @@ export default function DatasetPage() {
         />
       ) : null}
 
-      {tab === 'coverage' ? <CoveragePanel datasetId={id} /> : null}
+      {tab === 'coverage' ? <CoveragePanel datasetId={id} runId={data.run_id} /> : null}
       {tab === 'conflicts' ? <ConflictsPanel datasetId={id} /> : null}
       {tab === 'sources' ? <SourceGrid datasetId={id} /> : null}
       {tab === 'export' ? <ExportPanel datasetId={id} schema={data.schema} /> : null}
@@ -944,4 +1108,4 @@ export default function DatasetPage() {
   );
 }
 
-const pctSafe = (n) => (Number.isFinite(n) ? `${Math.round(n * 100)}%` : '—');
+const pctSafe = (n) => (Number.isFinite(n) ? `${Math.round(n * 100)}%` : 'â€”');
