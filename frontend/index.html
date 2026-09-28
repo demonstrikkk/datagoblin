@@ -1,1 +1,54 @@
-<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Fieldwork — DATAGOBLIN</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23A77A32'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='19' fill='%23FBFAF6' text-anchor='middle'%3EF%3C/text%3E%3C/svg%3E" /><link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=Instrument+Serif&display=swap" rel="stylesheet" /></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Datagoblin — evidence-first data intelligence</title>
+    <meta
+      name="description"
+      content="Describe the data you need. Datagoblin plans the sources, collects permitted pages, extracts records, and proves every claim against stored evidence."
+    />
+    <meta name="theme-color" content="#f6f3ee" />
+    <meta name="color-scheme" content="light" />
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%239a6b3f'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23fbf9f6' text-anchor='middle'%3Eᚠ%3C/text%3E%3C/svg%3E"
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=DM+Mono:wght@400;500&family=Instrument+Serif&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      /* Painted before the bundle evaluates, so the first frame is the paper
+         colour rather than a white flash. The shader layers in on top. */
+      html { background: #f6f3ee; }
+      #root { min-height: 100%; }
+      /* The shell is JS-rendered; until it mounts, show nothing rather than a
+         half-styled frame. */
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        transition: opacity 260ms ease;
+      }
+      #boot[hidden] { display: none; }
+      #boot span {
+        font-family: 'Instrument Serif', Georgia, serif;
+        font-size: 34px;
+        color: #9a6b3f;
+        opacity: 0.55;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot" aria-hidden="true"><span>ᚠ</span></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

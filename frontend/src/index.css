@@ -1,12 +1,339 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-:root { --ink: #161615; --paper: #F5F2EA; --warm: #FBFAF6; --muted: #74736D; --rule: #D9D4C8; --accent: #A77A32; }
-body { background: var(--paper); color: var(--ink); font-family: "DM Sans", system-ui, sans-serif; }
-.font-display { font-family: "Instrument Serif", "Newsreader", Georgia, serif; }
-.rule { border-color: var(--rule); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-::selection { background: #E9DFC8; }
+
+/* ============================================================================
+   DATAGOBLIN — design tokens
+
+   Colours are stored as bare RGB channel triplets, not hex. Tailwind can only
+   apply an opacity modifier (`bg-paper-2/90`) to a colour declared as
+   `rgb(var(--x) / <alpha-value>)`; with a plain hex variable the modifier
+   silently fails to compile. Everywhere raw CSS needs the colour it is written
+   as `rgb(var(--x))`.
+
+   A "warm paper + ink" evidence-led palette. Data surfaces stay near-opaque so
+   text contrast never depends on whatever the shader is doing underneath.
+   ========================================================================== */
+:root {
+  --ink: 28 25 23;         /* #1c1917 */
+  --ink-2: 68 64 60;       /* #44403c */
+  --paper: 246 243 238;    /* #f6f3ee */
+  --paper-2: 251 249 246;  /* #fbf9f6 */
+  --paper-3: 255 255 255;
+  --warm: 237 231 221;     /* #ede7dd */
+  --muted: 121 113 107;    /* #79716b */
+  --rule: 227 221 211;     /* #e3ddd3 */
+  --rule-2: 211 202 187;   /* #d3cabb */
+  --accent: 154 107 63;    /* #9a6b3f */
+  --accent-ink: 255 255 255;
+
+  /* semantic — tuned for AA text on --paper and legible on --warm */
+  --ok: 63 125 88;
+  --warn: 154 107 63;
+  --danger: 164 52 43;
+  --info: 47 93 124;
+  --judge: 107 74 134;
+
+  --accent-ring: rgba(154, 107, 63, 0.18);
+
+  /* motion */
+  --e-swift: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --e-spring: cubic-bezier(0.34, 1.42, 0.5, 1);
+  --e-exit: cubic-bezier(0.4, 0, 1, 1);
+  --dur-1: 120ms;
+  --dur-2: 220ms;
+  --dur-3: 380ms;
+
+  /* rhythm */
+  --rail-w: 60px;
+  --inspector-w: 400px;
+  --shell-pad: 20px;
+  color-scheme: light;
+}
+
+* {
+  border-color: rgb(var(--rule));
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--paper));
+  color: rgb(var(--ink));
+  font-family: 'DM Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+/* --- typography ---------------------------------------------------------- */
+.font-display {
+  font-family: 'Instrument Serif', Newsreader, Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+.eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(var(--muted));
+}
+.balance {
+  text-wrap: balance;
+}
+
+/* ============================================================================
+   The WebGL field. Sits behind everything, never intercepts input.
+   ========================================================================== */
+.field-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  contain: strict;
+}
+.field-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+      120% 90% at 8% 0%,
+      rgba(246, 243, 238, 0.35) 0%,
+      rgba(246, 243, 238, 0.86) 46%,
+      rgba(246, 243, 238, 0.97) 100%
+    ),
+    linear-gradient(to bottom, rgba(246, 243, 238, 0.5), rgba(246, 243, 238, 0.92));
+}
+.shell-layer {
+  position: relative;
+  z-index: 1;
+}
+
+/* ============================================================================
+   Components
+   ========================================================================== */
+@layer components {
+  /* surfaces — main reading surfaces are near-opaque on purpose */
+  .surface {
+    @apply bg-paper-2/90 border border-rule rounded-lg;
+  }
+  .surface-solid {
+    @apply bg-paper-2 border border-rule rounded-lg;
+  }
+  .surface-inset {
+    @apply bg-warm/60 border border-rule rounded-sm;
+  }
+  .chrome-blur {
+    @apply bg-paper/70 border-r border-rule;
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  }
+
+  /* typography helpers */
+  .h-display {
+    @apply font-display text-ink;
+  }
+  .prose-sm {
+    @apply text-[13px] leading-[1.55] text-ink-2;
+  }
+
+  /* interactive */
+  .btn {
+    @apply relative inline-flex items-center justify-center gap-1.5 rounded-sm
+      px-3 h-8 text-[12.5px] font-medium select-none
+      transition-all duration-150 ease-swift
+      disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap;
+  }
+  .btn-primary {
+    @apply btn bg-ink text-paper-2 border border-ink
+      hover:bg-ink-2 active:scale-[.975]
+      shadow-[0_1px_2px_rgba(28,25,23,.16)];
+  }
+  .btn-accent {
+    @apply btn text-accent-ink border border-accent bg-accent
+      hover:brightness-[1.06] active:scale-[.975]
+      shadow-[0_1px_2px_rgba(28,25,23,.14)];
+  }
+  .btn-ghost {
+    @apply btn border border-transparent text-muted
+      hover:bg-warm/70 hover:text-ink active:scale-[.98];
+  }
+  .btn-outline {
+    @apply btn border border-rule-2 bg-paper-3/70 text-ink-2
+      hover:border-ink/35 hover:text-ink hover:bg-paper-3 active:scale-[.98];
+  }
+  .btn-danger {
+    @apply btn border border-danger/30 bg-danger-soft text-danger
+      hover:bg-danger hover:text-paper-2 hover:border-danger active:scale-[.98];
+  }
+  .btn-xs {
+    @apply h-6 px-2 text-[11px] rounded-xs gap-1;
+  }
+
+  .link {
+    @apply text-accent underline decoration-accent/30 underline-offset-[3px]
+      hover:decoration-accent transition-colors duration-150;
+  }
+
+  /* form controls */
+  .input {
+    @apply w-full bg-paper-3/80 border border-rule rounded-sm px-2.5 py-2
+      text-[13px] text-ink placeholder:text-muted/70
+      transition-all duration-150 ease-swift
+      focus:outline-none focus:border-accent focus:bg-paper-3
+      focus:ring-4 focus:ring-[var(--accent-ring)];
+  }
+  .input-sm {
+    @apply input py-1.5 text-[12.5px];
+  }
+  .label {
+    @apply block eyebrow mb-1.5;
+  }
+
+  /* data rows: pointer-driven color, not layout-driven */
+  .row {
+    @apply relative transition-colors duration-100 ease-swift;
+  }
+  .row::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgb(var(--accent));
+    opacity: 0;
+    transition: opacity 100ms var(--e-swift);
+    pointer-events: none;
+  }
+  .row:hover::after {
+    opacity: 0.05;
+  }
+  .row[data-active='true']::after {
+    opacity: 0.09;
+  }
+  .row[data-active='true']::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
+    background: rgb(var(--accent));
+  }
+
+  /* skeleton */
+  .skeleton {
+    @apply rounded-xs;
+    background: linear-gradient(
+      90deg,
+      rgb(var(--warm)) 0%,
+      rgb(var(--paper-2)) 40%,
+      rgb(var(--warm)) 80%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.9s linear infinite;
+  }
+
+  /* scrollbars */
+  .scroll-y {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--rule-2)) transparent;
+    overscroll-behavior: contain;
+  }
+  .scroll-y::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  .scroll-y::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scroll-y::-webkit-scrollbar-thumb {
+    background: rgb(var(--rule-2));
+    border-radius: 9px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  .scroll-y::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--muted));
+    background-clip: content-box;
+  }
+
+  /* focus: visible only, never a box on click */
+  .focusable {
+    @apply outline-none focus-visible:ring-2 focus-visible:ring-accent
+      focus-visible:ring-offset-2 focus-visible:ring-offset-paper rounded-xs;
+  }
+}
+
+/* stagger helper — inline index -> delay, no JS timers */
+.stagger > * {
+  animation: rise-in 0.34s var(--e-swift) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 34ms; }
+.stagger > *:nth-child(3) { animation-delay: 68ms; }
+.stagger > *:nth-child(4) { animation-delay: 102ms; }
+.stagger > *:nth-child(5) { animation-delay: 136ms; }
+.stagger > *:nth-child(6) { animation-delay: 170ms; }
+.stagger > *:nth-child(7) { animation-delay: 204ms; }
+.stagger > *:nth-child(8) { animation-delay: 238ms; }
+.stagger > *:nth-child(n + 9) { animation-delay: 272ms; }
+
+/* live dot */
+.live-dot {
+  position: relative;
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.live-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: currentColor;
+  animation: pulse-ring 1.8s var(--e-swift) infinite;
+}
+
+/* proof highlight */
+mark.proof {
+  background: rgba(154, 107, 63, 0.2);
+  color: inherit;
+  box-shadow: 0 1px 0 rgba(154, 107, 63, 0.5);
+  border-radius: 2px;
+  padding: 0 1px;
+  animation: fade-in 0.3s var(--e-swift) both;
+}
+
+/* ============================================================================
+   Reduced motion — kill decorative movement, keep state legibility.
+   ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition: none !important; animation: none !important; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .skeleton {
+    background: rgb(var(--warm));
+  }
+  .live-dot::after {
+    display: none;
+  }
 }

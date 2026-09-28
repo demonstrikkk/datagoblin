@@ -1,90 +1,237 @@
-export const API = (p) => `${import.meta.env.VITE_API_URL || ''}${p}`;
-
 /**
- * Pull a human-readable message out of whatever shape came back.
+ * API client.
  *
- * The backend answers with `{data, error, meta}`, but FastAPI's own validation
- * errors used to arrive as `{"detail": [...]}` - a different shape, and the
- * old handler only looked for `error.code`, so a 422 surfaced as the bare text
- * "E_VALIDATION" with the actual reason discarded. The backend now returns the
- * envelope for those too, but both shapes are handled so a mismatch can never
- * leave the user staring at a blank error again.
+ * Every backend response is the envelope `{data, error, meta}`. This module is
+ * the one place that unwraps it, so components only ever see `data` or a
+ * thrown `ApiError` with a message worth showing a user.
+ *
+ * Also handles: request timeouts, caller aborts, the optional X-API-Key
+ * header, and binary (export) responses.
  */
-function messageOf(payload, status) {
-  if (!payload) return `HTTP ${status}`;
-  if (payload?.error?.message) return payload.error.message;
-  if (typeof payload?.error === 'string') return payload.error;
-  if (Array.isArray(payload?.detail)) {
-    const first = payload.detail[0];
-    if (first) {
-      const where = Array.isArray(first.loc)
-        ? first.loc.filter((x) => x !== 'body' && x !== 'query').join('.')
-        : '';
-      const msg = first.msg || 'invalid request';
-      return where ? `${where}: ${msg}` : msg;
+
+const BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '');
+const DEFAULT_TIMEOUT = 45_000;
+
+export class ApiError extends Error {
+  constructor(message, { status, detail, path, payload } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+    this.path = path;
+    this.payload = payload;
+  }
+}
+
+/** Validated `extra.detail` objects are surfaced, not swallowed. */
+function describeError(error, payload) {
+  if (!error) return null;
+  if (typeof error === 'string') return error;
+
+  if (error.code) {
+    return error.message ? `${error.code}: ${error.message}` : error.code;
+  }
+  if (Array.isArray(error.details) && error.details.length) {
+    const bits = error.details.slice(0, 3).map((d) => {
+      const loc = Array.isArray(d.loc) ? d.loc.filter((p) => p !== 'body').join('.') : null;
+      const msg = d.msg || d.message || 'invalid';
+      return loc ? `${loc} — ${msg}` : msg;
+    });
+    const extra = error.details.length > 3 ? ` (+${error.details.length - 3} more)` : '';
+    return `${error.message || 'Validation failed'}: ${bits.join('; ')}${extra}`;
+  }
+  if (error.message) return error.message;
+  if (payload?.detail) {
+    return typeof payload.detail === 'string'
+      ? payload.detail
+      : JSON.stringify(payload.detail);
+  }
+  return 'Request failed';
+}
+
+export function apiKey() {
+  try {
+    return window.localStorage.getItem('dg_api_key') || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setApiKey(value) {
+  try {
+    if (value) window.localStorage.setItem('dg_api_key', value);
+    else window.localStorage.removeItem('dg_api_key');
+  } catch {
+    /* private mode — key just won't persist */
+  }
+}
+
+/** Compose an external signal with a timeout signal. */
+function withTimeout(external, ms) {
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, ms);
+  const onAbort = () => ctrl.abort();
+  if (external) {
+    if (external.aborted) ctrl.abort();
+    else external.addEventListener('abort', onAbort, { once: true });
+  }
+  return {
+    signal: ctrl.signal,
+    get timedOut() {
+      return timedOut;
+    },
+    dispose() {
+      clearTimeout(timer);
+      external?.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+async function request(path, { method = 'GET', body, signal, timeout, raw } = {}) {
+  const guard = withTimeout(signal, timeout ?? DEFAULT_TIMEOUT);
+  const headers = { Accept: 'application/json' };
+  const key = apiKey();
+  if (key) headers['X-API-Key'] = key;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: guard.signal,
+    });
+  } catch (err) {
+    if (guard.timedOut) {
+      throw new ApiError(`Request timed out after ${Math.round((timeout ?? DEFAULT_TIMEOUT) / 1000)}s`, { path });
     }
+    if (err?.name === 'AbortError') {
+      throw new ApiError('Request cancelled', { path });
+    }
+    throw new ApiError(
+      'Cannot reach the API. Is the backend running on port 8000?',
+      { path, detail: err?.message }
+    );
+  } finally {
+    guard.dispose();
   }
-  if (payload?.detail) return String(payload.detail);
-  if (payload?.message) return String(payload.message);
-  return `HTTP ${status}`;
-}
 
-function codeOf(payload) {
-  return payload?.error?.code || undefined;
-}
-
-function fail(status, payload) {
-  const e = new Error(messageOf(payload, status));
-  e.status = status;
-  e.code = codeOf(payload);
-  e.details = payload?.error?.details;
-  throw e;
-}
-
-/** Unwrap the {data, error, meta} envelope; throw a coded Error on error. */
-export function unwrap(envelope) {
-  if (envelope && envelope.error) {
-    const e = new Error(envelope.error.message || 'Request failed');
-    e.code = envelope.error.code;
-    e.details = envelope.error.details;
-    throw e;
+  if (raw) {
+    if (!res.ok) {
+      let payload = null;
+      try {
+        payload = await res.json();
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(describeError(payload?.error, payload) || res.statusText, {
+        status: res.status,
+        path,
+        payload,
+      });
+    }
+    return res.blob();
   }
-  return (envelope || {}).data;
-}
 
-export async function postJSON(path, body) {
-  const r = await fetch(API(path), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  // 204 / empty
+  if (res.status === 204) return null;
+
   let payload = null;
-  try { payload = await r.json(); } catch { /* empty or non-JSON body */ }
-  if (!r.ok) fail(r.status, payload);
-  return payload;
-}
-
-/** POST expecting a non-JSON body (CSV download). Returns {status, text, filename}. */
-export async function postText(path, body) {
-  const r = await fetch(API(path), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    let payload = null;
-    try { payload = await r.json(); } catch { /* ignore */ }
-    fail(r.status, payload);
+  try {
+    payload = await res.json();
+  } catch {
+    if (!res.ok) throw new ApiError(res.statusText || `HTTP ${res.status}`, { status: res.status, path });
+    return null;
   }
-  const disp = r.headers.get('Content-Disposition') || '';
-  const m = /filename=([^;]+)/.exec(disp);
-  return { text: await r.text(), filename: m ? m[1].trim() : 'dataset.csv' };
+
+  if (!res.ok || payload?.error) {
+    throw new ApiError(describeError(payload?.error, payload) || `HTTP ${res.status}`, {
+      status: res.status,
+      detail: payload?.error?.detail,
+      path,
+      payload,
+    });
+  }
+
+  return payload?.data !== undefined ? payload.data : payload;
 }
 
-export async function getJSON(path) {
-  const r = await fetch(API(path));
-  let payload = null;
-  try { payload = await r.json(); } catch { /* ignore */ }
-  if (!r.ok) fail(r.status, payload);
-  return payload;
+const qs = (params) => {
+  const s = new URLSearchParams();
+  Object.entries(params || {}).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') s.set(k, String(v));
+  });
+  const out = s.toString();
+  return out ? `?${out}` : '';
+};
+
+export const api = {
+  /* --- system ---------------------------------------------------------- */
+  health: (o) => request('/health', { ...o, timeout: o?.timeout ?? 10_000 }),
+
+  /* --- planning / execution ------------------------------------------- */
+  compile: (body, o) => request('/workflows/compile', { ...o, method: 'POST', body }),
+  createRun: (body, o) => request('/runs', { ...o, method: 'POST', body }),
+  run: (id, o) => request(`/runs/${encodeURIComponent(id)}`, o),
+  cancelRun: (id, o) => request(`/runs/${encodeURIComponent(id)}/cancel`, { ...o, method: 'POST' }),
+  jobs: (runId, o) => request(`/jobs/${encodeURIComponent(runId)}`, o),
+
+  /* --- history --------------------------------------------------------- */
+  // takes no query parameters; the signature exists for symmetry
+  history: (o) => request('/history', o),
+
+  /* --- datasets -------------------------------------------------------- */
+  datasets: (o) => request('/datasets', o),
+  dataset: (id, o) => request(`/datasets/${encodeURIComponent(id)}`, o),
+  records: (id, params, o) => request(`/datasets/${encodeURIComponent(id)}/records${qs(params)}`, o),
+  sources: (id, o) => request(`/datasets/${encodeURIComponent(id)}/sources`, o),
+
+  /**
+   * Export. Deliberately asymmetric: `csv` and `md` come back as a raw
+   * attachment that bypasses the `{data,error,meta}` envelope entirely, while
+   * `json` is a normal enveloped response. Asking for a Blob on all three
+   * would hand the caller `{"data":…}` bytes for JSON, so the branch is here.
+   */
+  async exportDataset(id, { format = 'json', fields } = {}, o = {}) {
+    const body = { format };
+    if (fields?.length) body.fields = fields;
+    if (format === 'json') {
+      return request(`/datasets/${encodeURIComponent(id)}/export`, {
+        ...o,
+        method: 'POST',
+        body,
+      });
+    }
+    return {
+      blob: await request(`/datasets/${encodeURIComponent(id)}/export`, {
+        ...o,
+        method: 'POST',
+        body,
+        raw: true,
+      }),
+      format,
+    };
+  },
+
+  /* --- intel ----------------------------------------------------------- */
+  map: (body, o) => request('/map', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
+  freeModels: (o) => request('/models/free', { ...o, timeout: o?.timeout ?? 30_000 }),
+  ask: (body, o) => request('/intel/ask', { ...o, method: 'POST', body, timeout: o?.timeout ?? 300_000 }),
+};
+
+/** Trigger a browser download from a blob without leaking the object URL. */
+export function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'export';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
 }

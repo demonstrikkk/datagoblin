@@ -9,6 +9,9 @@
 | if you care about | read |
 |---|---|
 | does it work end to end | **this file** |
+| how the frontend is built and verified | `17-FRONTEND-SPEC.md` |
+| the type, colour and motion rules | `18-DESIGN-SYSTEM.md` |
+| **API shapes the frontend has to work around** | `38-API-SHAPE-FINDINGS.md` |
 | where the page content is kept, and why | `29-EVIDENCE-LAYER.md` |
 | what a "verified" field means | `11-VALIDATION-SPEC.md` |
 | what a record cites | `12-PROVENANCE-SPEC.md` |
@@ -49,7 +52,27 @@ answered, all **8 distinct models** (`distinct_models: 8`, `independent: true`).
 The 2 failures are genuine upstream `UnknownError` 500s on `mimo-v2.5-free` and
 `muse-spark-1.2-contributor-free`, retried and still failing.
 
-**Suites**: 389 backend tests pass. Frontend builds. `git diff --check` clean.
+**Suites**: 389 backend tests pass. `git diff --check` clean.
+
+**Frontend (rebuilt 2026-09-27)**: production build passes with per-route code
+splitting, and four Playwright suites now drive the real app against the real
+backend. Measured, not asserted:
+
+| check | result |
+|---|---|
+| routes mount, zero console errors | `/`, `/runs`, `/library`, `/intel` all clean |
+| WebGL background actually drawing | `readPixels` channel spread 14–20 over paper; consecutive frames differ |
+| per-field evidence | expanding a field reveals quote, source page id, char offsets, content hash, normalised value |
+| partial run | status pill, quality bar (217 verified / 200 unverified / 23 conflicting), no "Complete" node in the rail |
+| keyboard | ⌘K opens the palette *with the caret in a textarea*; `1`–`4` navigate |
+| mobile 390px | 0px horizontal overflow |
+
+Five real bugs were found this way and would not have been caught by a passing
+build: a missing `useRef` import that crashed the primary flow, SVG attributes
+spread onto a `<span>` (so `<path>` rendered as an unknown tag), a `Textarea`
+that silently dropped its ref, hotkeys that died whenever the prompt had focus,
+and a `runCounters` that returned `null` for cancelled runs and took down the
+whole Runs view. See `17-FRONTEND-SPEC.md`.
 
 ## Fixed since the last update
 
@@ -88,9 +111,19 @@ Stated plainly, because "it works" was the claim that hid the most damage:
 8. **Dead config that reads like a feature:** `QDRANT_*`,
    `FEATURE_BROWSER`, `FEATURE_MCP`, `FEATURE_DOCLING`, `RUN_MAX_REQUESTS`,
    `RUN_MAX_PAGES_PER_SOURCE`, `RUN_MAX_SEARCH_QUERIES`, `DB_POOL_*`.
-9. **The frontend has no automated browser tests.** It builds and a human
-   confirmed `/intel` renders; a UI change is not covered by the 361 tests.
-10. **`.env` is committed-readable with live secrets** (Supabase password,
+9. **The API blocks while a run is in flight.** Measured 2026-09-27: with a run
+   running, `GET /api/health` stopped responding for over two minutes and
+   `/api/history` hung to a 120s client timeout, recovering only after judging
+   finished (Jev calls 169 → 216). Suspected blocking `time.sleep` in a retry
+   path, or sync psycopg/HTTP on the event loop. The UI degrades honestly but
+   cannot mask an unresponsive API. Ranked causes and evidence:
+   `38-API-SHAPE-FINDINGS.md` §7. **This is the most likely reason the product
+   read as "hanging" before the rebuild.**
+10. **The same run reports three different counter shapes** depending on the
+    endpoint, so a finished run's quality breakdown can disappear entirely.
+    Seven further API shape mismatches are catalogued with what the frontend
+    does about each: `38-API-SHAPE-FINDINGS.md`.
+11. **`.env` is committed-readable with live secrets** (Supabase password,
     Tavily, Gemini, Groq, OpenRouter, Jina, Zen). `.gitignore` is proposed, not
     present. Out of scope here, but it is the largest outstanding risk.
 

@@ -1,67 +1,103 @@
-import { NavLink, BrowserRouter, Routes, Route } from 'react-router-dom';
-import Workspace from './components/workspace.jsx';
-import New from './routes/New.jsx';
-import Run from './routes/Run.jsx';
-import Dataset from './routes/Dataset.jsx';
-import History from './routes/History.jsx';
-import Intel from './routes/Intel.jsx';
+import { Component, Suspense, lazy } from 'react';
+import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import Shell from './components/Shell.jsx';
+import { InspectorProvider } from './lib/inspector.jsx';
+import { ErrorNote } from './components/ui.jsx';
 
-function Sidebar() {
-  const link = ({ isActive }) =>
-    'flex items-center gap-3 rounded-md px-3 py-2 text-sm ' +
-    (isActive ? 'bg-[#E9DFC8] font-semibold text-ink' : 'text-ink/80 hover:bg-[#EDE7D8]');
-  return (
-    <aside className="flex w-60 shrink-0 flex-col gap-1 border-r border-rule bg-paper p-4" aria-label="Primary">
-      <div className="px-1 pb-4">
-        <p className="font-display text-2xl font-bold">Fieldwork</p>
-        <p className="text-xs text-muted">Real questions. Verified answers.</p>
-      </div>
-      <nav className="flex flex-col gap-1">
-        <NavLink to="/" end className={link}><span aria-hidden>+</span> New collection</NavLink>
-        <NavLink to="/intel" className={link}><span aria-hidden>?</span> Intel</NavLink>
-        <NavLink to="/history" className={link}><span aria-hidden>◷</span> Runs</NavLink>
-      </nav>
-      <div className="mt-auto space-y-4 pt-6">
-        <div className="rounded-md border border-rule bg-warm p-3 text-xs">
-          <p className="font-semibold">👑 Local dev</p>
-          <p className="mt-0.5 text-muted">Proof-first datasets, run locally.</p>
-        </div>
-        <div className="flex items-center gap-2 border-t border-rule px-1 pt-3 text-xs">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-stone-300 font-bold" aria-hidden>DG</span>
-          <div>
-            <p className="font-semibold">datagoblin</p>
-            <p className="text-muted">local workspace</p>
+const Collect = lazy(() => import('./pages/Collect.jsx'));
+const Runs = lazy(() => import('./pages/Runs.jsx'));
+const RunPage = lazy(() => import('./pages/RunPage.jsx'));
+const Library = lazy(() => import('./pages/Library.jsx'));
+const DatasetPage = lazy(() => import('./pages/DatasetPage.jsx'));
+const Intel = lazy(() => import('./pages/Intel.jsx'));
+
+class Boundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    // eslint-disable-next-line no-console
+    console.error('Unhandled UI error', error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="grid h-full place-items-center p-6">
+          <div className="w-full max-w-md space-y-3">
+            <h1 className="h-display text-[22px] text-ink">Something broke</h1>
+            <p className="text-[13px] leading-relaxed text-muted">
+              A view failed to render. The run itself is unaffected — it keeps executing on the
+              server. Reloading usually clears it.
+            </p>
+            <ErrorNote error={this.state.error} />
+            <div className="flex gap-2">
+              <button type="button" className="btn-primary" onClick={() => this.setState({ error: null })}>
+                Try again
+              </button>
+              <button type="button" className="btn-outline" onClick={() => window.location.reload()}>
+                Reload
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    </aside>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function RouteFallback() {
+  return (
+    <div className="space-y-4" role="status" aria-busy="true" aria-label="Loading view">
+      <div className="skeleton h-7 w-52" />
+      <div className="skeleton h-24 w-full rounded-lg" />
+      <div className="skeleton h-56 w-full rounded-lg" />
+    </div>
+  );
+}
+
+function NotFound() {
+  return (
+    <div className="grid place-items-center py-24 text-center animate-fade-up">
+      <p className="font-display text-[64px] leading-none text-rule-2">404</p>
+      <h1 className="mt-3 h-display text-[20px] text-ink">No such view</h1>
+      <p className="mt-1.5 max-w-sm text-[12.5px] text-muted">
+        That address does not match anything in the workspace.
+      </p>
+      <a href="/" className="btn-primary mt-5">
+        Back to Collect
+      </a>
+    </div>
   );
 }
 
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="flex min-h-screen bg-paper text-ink">
-        <div className="hidden lg:block"><Sidebar /></div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between border-b border-rule px-4 py-2 lg:hidden">
-            <p className="font-display text-xl font-bold">Fieldwork</p>
-            <nav className="flex gap-4 text-sm">
-              <NavLink to="/">New</NavLink>
-              <NavLink to="/intel">Intel</NavLink>
-              <NavLink to="/history">Runs</NavLink>
-            </nav>
-          </div>
-          <Routes>
-            <Route path="/" element={<Workspace />} />
-            <Route path="/new" element={<New />} />
-            <Route path="/runs/:id" element={<Run />} />
-            <Route path="/datasets/:id" element={<Dataset />} />
-            <Route path="/history" element={<History />} />
-            <Route path="/intel" element={<Intel />} />
-          </Routes>
-        </div>
-      </div>
+      <InspectorProvider>
+        <Boundary>
+          <Suspense fallback={<RouteFallback />}>
+            <Routes>
+              <Route element={<Shell />}>
+                <Route index element={<Collect />} />
+                <Route path="runs" element={<Runs />} />
+                <Route path="runs/:id" element={<RunPage />} />
+                <Route path="library" element={<Library />} />
+                <Route path="library/:id" element={<DatasetPage />} />
+                <Route path="intel" element={<Intel />} />
+                <Route path="*" element={<NotFound />} />
+              </Route>
+            </Routes>
+          </Suspense>
+        </Boundary>
+      </InspectorProvider>
     </BrowserRouter>
   );
 }

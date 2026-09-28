@@ -271,12 +271,23 @@ backend/app/
   events/     stream.py      per-run event bus
 
 frontend/src/
-  App.jsx                   routes
-  routes/      New · Run · Dataset · History · Intel
-  components/  workspace.jsx · studio.jsx
-  hooks/       useRunStream.js
-  lib/         api.js        envelope unwrapping · error surfacing
-
+  App.jsx                   routes · error boundary · lazy chunks
+  components/
+    Shell.jsx               layout frame · global hotkeys
+    NavRail.jsx             primary navigation
+    CommandBar.jsx          title · run chip · ⌘K · health pulse
+    CommandPalette.jsx      ⌘K destinations, runs, datasets
+    SettingsDialog.jsx      API key · density · shortcuts
+    AmbientField.jsx        WebGL background (raw GL, no library)
+    Inspector.jsx           contextual right rail: proof, source, event, diagnostics
+    RunView.jsx             live/finished run · rail · stats · event feed
+    PipelineRail.jsx        stage rail · StageList · Counter
+    EventFeed.jsx           filterable SSE log
+    ui.jsx                  primitives: Pill · Stat · StackedBar · Field · Skeleton
+  pages/       Collect · Runs · RunPage · Library · DatasetPage · Intel
+  hooks/       useRunStream.js (SSE) · useResource.js (fetch) · useUi.js (hotkeys, media, store)
+  lib/         api.js (envelope) · format.js (status vocabulary) · inspector.jsx · run-context.jsx
+```
 backend/migrations/  001_core.sql · 002_phase5.sql · 003_evidence.sql
 ```
 
@@ -472,7 +483,22 @@ Not hidden, because "it works" is the claim that hid the most damage:
   `FEATURE_MCP`, `FEATURE_DOCLING`, `RUN_MAX_REQUESTS`,
   `RUN_MAX_PAGES_PER_SOURCE`, `RUN_MAX_SEARCH_QUERIES`, `DB_POOL_*`.
 - **One known flaky test**, not reproduced in isolation. Observed, not fixed.
-- **No frontend browser tests** — it builds and a human confirmed it renders.
+- **The API blocks while a run is in flight.** With a run running, even
+  `GET /api/health` — a trivial `async def` — stopped responding for over two
+  minutes, and `/api/history` hung until a 120s client timeout. It recovered only
+  once judging finished (Jev calls went 169 → 216 across the stall). Suspected
+  blocking `time.sleep` in a retry path, or sync psycopg/HTTP on the event loop.
+  This is the most plausible cause of the "the app hangs" reports that prompted
+  the UI rebuild. The frontend degrades honestly — health reads `unreachable`,
+  run polling reports a real timeout, the SSE stream keeps carrying events — but
+  no client can make an unresponsive API feel fast.
+  Evidence and ranked causes:
+  [`docs/38-API-SHAPE-FINDINGS.md`](docs/38-API-SHAPE-FINDINGS.md) §7.
+- **Three endpoints disagree about the same run's counters**, so a finished
+  run's quality breakdown can vanish depending on which one you ask. The
+  frontend currently picks the richest shape; see
+  [`docs/38-API-SHAPE-FINDINGS.md`](docs/38-API-SHAPE-FINDINGS.md) §1 for the
+  full list of API shape mismatches.
 
 Full list: [`docs/37-CURRENT-STATE.md`](docs/37-CURRENT-STATE.md).
 
