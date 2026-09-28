@@ -45,6 +45,14 @@ function Head({ eyebrow, title, sub, onClose, actions }) {
 /* ------------------------------------------------------------------ proof */
 
 /**
+ * Longest field value shown inline before it is clamped. A `description` is a
+ * paragraph and `product_photos` is a list of URLs; either rendered in full
+ * pushed every other field on the record off the panel, which is why a long
+ * value looked like oversized text wherever the inspector was opened.
+ */
+const LONG_VALUE = 420;
+
+/**
  * Render a stored field value readably.
  *
  * Raw extraction output is often an unformatted number — `17000000000` for a
@@ -52,8 +60,12 @@ function Head({ eyebrow, title, sub, onClose, actions }) {
  * thousands separators plus a compact gloss. The exact value stays in the
  * title attribute, because rounding a figure someone may rely on would be its
  * own kind of lie.
+ *
+ * Text is clamped rather than dropped: the full value is one click away, so
+ * bounding what is shown does not mean hiding what was extracted.
  */
 function FieldValue({ raw }) {
+  const [open, setOpen] = useState(false);
   if (raw === null || raw === undefined || raw === '') {
     return <span className="text-rule-2">—</span>;
   }
@@ -74,10 +86,44 @@ function FieldValue({ raw }) {
     }
     return <span className="font-mono tnum">{grouped}</span>;
   }
-  if (typeof raw === 'object') {
-    return <span className="break-words">{Array.isArray(raw) ? raw.join(', ') : JSON.stringify(raw)}</span>;
+  const text = typeof raw === 'object'
+    ? (Array.isArray(raw) ? raw.join(', ') : JSON.stringify(raw))
+    : String(raw);
+
+  // A `description` is a paragraph and `product_photos` is a list of URLs. Both
+  // are legitimate field values, and rendering either in full pushed every
+  // other field on the record off the panel — which is why long values showed
+  // up as oversized text wherever the inspector opened: Records, Library, Runs.
+  // Bounded by default, with the full value one click away rather than hidden.
+  if (text.length <= LONG_VALUE) {
+    return <span className="break-words">{text}</span>;
   }
-  return <span className="break-words">{String(raw)}</span>;
+  if (open) {
+    return (
+      <span className="block">
+        <span className="block break-words whitespace-pre-wrap">{text}</span>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="mt-1 text-[11px] text-muted underline underline-offset-2 hover:text-ink"
+        >
+          Show less
+        </button>
+      </span>
+    );
+  }
+  return (
+    <span className="block">
+      <span className="block break-words">{`${text.slice(0, LONG_VALUE).trimEnd()}…`}</span>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-1 text-[11px] text-muted underline underline-offset-2 hover:text-ink"
+      >
+        Show all {text.length.toLocaleString('en-US')} characters
+      </button>
+    </span>
+  );
 }
 
 /**

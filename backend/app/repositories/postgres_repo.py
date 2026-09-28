@@ -397,6 +397,23 @@ class PostgresRepo:
                                       offset=0)["records"]
         return ds
 
+    def run_readonly_sql(self, sql: str, params: tuple = ()) -> list[dict]:
+        """Run an already-validated SELECT and always roll back.
+
+        Two independent guarantees sit under the caller's grammar check:
+        the transaction is declared READ ONLY, so the database refuses any
+        write even if the statement somehow got through validation, and it is
+        rolled back rather than committed. The statement runs with a server-side
+        timeout so a pathological query cannot hold a worker.
+        """
+        def _fn(cur):
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute("SET LOCAL statement_timeout = '15s'")
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+        return self._run("run_readonly_sql", _fn) or []
+
     def get_dataset_schema(self, dataset_id: str) -> list | None:
         """Just the declared schema — no record load.
 

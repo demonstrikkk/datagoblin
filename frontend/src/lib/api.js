@@ -204,6 +204,10 @@ export const api = {
   resolveConflict: (id, body, o) =>
     request(`/datasets/${encodeURIComponent(id)}/conflicts/resolve`, { ...o, method: 'POST', body }),
   selectors: (o) => request('/selectors', o),
+  queryDataset: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/query`, { ...o, method: 'POST', body, timeout: o?.timeout ?? 300_000 }),
+  refinePlan: (body, o) =>
+    request('/workflows/refine', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
   proposeSelectors: (body, o) =>
     request('/selectors/propose', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
   saveSelectors: (body, o) =>

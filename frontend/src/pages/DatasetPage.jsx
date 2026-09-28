@@ -629,7 +629,7 @@ function ConflictsPanel({ datasetId }) {
             ) : null}
             <div className="rounded-md border border-warn/40 bg-warn/5 p-2">
               <div className="text-xs uppercase tracking-wide text-muted">incumbent</div>
-              <div className="text-sm">{String(c.incumbent.value ?? 'â€”')}</div>
+              <div className="truncate text-sm" title={String(c.incumbent.value ?? '')}>{truncate(String(c.incumbent.value ?? '-'), 220)}</div>
               {c.incumbent.quote ? (
                 <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
                   â€œ{c.incumbent.quote}â€
@@ -652,7 +652,7 @@ function ConflictsPanel({ datasetId }) {
                   rival {rv.index + 1}
                   {rv.url ? ` Â· ${host(rv.url)}` : ''}
                 </div>
-                <div className="text-sm">{String(rv.value ?? 'â€”')}</div>
+                <div className="truncate text-sm" title={String(rv.value ?? '')}>{truncate(String(rv.value ?? '-'), 220)}</div>
                 {rv.quote ? (
                   <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
                     â€œ{rv.quote}â€
@@ -677,6 +677,110 @@ function ConflictsPanel({ datasetId }) {
         <p className="text-xs text-muted">
           Showing the first 40 of {conflicts.length}.
         </p>
+      ) : null}
+    </div>
+  );
+}
+
+function AskPanel({ datasetId }) {
+  const [question, setQuestion] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [answer, setAnswer] = useState(null);
+  const [failure, setFailure] = useState(null);
+
+  async function ask(e) {
+    e?.preventDefault();
+    if (!question.trim()) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      setAnswer(await api.queryDataset(datasetId, { question, limit: 200 }));
+    } catch (err) {
+      setFailure(err);
+      setAnswer(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-sm font-medium">Ask this dataset</h3>
+        <p className="text-xs text-muted">
+          A model writes the SQL, not you — and it can only read this dataset. The
+          query is shown before the rows, and it runs read-only against a
+          row-capped, rolled-back transaction, so it cannot change anything.
+        </p>
+      </div>
+
+      <form onSubmit={ask} className="flex gap-2">
+        <input
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder="e.g. how many companies are in each industry?"
+          className="min-w-0 flex-1 rounded border border-rule-2 bg-transparent px-2 py-1.5 text-sm"
+        />
+        <button
+          type="submit"
+          disabled={busy || !question.trim()}
+          className="shrink-0 rounded border border-rule-2 px-3 py-1.5 text-sm disabled:opacity-40"
+        >
+          {busy ? 'Asking…' : 'Ask'}
+        </button>
+      </form>
+
+      {failure ? <ErrorNote error={failure} onRetry={ask} /> : null}
+
+      {answer ? (
+        <div className="space-y-2">
+          <div className="rounded-md border border-rule-2/60 bg-warm/40 p-2">
+            <div className="text-xs uppercase tracking-wide text-muted">SQL</div>
+            <code className="mt-1 block overflow-x-auto text-xs">{answer.sql}</code>
+          </div>
+          <div className="text-xs text-muted">
+            {answer.row_count} row{answer.row_count === 1 ? '' : 's'}
+            {answer.truncated ? ' (capped)' : ''}
+          </div>
+          {answer.rows?.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    {answer.columns.map((c) => (
+                      <th key={c} className="border-b border-rule-2/60 px-2 py-1 text-left text-xs font-medium">
+                        {c}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {answer.rows.map((row, i) => (
+                    <tr key={i} className="border-b border-rule-2/30 last:border-0">
+                    {answer.columns.map((c) => (
+                      <td key={c} className="max-w-[280px] px-2 py-1 align-top">
+                        {/* A block-level truncating span: `max-w` on a <td> is
+                            only a hint in an auto-layout table, so a long
+                            description stretched the whole grid instead of
+                            clipping. */}
+                        <span className="block max-w-[260px] truncate" title={String(row[c] ?? '')}>
+                          {row[c] === null || row[c] === undefined ? (
+                            <span className="text-muted">—</span>
+                          ) : (
+                            String(row[c])
+                          )}
+                        </span>
+                      </td>
+                    ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty title="No rows matched" hint="The query ran; nothing satisfied it." />
+          )}
+        </div>
       ) : null}
     </div>
   );
@@ -1079,6 +1183,7 @@ export default function DatasetPage() {
           { value: 'records', label: 'Records' },
           { value: 'coverage', label: 'Coverage' },
           { value: 'conflicts', label: 'Conflicts' },
+          { value: 'ask', label: 'Ask' },
           { value: 'sources', label: 'Sources' },
           { value: 'export', label: 'Export' },
         ]}
@@ -1103,6 +1208,7 @@ export default function DatasetPage() {
       {tab === 'coverage' ? <CoveragePanel datasetId={id} runId={data.run_id} /> : null}
       {tab === 'conflicts' ? <ConflictsPanel datasetId={id} /> : null}
       {tab === 'sources' ? <SourceGrid datasetId={id} /> : null}
+      {tab === 'ask' ? <AskPanel datasetId={id} /> : null}
       {tab === 'export' ? <ExportPanel datasetId={id} schema={data.schema} /> : null}
     </div>
   );

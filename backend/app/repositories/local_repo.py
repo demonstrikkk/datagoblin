@@ -160,6 +160,24 @@ class LocalRepo:
                          "counts": d.get("counts", {}), "created_at": d.get("_ts", "")}
         return found
 
+    def run_readonly_sql(self, sql: str, params: tuple = ()) -> list[dict]:
+        """Always refuses.
+
+        The dataset question endpoint asks a model to write SQL, and this
+        adapter stores rows as JSONL lines. There is no SQL to run, and
+        hand-rolling a query engine over JSON to satisfy a signature would be
+        a much worse failure than saying no: the caller would get plausible
+        rows computed by something other than the database.
+
+        The method exists so both adapters answer the same question, and it
+        answers "not here" out loud. Set PERSISTENCE=postgres to use it.
+        """
+        from app.core.errors import AppError
+        raise AppError("code=E_UNSUPPORTED",
+                       message="Natural-language SQL queries need Postgres. "
+                               "This instance runs on the local JSONL adapter "
+                               "(PERSISTENCE=local), which has no query engine.")
+
     def get_dataset_schema(self, dataset_id: str) -> list | None:
         """Just the declared schema — no record copy. See PostgresRepo."""
         for d in self._scan("datasets"):

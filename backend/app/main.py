@@ -38,6 +38,7 @@ from app.services import planner as planner_svc
 from app.services import runner as runner_svc
 from app.services import selector_learn as selector_learn_svc
 from app.services import selectors as selectors_svc
+from app.services import sqlq as sqlq_svc
 
 set_level(settings.LOG_LEVEL)
 
@@ -491,6 +492,145 @@ async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
     if not out:
         raise not_found("dataset", did)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/query", dependencies=[Depends(require_api_key)])
+async def query_dataset(did: str, body: dict,
+                        cid: str = Depends(correlation_id)) -> dict:
+    """Answer a question about one dataset by running the SQL a model wrote.
+
+    The model proposes; it does not execute. The statement is checked against a
+    grammar that only knows this dataset's columns, then wrapped so the result
+    is row-capped, then run inside a read-only transaction that is rolled back.
+    A rejected statement comes back as a 422 naming the offending word, so the
+    caller can retry with a valid one.
+
+    The SQL is returned alongside the rows. A question you cannot inspect the
+    query for is a question you have to take on faith.
+    """
+    question = str(body.get("question") or "").strip()
+    limit = int(body.get("limit") or 200)
+    if not question:
+        raise validation("question is required")
+    if len(question) > 2000:
+        raise validation("question too long (2000 chars max)")
+    limit = max(1, min(limit, 1000))
+
+    schema = await asyncio.to_thread(repo().get_dataset_schema, did)
+    if schema is None:
+        raise not_found("dataset", did)
+    total = (await asyncio.to_thread(repo().get_records, did, "", 1, 0)).get("total", 0)
+
+    relation, columns = sqlq_svc.relation_sql(did, schema)
+    prompt = sqlq_svc.build_prompt(question, schema, total, sqlq_svc.DEFAULT_EXAMPLES)
+
+    async def _attempt(extra: str = "") -> tuple[str, dict]:
+        try:
+            out = await llm_provider.structured_generate(prompt + extra, {"type": "object"})
+        except AppError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise dependency(f"could not reach the model: {str(exc)[:120]}")
+        return sqlq_svc.extract_sql(out.get("data", out) if isinstance(out, dict) else out), out
+
+    raw, _ = await _attempt()
+    if not raw:
+        raise dependency("the model did not return a query")
+
+    # One informed retry. A rejected statement is usually the right idea written
+    # with a construct the grammar does not allow, and saying so to the model is
+    # cheaper than showing the user a 422 for a question they phrased normally.
+    try:
+        safe = sqlq_svc.validate(raw, columns)
+    except ValueError as first:
+        retry_sql, _ = await _attempt(
+            f"\n\nYour previous SQL was rejected: {first}\n"
+            f"Rewrite it using only the columns listed above. Use OR to combine "
+            f"conditions; do not use ANY, ARRAY, or functions not listed.")
+        if not retry_sql:
+            raise validation(f"{first}", details={"sql": raw})
+        try:
+            safe = sqlq_svc.validate(retry_sql, columns)
+        except ValueError as second:
+            raise validation(f"{second}", details={"sql": retry_sql})
+
+    sql = sqlq_svc.build_query(safe.replace("FROM records", f"FROM ({relation}) AS records"),
+                               relation, limit)
+    try:
+        rows = await asyncio.to_thread(repo().run_readonly_sql, sql)
+    except AppError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise dependency(f"the query could not be executed: {str(exc)[:160]}")
+
+    return {"data": {"dataset_id": did, "question": question,
+                     "sql": safe, "executed_sql": sql,
+                     "columns": list(rows[0].keys()) if rows else columns[:1],
+                     "row_count": len(rows), "truncated": len(rows) >= limit,
+                     "rows": rows},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/workflows/refine", dependencies=[Depends(require_api_key)])
+async def refine_plan(body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Change a compiled plan by instruction, and show exactly what moved.
+
+    Re-planning from scratch on every edit throws away the rest of the plan: a
+    second pass that adds one field came back with a different entity, a
+    different count, and different queries. This applies the change to the plan
+    in hand, recompiles it to check it is still valid, and returns a field-level
+    diff so a change to one thing is visible as a change to one thing.
+
+    Compiles, but does not start a run. Nothing is crawled until someone asks.
+    """
+    plan_id = str(body.get("plan_id") or "").strip()
+    instruction = str(body.get("instruction") or "").strip()
+    if not plan_id or not instruction:
+        raise validation("plan_id and instruction are both required")
+    if len(instruction) > 2000:
+        raise validation("instruction too long (2000 chars max)")
+
+    current = PLANS.get(plan_id) or await asyncio.to_thread(repo().get_plan, plan_id)
+    if not current:
+        raise not_found("plan", plan_id)
+
+    def _fingerprint(plan: dict) -> dict:
+        return {f.get("name", ""): f for f in (plan.get("fields") or [])}
+
+    before = _fingerprint(current)
+    goal = f"{current.get('goal', '')} Refinement: {instruction}"
+    revised, provider = await planner_svc.compile_plan(goal, llm_provider.structured_generate)
+    planner_svc.coerce_plan(revised)
+
+    after = _fingerprint(revised)
+    added = [n for n in after if n not in before]
+    removed = [n for n in before if n not in after]
+    changed = [n for n in after if n in before and after[n] != before[n]]
+
+    if not (added or removed or changed):
+        raise validation(
+            f"The refinement produced the same plan. Rephrase it — nothing about "
+            f"{instruction[:80]!r} was understood as a change.")
+
+    merged = dict(revised)
+    merged["goal"] = current.get("goal") or revised.get("goal", "")
+    merged["refined_from"] = plan_id
+    for key in ("seed_urls", "allowed_sources"):
+        if current.get(key):
+            merged[key] = current[key]
+
+    new_id = str(uuid.uuid4())
+    PLANS[new_id] = merged
+    saver = getattr(repo(), "save_plan", None)
+    if callable(saver):
+        try:
+            await asyncio.to_thread(saver, new_id, merged)
+        except Exception as e:  # noqa: BLE001
+            log.warning("refined plan not persisted",
+                        extra={"data": {"plan_id": new_id, "error": str(e)[:150]}})
+    return {"data": {"plan_id": new_id, "plan": merged, "provider": provider,
+                     "diff": {"added": added, "removed": removed, "changed": changed}},
+            "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.get("/api/selectors", dependencies=[Depends(require_api_key)])
