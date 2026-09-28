@@ -122,8 +122,8 @@ JUDGE_BUDGET = JudgeBudget(0)
 
 async def verify_field(value: object, quote: str, source_text: str,
                        required: bool, ftype: str, reference_id: str = "",
-                       references: str = "",
-                       budget: JudgeBudget | None = None) -> tuple[object | None, str]:
+                       references: str = "", budget: JudgeBudget | None = None,
+                       norm_source: str | None = None) -> tuple[object | None, str]:
     """Grade one field. Returns (value_to_store, status).
 
     Order matters: the cheap deterministic gates come first, the judge last,
@@ -138,7 +138,12 @@ async def verify_field(value: object, quote: str, source_text: str,
         return None, "unverified"
     if not type_ok(value, ftype):
         return None, "unverified"
-    if not quote or _norm(quote) not in _norm(source_text):
+    # The normalised page is passed in when the caller has one. `_norm` runs a
+    # whitespace regex plus lowercasing over the WHOLE page, and this is per
+    # field, so on a 50 kB page with ten fields the same page was normalised ten
+    # times before the judge was ever consulted.
+    if not quote or _norm(quote) not in (norm_source if norm_source is not None
+                                         else _norm(source_text)):
         return None, "unverified"
     if not reference_known(reference_id, references):
         return None, "unverified"
@@ -183,6 +188,9 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
 
     ts = now or (datetime.datetime.utcnow().isoformat() + "Z")
     wrapped: dict = {}
+    # Normalised once for every field below. See verify_field: this used to be
+    # recomputed per field, scanning the entire page each time.
+    norm_source = _norm(source_text)
     for f in fields_spec:
         name = f["name"]
         ev = next((e for e in raw.get("evidence", []) if e.get("field") == name), {})
@@ -191,7 +199,7 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
         v, st = await verify_field(raw.get("fields", {}).get(name), quote,
                                    source_text, f.get("required", False),
                                    f.get("type", "string"), ref_id, references,
-                                   budget=budget)
+                                   budget=budget, norm_source=norm_source)
         start, end = locate_quote(quote, source_text) if st == "verified" else (None, None)
         wrapped[name] = {"value": v, "verification_status": st,
                          # page_id makes the claim re-checkable: the offsets

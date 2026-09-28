@@ -193,7 +193,8 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                     return page
                 # Thinness is measured on CLEAN text (what the LLM would read),
                 # never on raw HTML — a JS shell's raw HTML is big, its text tiny.
-                clean = page.get("markdown") or reducer_svc.reduce_html(page.get("html", ""))
+                clean = page.get("markdown") or await asyncio.to_thread(
+                    reducer_svc.reduce_html, page.get("html", ""))
                 html = page.get("html", "")
                 shell = politeness_svc.looks_js_shell(html, len(clean), thin_at)
                 hollow = politeness_svc.has_hollow_code(html)
@@ -298,11 +299,24 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         dom = _domain(url)
         if depth > 0 and domain_count.get(dom, 0) >= per_domain_cap:
             return  # traversal cap (seeds always allowed); uncounted, unpersisted
+        # Reserve the slot BEFORE the await, not after.
+        #
+        # The cap used to be read above and incremented below `await _one()`.
+        # _one() yields control - to the network, and now to the HTML parser -
+        # so every task already in flight passed the check against the same
+        # stale count, then all incremented. The cap was a suggestion: a run
+        # with a domain cap of 10 crawled 13. It had gone unnoticed because a
+        # fake fetch that never suspends cannot expose it; a real one always
+        # does. A failure or a skip gives the slot back below.
+        if dom:
+            domain_count[dom] = domain_count.get(dom, 0) + 1
         route = item.get("route") or triage_source(url)
         try:
             page = await _one(url, route, fetch_fn or _default_fetch, sem)
         except Exception as e:  # noqa: BLE001 (skip-and-continue by design)
             fail += 1
+            if dom:
+                domain_count[dom] = max(0, domain_count.get(dom, 0) - 1)
             err = getattr(e, "message", str(e))[:300]
             await persist_source({"url": url, "title": item.get("title", ""),
                                   "status": "failed", "method": "", "error": err,
@@ -313,6 +327,8 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         reason = page.get("skipped", "")
         if reason:
             skipped += 1
+            if dom:
+                domain_count[dom] = max(0, domain_count.get(dom, 0) - 1)
             await persist_source({"url": url, "title": page.get("title", ""),
                                   "status": "skipped", "method": page.get("method", ""),
                                   "error": reason, "content_hash": "",
@@ -320,7 +336,6 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                                   "fingerprint": politeness_svc.fingerprint("GET", url)})
             return
         ok += 1
-        domain_count[dom] = domain_count.get(dom, 0) + 1
         page["title"] = page.get("title") or item.get("title", "")
         page["depth"] = depth
         page["parent_url"] = item.get("parent_url", "") or ""
@@ -341,7 +356,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                     "content_hash": page.get("content_hash", ""),
                     # Shared with the extractor, so a verified quote always
                     # resolves against the stored copy.
-                    "markdown": reducer_svc.page_evidence_text(page),
+                    "markdown": await asyncio.to_thread(reducer_svc.page_evidence_text, page),
                     "raw_html": page.get("rendered_html", "") or page.get("html", ""),
                     "snapshot_chars": snapshot_chars})
                 if pid:

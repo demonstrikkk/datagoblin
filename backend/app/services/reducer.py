@@ -133,6 +133,24 @@ def media_block(page: dict, max_items: int = 30) -> str:
     return "\n".join(lines)
 
 
+#: Parsed-once cache, keyed by the exact inputs this function reads.
+#:
+#: One call parses the same DOM three times — `page_text` builds a soup,
+#: `reduce_html` builds a second, `extract_structured` builds a third — and the
+#: evidence store plus the extractor then both call this for the same page. On a
+#: 100 kB document that is six parses per page where one would do.
+#:
+#: The key is (length, hash) of each input rather than a content hash: the hash
+#: those pages carry covers only the first available of html/markdown, so two
+#: pages sharing a markdown body but differing in html would collide and one
+#: would be served the other's quotes. Sizing as well as hashing makes an
+#: accidental match negligible, and `max_chars` is applied after the cache so
+#: one entry serves every caller. Bounded so a long run cannot grow it without
+#: limit.
+_EVIDENCE_CACHE: dict[tuple, str] = {}
+_EVIDENCE_CACHE_MAX = 256
+
+
 def page_evidence_text(page: dict, max_chars: int = 0) -> str:
     """Every quotable character on a page, in one place.
 
@@ -148,13 +166,22 @@ def page_evidence_text(page: dict, max_chars: int = 0) -> str:
     """
     from app.services import selectors as selectors_svc  # local: avoids a cycle
     dom_source = page.get("html", "") or page.get("rendered_html", "")
+    markdown = page.get("markdown") or ""
+    # media_block reads the page's own image/video lists, which vary with the
+    # page and not with its markup, so it belongs in the key too.
+    block = media_block(page)
+    key = (len(dom_source), hash(dom_source), len(markdown), hash(markdown),
+           hash(block))
+    cached = _EVIDENCE_CACHE.get(key)
+    if cached is not None:
+        return cached[:max_chars] if max_chars and len(cached) > max_chars else cached
     parts: list[str] = []
     if dom_source:
         try:
             parts.append(selectors_svc.page_text(dom_source))
         except Exception:  # noqa: BLE001 (malformed markup is not a store failure)
             pass
-    parts.append(page.get("markdown") or (reduce_html(dom_source) if dom_source else ""))
+    parts.append(markdown or (reduce_html(dom_source) if dom_source else ""))
     if dom_source:
         try:
             structured = extract_structured(dom_source)
@@ -162,10 +189,14 @@ def page_evidence_text(page: dict, max_chars: int = 0) -> str:
                 parts.append(str(structured["text"]))
         except Exception:  # noqa: BLE001
             pass
-    block = media_block(page)
     if block:
         parts.append(block)
     out = "\n".join(p for p in parts if p).strip()
+    if len(_EVIDENCE_CACHE) >= _EVIDENCE_CACHE_MAX:
+        # FIFO is fine: pages are processed in a bounded window, so the entry
+        # falling off the front is not the one about to be read again.
+        _EVIDENCE_CACHE.pop(next(iter(_EVIDENCE_CACHE)))
+    _EVIDENCE_CACHE[key] = out
     return out[:max_chars] if max_chars and len(out) > max_chars else out
 
 

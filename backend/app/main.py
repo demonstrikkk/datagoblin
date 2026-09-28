@@ -611,7 +611,9 @@ async def intel_ask(body: dict, cid: str = Depends(correlation_id)) -> dict:
         # Same precedence as crawler._one: the rendered rungs (crawl4ai, jina)
         # return `markdown`, only the static rung returns `html`. Reading html
         # alone reported "no readable text" for pages that fetched perfectly.
-        text = page.get("markdown") or reducer_svc.reduce_html(page.get("html", ""), 20000)
+        # to_thread keeps the parse off the loop serving this request's stream.
+        text = page.get("markdown") or await asyncio.to_thread(
+            reducer_svc.reduce_html, page.get("html", ""), 20000)
         text = text[:20000]
         thin_at = settings.FETCH_THIN_CHARS
         method = page.get("method", "")

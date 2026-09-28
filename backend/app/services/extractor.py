@@ -192,13 +192,18 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
     from app.services.reducer import page_evidence_text, reduce_html
     dom_source = page.get("html", "") or page.get("rendered_html", "")
     if dom_source or page.get("markdown"):
-        det_records, det_coverage, _debug = selectors_svc.deterministic_extract(plan, page)
+        # to_thread: parsing a 100 kB document takes tens of milliseconds, and
+        # this runs once per page inside the event loop that is also servicing
+        # the run's SSE stream. Blocking it makes the progress feed stutter for
+        # every connected client.
+        det_records, det_coverage, _debug = await asyncio.to_thread(
+            selectors_svc.deterministic_extract, plan, page)
         if det_records and det_coverage == "full":
             # Gate text spans both HTML-derived text (CSS quotes) and clean
             # markdown (regex quotes) so every evidence quote locates.
             # Shared with the evidence store so a verified quote always
             # resolves against the stored page.
-            source_text = page_evidence_text(page)
+            source_text = await asyncio.to_thread(page_evidence_text, page)
             for r in det_records:
                 r["source_text"] = source_text
                 r["source_title"] = page.get("title", "")
@@ -210,7 +215,7 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
     # The same text the evidence store persists, so every quote this page yields
     # resolves against the stored copy. Built by one function precisely so the
     # store and the extractor cannot drift apart again.
-    clean = page_evidence_text(page)
+    clean = await asyncio.to_thread(page_evidence_text, page)
     if llm is None:
         return [], "none"
     fields = plan.get("fields", [])

@@ -17,6 +17,15 @@ class LocalRepo:
         self._root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
+    def close(self) -> None:
+        """Release resources.
+
+        The JSONL store holds no sockets or handles, so this is a no-op. It
+        exists because both adapters must expose the same surface: shutdown
+        calls `close()` on whichever one the process is using, and the parity
+        test refuses a method one adapter has and the other does not.
+        """
+
     def _path(self, name: str) -> Path:
         return self._root / f"{name}.jsonl"
 

@@ -33,7 +33,7 @@ from decimal import Decimal
 from typing import Any, Iterable
 
 from app.core.config import settings
-from app.core.errors import dependency
+from app.core.errors import AppError, dependency
 from app.core.logging import log
 
 
@@ -87,24 +87,76 @@ class PostgresRepo:
         self._dsn = dsn
         self._connect_timeout = connect_timeout
         self._lock = threading.Lock()
+        # Lazy: created on first query, not at import, so a process that never
+        # touches the database never opens a socket. See _get_pool.
+        self._pool = None
 
     # -- plumbing -------------------------------------------------------------
+    def _get_pool(self):
+        """One connection pool per repo.
+
+        Every operation used to open its own connection. A run does ~200+
+        separate repository writes, and against a remote server each of those
+        pays a full TLS handshake — connection setup, not query execution, was
+        the dominant cost of persisting a run. The pool keeps a small number of
+        warm connections instead.
+
+        Built lazily under a lock so concurrent first requests build one pool
+        rather than several, and so importing the module does not open sockets.
+        """
+        if self._pool is not None:
+            return self._pool
+        with self._lock:
+            if self._pool is None:
+                from psycopg.rows import dict_row
+                from psycopg_pool import ConnectionPool
+                try:
+                    self._pool = ConnectionPool(
+                        conninfo=self._dsn,
+                        min_size=1,
+                        max_size=6,
+                        max_lifetime=1800,   # don't hold a remote connection forever
+                        open=True,
+                        # dict_row belongs to the pool, not to each connect():
+                        # the row factory must be set when the pooled
+                        # connections are created, or reads come back as tuples.
+                        kwargs={"connect_timeout": self._connect_timeout,
+                                "row_factory": dict_row})
+                except Exception as e:  # noqa: BLE001 (mapped to a typed error)
+                    raise dependency(f"Postgres pool open failed: {str(e)[:200]}")
+        return self._pool
+
     def _conn(self):
-        import psycopg
-        from psycopg.rows import dict_row
-        # dict_row, or every read comes back as bare tuples. Named columns are
-        # the whole reason for choosing SQL over the REST client's dicts.
-        return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout,
-                               row_factory=dict_row)
+        # Kept as the single connection factory so callers that substitute a
+        # fake connection keep working; the pool sits behind it.
+        return self._get_pool().connection()
 
     def _run(self, op: str, fn) -> Any:
         try:
-            with self._conn() as conn, conn.cursor() as cur:
-                out = fn(cur)
-                conn.commit()
+            with self._conn() as conn:
+                try:
+                    with conn.cursor() as cur:
+                        out = fn(cur)
+                    conn.commit()
+                except BaseException:
+                    # A connection returned to the pool still inside a failed
+                    # transaction would hand that abort to the next borrower.
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 (best effort, already failing)
+                        pass
+                    raise
                 return out
+        except AppError:
+            # Already typed (pool open failure); don't wrap it twice.
+            raise
         except Exception as e:  # noqa: BLE001 (mapped to a typed dependency error)
             raise dependency(f"Postgres {op} failed: {str(e)[:200]}")
+
+    def close(self) -> None:
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.close()
 
     def _rows(self, op: str, sql: str, params: Iterable = ()) -> list[dict]:
         """Every read goes through here, so every read is JSON-safe.
