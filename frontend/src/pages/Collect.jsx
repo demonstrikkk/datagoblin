@@ -17,7 +17,7 @@ import {
   Textarea,
   Toggle,
 } from '../components/ui.jsx';
-import { num, runId, runRecordTotal, runStatusMeta, truncate, verifySummary, when } from '../lib/format.js';
+import { num, planReadiness, runId, runRecordTotal, runStatusMeta, truncate, verifySummary, when } from '../lib/format.js';
 
 const EXAMPLES = [
   'NGO operating in Kenya with a published 2023 annual report',
@@ -200,6 +200,7 @@ function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBu
   const fields = plan?.fields || [];
   const required = fields.filter((f) => f.required);
   const sources = plan?.search_queries || [];
+  const ready = planReadiness(plan);
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -359,7 +360,13 @@ function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBu
           />
         </Field>
         <div className="flex-1" />
-        <button type="button" onClick={onRun} disabled={running} className="btn-accent h-9 px-4">
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={running || !ready.ready}
+          title={ready.ready ? '' : ready.reason}
+          className="btn-accent h-9 px-4"
+        >
           {running ? (
             <>
               <Spinner /> Starting…
@@ -369,6 +376,10 @@ function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBu
           )}
         </button>
       </div>
+
+      {/* Named, not disabled silently. A greyed-out button with no reason is the
+          thing users report as "the app is broken". */}
+      {!ready.ready ? <Notice tone="warn">{ready.reason}.</Notice> : null}
     </div>
   );
 }

@@ -461,3 +461,59 @@ export function topCategories(rows, col, limit = 8) {
   if (counts.size < 2) return [];
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
 }
+/**
+ * Whether a compiled plan can produce anything, and if not, which single reason.
+ *
+ * The Run button used to be enabled for any plan at all, so a plan the planner
+ * returned with an empty schema — or with nothing to crawl — started a real run
+ * that spent a discovery query, a fetch budget and LLM calls to confirm that it
+ * had no work. The user paid for the discovery.
+ *
+ * `dedupe_keys` is included because the backfill and refresh paths recover a
+ * plan's identity from it, and a plan without it cannot be safely topped up or
+ * refreshed later either. A plan that runs but cannot be repaired is only half
+ * usable, so it is reported as not-ready here rather than discovered at the
+ * moment someone needs it.
+ *
+ * Returns the first failing reason rather than a list, because there is one
+ * action to take next and a stack of complaints is not a decision.
+ */
+export function planReadiness(plan) {
+  const p = plan || {};
+  const fields = Array.isArray(p.fields) ? p.fields : [];
+  if (!fields.length) {
+    return { ready: false, reason: 'this plan has no fields, so a run could not extract anything' };
+  }
+  if (!fields.some((f) => f && f.required)) {
+    return {
+      ready: false,
+      reason: 'no field is marked required, so every record would be dropped as incomplete',
+    };
+  }
+  const seeds =
+    (Array.isArray(p.seed_urls) ? p.seed_urls.length : 0) +
+    (Array.isArray(p.seed_domains) ? p.seed_domains.length : 0);
+  const queries = Array.isArray(p.search_queries) ? p.search_queries.length : 0;
+  if (!seeds && !queries) {
+    return {
+      ready: false,
+      reason: 'no seed URL, seed domain or search query, so there is nothing to crawl',
+    };
+  }
+  if (!(Array.isArray(p.dedupe_keys) ? p.dedupe_keys.length : 0)) {
+    return {
+      ready: false,
+      reason: 'no dedupe_keys, so records could not be matched for backfill or refresh later',
+    };
+  }
+  return { ready: true, reason: '' };
+}
+
+/** Seeded sources, protocol stripped, in the order the plan lists them. */
+export function seededSources(plan) {
+  const p = plan || {};
+  return [
+    ...(Array.isArray(p.seed_urls) ? p.seed_urls : []),
+    ...(Array.isArray(p.seed_domains) ? p.seed_domains : []),
+  ].map((s) => String(s).replace(/^https?:\/\//, ''));
+}

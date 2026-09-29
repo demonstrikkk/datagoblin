@@ -29,6 +29,9 @@ from app.repositories import factory as factory_repo
 from app.repositories.factory import build_repo
 from app.schemas.run import DatasetView, Envelope, RunView
 from app.services import backfill as backfill_svc
+from app.services import dashboard as dashboard_svc
+from app.services import refresh as refresh_svc
+from app.services import yieldmap as yieldmap_svc
 from app.services import crawler as crawler_svc
 from app.services import coverage as coverage_svc
 from app.services import exporter as exporter_svc
@@ -564,12 +567,15 @@ async def propose_change(did: str, body: dict, cid: str = Depends(correlation_id
 @app.get("/api/datasets/{did}/backfill", dependencies=[Depends(require_api_key)])
 async def backfill_proposal(did: str, fields: str = "",
                             limit_pages: int = Query(default=8, ge=1, le=20),
+                            include_partial: bool = False,
                             cid: str = Depends(correlation_id)) -> dict:
     """What a backfill would cover, and what it would cost. Reads only.
 
-    Only fields with no value on any record are offered. A field that some
-    records carry is a coverage gap, and widening this to partial fields would
-    quietly change what backfill is allowed to rewrite.
+    By default only fields with no value on any record are offered, which is the
+    contract this endpoint has always had. `include_partial=true` widens it to
+    columns that are filled on some records and empty on others; the write rule
+    is unchanged either way, because backfill never overwrites a cell that holds
+    a value.
     """
     r = repo()
     if await asyncio.to_thread(r.get_dataset_schema, did) is None:
@@ -577,7 +583,7 @@ async def backfill_proposal(did: str, fields: str = "",
     try:
         out = backfill_svc.propose(
             r, did, [f for f in fields.split(",") if f.strip()] or None,
-            limit_pages)
+            limit_pages, include_partial=include_partial)
     except backfill_svc.BackfillRefused as exc:
         raise validation(str(exc))
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
@@ -605,15 +611,146 @@ async def backfill_run(did: str, body: dict, cid: str = Depends(correlation_id))
     limit_pages = int(body.get("limit_pages") or 8)
     if not 1 <= limit_pages <= 20:
         raise validation("limit_pages must be between 1 and 20")
+    include_partial = bool(body.get("include_partial"))
 
     async def _llm(prompt: str, schema: dict) -> dict:
         return await llm_provider.structured_generate(prompt, schema)
 
     try:
         out = await backfill_svc.run(r, did, fields or None, llm=_llm,
-                                     limit_pages=limit_pages, apply=apply_flag)
+                                     limit_pages=limit_pages, apply=apply_flag,
+                                     include_partial=include_partial)
     except backfill_svc.BackfillRefused as exc:
         raise validation(str(exc))
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/dashboard", dependencies=[Depends(require_api_key)])
+async def dashboard(limit: int = Query(default=dashboard_svc.MAX_DATASETS,
+                                       ge=1, le=100),
+                    cid: str = Depends(correlation_id)) -> dict:
+    """What this installation contains, read once from stored evidence.
+
+    Read-only and aggregate. Every figure comes from the same coverage function
+    the per-dataset views use, so this page and the dataset page cannot report
+    different numbers for the same dataset. Datasets past `limit` are reported as
+    `truncated` rather than silently omitted.
+    """
+    r = repo()
+    out = await asyncio.to_thread(dashboard_svc.summarise, r, limit)
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/columns", dependencies=[Depends(require_api_key)])
+async def add_column(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Declare a field the schema does not have yet.
+
+    A schema write, and kept separate from the value write it usually precedes:
+    "add a funding column" is two operations — declare it, then fill it — and
+    doing both under one approval would mean a request that half-succeeds leaves
+    a column that exists and is empty, which reads as a bug. Callers approve this,
+    see the column appear, then run the backfill that fills it.
+
+    Existing records are left untouched; the new field starts empty on every one
+    of them, which is exactly the state backfill is built to fill.
+    """
+    r = repo()
+    current = await asyncio.to_thread(r.get_dataset_schema, did)
+    if current is None:
+        raise not_found("dataset", did)
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise validation("name is required")
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_]{0,63}$", name):
+        raise validation("a field name must start with a letter and hold only "
+                         "letters, digits and underscores")
+    known = {str(f.get("name")) for f in (current or []) if isinstance(f, dict)}
+    if name in known:
+        return {"data": {"dataset_id": did, "name": name, "added": False,
+                         "schema": current,
+                         "reason": f"`{name}` is already in this dataset's schema"},
+                "error": None, "meta": {"correlation_id": cid}}
+
+    entry = {"name": name,
+             "type": str(body.get("type") or "string"),
+             "description": str(body.get("description") or "")}
+    schema = [*(current or []), entry]
+    if not await asyncio.to_thread(r.update_dataset_schema, did, schema):
+        raise not_found("dataset", did)
+    return {"data": {"dataset_id": did, "name": name, "added": True,
+                     "entry": entry, "schema": schema,
+                     "next": (f"POST /api/datasets/{did}/backfill with "
+                              f"fields=[{name!r}] to fill it from stored pages")},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/refresh", dependencies=[Depends(require_api_key)])
+async def refresh_proposal(did: str, sources: str = "",
+                           limit: int = Query(default=10, ge=1, le=25),
+                           cid: str = Depends(correlation_id)) -> dict:
+    """Which sources a refresh would re-read, and what it would cost. Reads only."""
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    named = [s.strip().lower() for s in sources.split(",") if s.strip()] or None
+    return {"data": refresh_svc.propose(r, did, named, limit),
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/refresh", dependencies=[Depends(require_api_key)])
+async def refresh_run(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Re-read this dataset's sources and re-verify the values they supplied.
+
+    This is the one write path that can replace a value which already exists, so
+    it is deliberately the strictest: the sources are re-fetched rather than
+    reused, a replacement must carry its own verified quote, an identical value
+    is left alone rather than rewritten, and the value being replaced is kept as
+    a rival so the change stays visible instead of becoming a silent correction.
+
+    `apply: false` re-fetches and re-verifies for real and withholds only the
+    writing, so the proposal's numbers can be checked before they are trusted.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    named = [str(s).strip().lower() for s in (body.get("sources") or [])
+             if str(s).strip()] or None
+    limit = int(body.get("limit") or refresh_svc.MAX_SOURCES)
+    if not 1 <= limit <= 25:
+        raise validation("limit must be between 1 and 25")
+
+    async def _llm(prompt: str, schema: dict) -> dict:
+        return await llm_provider.structured_generate(prompt, schema)
+
+    async def _fetch(url: str) -> dict:
+        # Straight through the crawler's own waterfall, so robots, the rate
+        # limit and permitted hosts apply exactly as they do to a run. Reuse is
+        # not offered and not consulted: this path does not enter fetch_all's
+        # queue, and re-reading the stored copy is the failure it exists to fix.
+        from app.services import source_router
+        route = source_router.triage_source(url)
+        return await crawler_svc._one(url, route, _fetch_method, asyncio.Semaphore(1))
+
+    try:
+        out = await refresh_svc.run(r, did, named, llm=_llm, limit=limit,
+                                    apply=bool(body.get("apply")), fetch=_fetch)
+    except refresh_svc.RefreshRefused as exc:
+        raise validation(str(exc))
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/yield", dependencies=[Depends(require_api_key)])
+async def dataset_yield(did: str, cid: str = Depends(correlation_id)) -> dict:
+    """Which hosts have actually produced records, learned from stored evidence.
+
+    Derived by reading the quotes every verified cell already carries. Nothing
+    is estimated, and a host with no evidence behind it is reported at zero
+    rather than given a default.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    out = yieldmap_svc.build(r, did)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 

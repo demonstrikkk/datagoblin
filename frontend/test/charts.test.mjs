@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict';
 
-import { numericShare, topCategories } from '../src/lib/format.js';
+import { numericShare, planReadiness, seededSources, topCategories } from '../src/lib/format.js';
 
 let failures = 0;
 
@@ -109,3 +109,83 @@ if (failures) {
   process.exit(1);
 }
 console.log('ALL PASSED');
+
+// --- planReadiness ---------------------------------------------------------
+// The Run button used to be enabled for any plan, so a plan the planner
+// returned with an empty schema started a real run that spent a discovery
+// query, a fetch budget and LLM calls to confirm it had no work. These check
+// the decision that now stands in the way of that.
+
+console.log('=== planReadiness ===');
+
+const GOOD_PLAN = {
+  fields: [{ name: 'company_name', required: true }, { name: 'founder', required: false }],
+  search_queries: ['ai startups london'],
+  dedupe_keys: ['company_name'],
+};
+
+check('a complete plan is ready', () => {
+  assert.equal(planReadiness(GOOD_PLAN).ready, true);
+});
+
+check('a plan with no fields is refused, and says why', () => {
+  const r = planReadiness({ ...GOOD_PLAN, fields: [] });
+  assert.equal(r.ready, false);
+  assert.match(r.reason, /no fields/);
+});
+
+check('a plan where nothing is required is refused', () => {
+  // Every record would be dropped as incomplete, so a run would store nothing
+  // and report success.
+  const r = planReadiness({ ...GOOD_PLAN, fields: [{ name: 'a' }, { name: 'b' }] });
+  assert.equal(r.ready, false);
+  assert.match(r.reason, /required/);
+});
+
+check('a plan with nothing to crawl is refused', () => {
+  const r = planReadiness({ ...GOOD_PLAN, search_queries: [] });
+  assert.equal(r.ready, false);
+  assert.match(r.reason, /nothing to crawl/);
+});
+
+check('a seed domain alone is enough to crawl', () => {
+  const r = planReadiness({ ...GOOD_PLAN, search_queries: [], seed_domains: ['example.com'] });
+  assert.equal(r.ready, true);
+});
+
+check('a plan with no dedupe_keys is refused, because it cannot be repaired later', () => {
+  const r = planReadiness({ ...GOOD_PLAN, dedupe_keys: [] });
+  assert.equal(r.ready, false);
+  assert.match(r.reason, /dedupe_keys/);
+});
+
+check('a missing plan is refused rather than crashing', () => {
+  assert.equal(planReadiness(undefined).ready, false);
+  assert.equal(planReadiness({}).ready, false);
+});
+
+check('exactly one reason is given, because there is one action to take', () => {
+  const r = planReadiness({ fields: [], search_queries: [], dedupe_keys: [] });
+  assert.equal(r.ready, false);
+  assert.ok(r.reason.length > 0);
+});
+
+console.log('=== seededSources ===');
+
+check('seeds are combined in order with the protocol stripped', () => {
+  assert.deepEqual(
+    seededSources({ seed_urls: ['https://a.example/x'], seed_domains: ['b.example'] }),
+    ['a.example/x', 'b.example']
+  );
+});
+
+check('a plan with no seeds lists nothing', () => {
+  assert.deepEqual(seededSources({}), []);
+  assert.deepEqual(seededSources(undefined), []);
+});
+
+if (failures) {
+  console.log(`\n${failures} failing`);
+  process.exit(1);
+}
+console.log('\nall ok');

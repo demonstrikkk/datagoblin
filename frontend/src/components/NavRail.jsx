@@ -49,6 +49,13 @@ const ICONS = {
       <path d="M5.3 6.6 8 8.6M14.7 6.6 12 8.6M5.3 13.4 8 11.4M14.7 13.4 12 11.4" />
     </>
   ),
+  dashboard: (
+    <>
+      <path d="M3 12.5l4-4.2 3 2.8 3.2-4.1 3.8 4" />
+      <path d="M2.8 16.8h14.4" />
+      <rect x="2.8" y="3.2" width="14.4" height="13.6" rx="1.6" />
+    </>
+  ),
   settings: (
     <>
       <circle cx="10" cy="10" r="2.6" />
@@ -59,6 +66,7 @@ const ICONS = {
 
 const ITEMS = [
   { to: '/', label: 'Collect', icon: 'collect', end: true },
+  { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
   { to: '/runs', label: 'Runs', icon: 'runs' },
   { to: '/library', label: 'Library', icon: 'library' },
   { to: '/intel', label: 'Intel', icon: 'intel' },

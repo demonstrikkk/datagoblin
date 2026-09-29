@@ -38,18 +38,32 @@ async def main():
 
         await p.goto(f"{BASE}/runs/{rid}", wait_until="domcontentloaded")
         await p.wait_for_selector("main", timeout=20000)
-        # Wait for the run's own content, not a fixed sleep. The page mounts as
-        # a bare "Loading run" and fills in when /api/runs/{id} resolves; under
-        # full-suite load that resolved after a flat 4s wait, so the checks
-        # below read an empty shell and reported two honest-looking failures
-        # against a page that rendered correctly.
-        await p.wait_for_function(
-            """() => {
-                 const t = document.querySelector('main')?.innerText || '';
-                 return t.length > 200 && !/^Loading run\\s*$/.test(t.trim());
-               }""",
-            timeout=45000)
-        await p.wait_for_timeout(600)
+        # Wait for the page to stop changing, not for a fixed sleep and not for
+        # any particular string.
+        #
+        # The run view fetches in pieces: the run row, then its dataset, then
+        # the stage rail. A "length > 200" wait is satisfied by the header alone
+        # and so the checks below read a page that is still filling in — which
+        # is how two honest-looking failures were reported against a page that
+        # renders correctly. Waiting for the *specific* text the checks assert
+        # on would be worse: it makes the test unfailable, so a real regression
+        # in that text would be silently absorbed by the wait.
+        #
+        # Stability is the honest condition: poll until the rendered text stops
+        # growing, which means everything that was going to arrive has arrived.
+        last = -1
+        stable = 0
+        deadline = 45
+        waited = 0.0
+        while stable < 2 and waited < deadline:
+            await p.wait_for_timeout(400)
+            waited += 0.4
+            try:
+                length = len(await p.inner_text("main"))
+            except Exception:
+                continue
+            stable = stable + 1 if length == last else 0
+            last = length
         txt = await p.inner_text("main")
 
         print("\n=== partial run rendering ===")

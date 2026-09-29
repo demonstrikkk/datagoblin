@@ -300,26 +300,39 @@ function BackfillPanel({ datasetId }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState(null);
   const [loaded, setLoaded] = useState(false);
+  // Top-up is a separate, explicit choice rather than a default. A field filled
+  // on some records and empty on others is the commonest gap, but widening the
+  // default would quietly change what "Backfill" means for everyone who used it
+  // before. Offered, labelled with its real cell count, never assumed.
+  const [includePartial, setIncludePartial] = useState(false);
+
+  const load = useCallback(
+    (partial) =>
+      api.backfillProposal(datasetId, { limit_pages: 6, include_partial: partial }),
+    [datasetId]
+  );
 
   useEffect(() => {
     let alive = true;
     // A read, so it can load on mount rather than waiting for a click. The cost
     // is one query and no model call: the proposal is arithmetic over stored
     // records, and it is the number the user needs before deciding anything.
-    api.backfillProposal(datasetId, { limit_pages: 6 })
+    load(includePartial)
       .then((p) => { if (alive) { setProposal(p); setLoaded(true); } })
       .catch((e) => { if (alive) { setFailure(e); setLoaded(true); } });
     return () => { alive = false; };
-  }, [datasetId]);
+  }, [datasetId, includePartial, load]);
 
   async function run(apply) {
     setBusy(true);
     setFailure(null);
     try {
-      setResult(await api.backfill(datasetId, { apply, limit_pages: 6 }));
+      setResult(
+        await api.backfill(datasetId, { apply, limit_pages: 6, include_partial: includePartial })
+      );
       if (apply) {
         // Coverage and the backlog both just changed.
-        const p = await api.backfillProposal(datasetId, { limit_pages: 6 });
+        const p = await load(includePartial);
         setProposal(p);
         setResult((r) => ({ ...r }));
       }
@@ -334,12 +347,29 @@ function BackfillPanel({ datasetId }) {
   if (failure && !proposal) return <ErrorNote error={failure} compact />;
 
   const p = proposal || {};
+  const partialCount = Object.keys(p.partial || {}).length;
+
   if (!p.fields?.length) {
     return (
-      <Notice tone="ok">
-        Nothing to backfill — every declared field already has a value on at
-        least one record.
-      </Notice>
+      <div className="space-y-2">
+        <Notice tone={partialCount ? 'info' : 'ok'}>
+          {partialCount
+            ? `Nothing is entirely absent, but ${partialCount} field${
+                partialCount === 1 ? ' is' : 's are'
+              } filled on some records and empty on others.`
+            : 'Nothing to backfill — every declared field already has a value on at least one record.'}
+        </Notice>
+        {partialCount > 0 && (
+          <button
+            type="button"
+            className="rounded border border-ink px-2 py-1 text-xs"
+            disabled={busy}
+            onClick={() => setIncludePartial(true)}
+          >
+            Top up the empty cells
+          </button>
+        )}
+      </div>
     );
   }
 
@@ -347,15 +377,35 @@ function BackfillPanel({ datasetId }) {
     <div className="space-y-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h3 className="text-sm font-medium">Backfill from stored pages</h3>
+          <h3 className="text-sm font-medium">
+            {includePartial ? 'Top up empty cells from stored pages' : 'Backfill from stored pages'}
+          </h3>
           <p className="text-xs text-muted">
-            {p.fields.length} field{p.fields.length === 1 ? '' : 's'} no record
-            carries: <span className="font-mono">{p.fields.join(', ')}</span>.
+            {p.fields.length} field{p.fields.length === 1 ? '' : 's'}
+            {includePartial
+              ? ' with empty cells: '
+              : ' no record carries: '}
+            <span className="font-mono">{p.fields.join(', ')}</span>
+            {p.empty_cells ? (
+              <>
+                {' '}
+                — {p.empty_cells} empty cell{p.empty_cells === 1 ? '' : 's'} in
+                total.
+              </>
+            ) : null}{' '}
             Re-reads {p.pages} page{p.pages === 1 ? '' : 's'} this run already
             stored — nothing is crawled — and fills only empty cells.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={includePartial}
+              onChange={(e) => { setResult(null); setIncludePartial(e.target.checked); }}
+            />
+            Include partly filled columns
+          </label>
           <button
             type="button"
             disabled={busy || !p.backfillable}
@@ -370,7 +420,7 @@ function BackfillPanel({ datasetId }) {
             className="rounded border border-ink px-2 py-1 text-xs disabled:opacity-40"
             onClick={() => run(true)}
           >
-            Fill them
+            {includePartial ? 'Top them up' : 'Fill them'}
           </button>
         </div>
       </div>
@@ -380,10 +430,19 @@ function BackfillPanel({ datasetId }) {
       ) : (
         <p className="text-xs text-muted">
           Matched by {p.dedupe_keys?.join(' + ')} — exact only, so a value can
-          never be attached to the wrong record. About{' '}
+          never be attached to the wrong record. A cell that already holds a value
+          is never overwritten, in either mode. About{' '}
           {p.estimated_extractions} extraction
           {p.estimated_extractions === 1 ? '' : 's'} and up to{' '}
           {p.estimated_judge_calls} verification calls.
+          {p.top_hosts?.length ? (
+            <>
+              {' '}
+              Pages are ranked by how many of your own records they name, with
+              recorded yield from {p.top_hosts.slice(0, 3).join(', ')} as the
+              tiebreaker.
+            </>
+          ) : null}
         </p>
       )}
 
@@ -643,6 +702,9 @@ function CoveragePanel({ datasetId, runId }) {
       </div>
 
       <BackfillPanel datasetId={datasetId} />
+
+      <RefreshPanel datasetId={datasetId} />
+
 
       <SelectorLearner
         runId={runId}
@@ -1139,11 +1201,161 @@ function AskPanel({ datasetId }) {
   );
 }
 
+/**
+ * Re-read the sources this dataset already used.
+ *
+ * The counterpart to Backfill, and kept visibly separate because it is the only
+ * operation here that can replace a value which already exists. The three rules
+ * that make that safe are stated on the button rather than in a tooltip: the
+ * sources are re-fetched rather than reused, a replacement must carry its own
+ * verified quote, and the value it replaces is kept as a rival so the change
+ * stays reviewable instead of becoming a silent correction.
+ */
+function RefreshPanel({ datasetId }) {
+  const [proposal, setProposal] = useState(null);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [named, setNamed] = useState('');
+
+  const load = useCallback(
+    (q) => api.refreshProposal(datasetId, q ? { sources: q, limit: 6 } : { limit: 6 }),
+    [datasetId]
+  );
+
+  useEffect(() => {
+    let alive = true;
+    load('')
+      .then((p) => { if (alive) { setProposal(p); setLoaded(true); } })
+      .catch((e) => { if (alive) { setFailure(e); setLoaded(true); } });
+    return () => { alive = false; };
+  }, [load]);
+
+  async function run(apply) {
+    setBusy(true);
+    setFailure(null);
+    const q = named.trim();
+    try {
+      setResult(await api.refresh(datasetId, {
+        apply,
+        limit: 6,
+        sources: q ? q.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      }));
+      if (apply) setProposal(await load(q));
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!loaded) return null;
+  const p = proposal || {};
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-medium">Refresh sources</h3>
+          <p className="text-xs text-muted">
+            {p.refreshable ? (
+              <>
+                Re-fetches {p.sources} source{p.sources === 1 ? '' : 's'}
+                {p.hosts?.length ? <> ({p.hosts.slice(0, 4).join(', ')})</> : null} and
+                re-verifies the {p.cells_reverified} value
+                {p.cells_reverified === 1 ? '' : 's'} they supplied. A value is
+                replaced only if the new one carries its own quote, and the value
+                it replaces is kept for review.
+              </>
+            ) : (
+              p.reason || 'No source recorded for this dataset yet.'
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={named}
+            onChange={(e) => setNamed(e.target.value)}
+            placeholder="host, host… (blank = best yield)"
+            aria-label="Hosts to refresh"
+            className="w-44 rounded border border-rule-2 bg-transparent px-2 py-1 text-xs"
+          />
+          <button
+            type="button"
+            disabled={busy || !p.refreshable}
+            className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
+            onClick={() => { setResult(null); load(named.trim()).then(setProposal).catch(setFailure); }}
+          >
+            Check
+          </button>
+          <button
+            type="button"
+            disabled={busy || !p.refreshable}
+            className="rounded border border-ink px-2 py-1 text-xs disabled:opacity-40"
+            onClick={() => run(false)}
+          >
+            {busy ? 'Re-fetching…' : 'Dry run'}
+          </button>
+          <button
+            type="button"
+            disabled={busy || !p.refreshable}
+            className="rounded border border-ink px-2 py-1 text-xs disabled:opacity-40"
+            onClick={() => run(true)}
+          >
+            Apply
+          </button>
+        </div>
+      </div>
+
+      {failure ? <ErrorNote error={failure} compact onRetry={() => run(false)} /> : null}
+
+      {result ? (
+        <div className="space-y-1 rounded-lg border border-rule-2/60 p-2 text-xs">
+          <div>
+            Re-fetched {result.refetched} source{result.refetched === 1 ? '' : 's'},
+            rechecked {result.records_rechecked} record
+            {result.records_rechecked === 1 ? '' : 's'}:{' '}
+            <strong>{result.changed}</strong> value{result.changed === 1 ? '' : 's'} differ,
+            {' '}
+            <strong>{result.unchanged}</strong> unchanged,{' '}
+            <strong>{result.unverifiable}</strong> not provable, {result.unmatched} unmatched.
+            {result.applied ? (
+              <>
+                {' '}
+                <strong>{result.written}</strong> written.
+              </>
+            ) : (
+              ' Nothing was written — this was a dry run that really re-fetched.'
+            )}
+          </div>
+          {result.changed_examples?.length ? (
+            <ul className="ml-3 list-disc space-y-0.5 text-muted">
+              {result.changed_examples.map((c, i) => (
+                <li key={i}>
+                  <span className="font-mono">{c.field}</span>: {String(c.old)} →{' '}
+                  {String(c.new)}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SourceGrid({ datasetId }) {
   const { data, status, error, refetch } = useResource(
     (o) => api.sources(datasetId, o),
     [datasetId]
   );
+  // Yield is a separate read because it derives from the records, not the
+  // sources: "how many verified cells did this host actually produce" is a
+  // question about quotes. Failing to load it must not blank the source list,
+  // so it is a second resource rather than a nested one.
+  const { data: yieldData } = useResource((o) => api.yieldMap(datasetId, o), [datasetId]);
   const { inspect } = useInspector();
 
   // Returns `{dataset_id, sources_attempted, sources_successful, sources_failed, sources[]}`.
@@ -1151,6 +1363,8 @@ function SourceGrid({ datasetId }) {
   const attempted = data?.sources_attempted ?? null;
   const successful = data?.sources_successful ?? null;
   const failed = data?.sources_failed ?? null;
+  const hosts = useMemo(() => yieldData?.hosts || {}, [yieldData]);
+  const yieldFor = (h) => hosts[h] || null;
 
   if (status === 'loading' && !data) return <Loading rows={4} label="Loading sources" />;
   if (error) return <ErrorNote error={error} onRetry={refetch} />;
@@ -1203,6 +1417,7 @@ function SourceGrid({ datasetId }) {
       <div className="space-y-3">
         {[...byHost.entries()].map(([h, list]) => {
           const ok = list.filter((s) => s.status === 'ok').length;
+          const y = yieldFor(h);
           return (
             <section key={h} className="surface overflow-hidden">
               <header className="flex items-center justify-between gap-2 border-b border-rule px-3.5 py-2">
@@ -1210,9 +1425,26 @@ function SourceGrid({ datasetId }) {
                   <Dot tone={ok === list.length ? 'ok' : ok ? 'warn' : 'danger'} />
                   <span className="truncate font-mono text-[12px] text-ink">{h}</span>
                 </div>
-                <span className="shrink-0 text-[11px] text-muted">
-                  {list.length} page{list.length === 1 ? '' : 's'}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  {/* What this host earned, not what it cost. Read from the
+                      quotes on the cells it supplied, so a host with pages but
+                      no verified cell reads as zero rather than as absent. */}
+                  {y && y.pages > 0 && (
+                    <span
+                      className="text-[10.5px] text-muted"
+                      title={`${num(y.verified)} proven cell(s) from ${num(
+                        y.records
+                      )} record(s), across ${num(y.pages)} stored page(s). ${
+                        y.yield
+                      } proven per page.`}
+                    >
+                      {num(y.verified)} proven · {y.yield}/page
+                    </span>
+                  )}
+                  <span className="text-[11px] text-muted">
+                    {list.length} page{list.length === 1 ? '' : 's'}
+                  </span>
+                </div>
               </header>
               <ul className="divide-y divide-rule">
                 {list.map((s, i) => {

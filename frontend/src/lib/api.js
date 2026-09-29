@@ -214,6 +214,21 @@ export const api = {
     request(`/datasets/${encodeURIComponent(id)}/backfill`, {
       ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
     }),
+
+  // --- learned yield, refresh, columns, dashboard ---------------------------
+  // `yield` is a read of the quotes every verified cell already carries, so it
+  // is cheap and never a source of its own claims. Refresh re-fetches over the
+  // network, so it gets the same long timeout as a backfill.
+  yieldMap: (id, o) => request(`/datasets/${encodeURIComponent(id)}/yield`, o),
+  refreshProposal: (id, params, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/refresh${qs(params)}`, o),
+  refresh: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/refresh`, {
+      ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
+    }),
+  addColumn: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/columns`, { ...o, method: 'POST', body }),
+  dashboard: (params, o) => request(`/dashboard${qs(params)}`, o),
   proposeChange: (id, body, o) =>
     request(`/datasets/${encodeURIComponent(id)}/propose`, {
       ...o, method: 'POST', body, timeout: o?.timeout ?? 60_000,

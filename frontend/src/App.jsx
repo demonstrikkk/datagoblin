@@ -5,6 +5,7 @@ import { InspectorProvider } from './lib/inspector.jsx';
 import { ErrorNote } from './components/ui.jsx';
 
 const Collect = lazy(() => import('./pages/Collect.jsx'));
+const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
 const Runs = lazy(() => import('./pages/Runs.jsx'));
 const RunPage = lazy(() => import('./pages/RunPage.jsx'));
 const Library = lazy(() => import('./pages/Library.jsx'));
@@ -87,6 +88,7 @@ export default function App() {
             <Routes>
               <Route element={<Shell />}>
                 <Route index element={<Collect />} />
+                <Route path="dashboard" element={<Dashboard />} />
                 <Route path="runs" element={<Runs />} />
                 <Route path="runs/:id" element={<RunPage />} />
                 <Route path="library" element={<Library />} />

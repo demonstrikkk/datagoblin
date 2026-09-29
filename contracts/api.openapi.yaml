@@ -1,14 +1,623 @@
 openapi: 3.0.3
-info: {title: DATAGOBLIN API, version: 0.1.0}
+info:
+  title: DATAGOBLIN API
+  version: 0.2.0
+  description: |
+    Every response uses one envelope, including failures:
+
+        { "data": <payload|null>, "error": <null|{code,message}>, "meta": {"correlation_id": "..."} }
+
+    A successful call always has `error: null`. A failed one always has a
+    non-null `error` and a `code` the client can branch on, so no caller has to
+    read prose to decide what to do.
+
+    Authentication: every route except `/api/health` requires `X-API-Key`. It
+    fails closed — a missing or wrong key is rejected, and an unconfigured
+    installation rejects everything rather than running unauthenticated.
+
+    Write safety: no route applies a change without an explicit `apply` or
+    `add`-style flag in the body. Every such route's default does the real read
+    and extraction work and then stops before writing, so a proposal's numbers
+    can be checked against reality rather than trusted in advance.
+servers:
+  - url: http://localhost:8000
+
+tags:
+  - name: runs
+    description: Start a run, watch it, cancel it.
+  - name: datasets
+    description: Read a dataset, and the operations that can change one.
+  - name: evidence
+    description: The stored pages that every quote points into.
+  - name: intel
+
+security:
+  - ApiKeyAuth: []
+
 paths:
-  /api/workflows/compile: {post: {requestBody: {content: {application/json: {schema: {type: object, required: [prompt], properties: {prompt: {type: string}}}}}}, responses: {'200': {description: '{plan_id, plan}'}}}}
-  /api/runs: {post: {requestBody: {content: {application/json: {schema: {type: object, required: [plan_id], properties: {plan_id: {type: string}}}}}}, responses: {'200': {description: '{run_id, status}'}}}}
-  /api/runs/{id}: {get: {responses: {'200': {description: run status}}}}
-  /api/runs/{id}/stream: {get: {responses: {'200': {description: SSE per run-event.schema.json}}}}
-  /api/runs/{id}/cancel: {post: {responses: {'200': {description: cancelled}}}}
-  /api/datasets: {get: {responses: {'200': {description: list}}}}
-  /api/datasets/{id}: {get: {responses: {'200': {description: dataset}}}}
-  /api/datasets/{id}/records: {get: {responses: {'200': {description: rows}}}}
-  /api/datasets/{id}/sources: {get: {responses: {'200': {description: sources}}}}
-  /api/datasets/{id}/export: {post: {responses: {'200': {description: export}}}}
-  /api/history: {get: {responses: {'200': {description: history}}}}
+  /api/health:
+    get:
+      tags: [intel]
+      security: []
+      summary: Liveness and configured-mode report.
+      responses:
+        "200":
+          description: Service is up. Reports auth mode and database reachability.
+
+  /api/workflows/compile:
+    post:
+      tags: [runs]
+      summary: Turn a question into a plan. Compiles only; nothing is crawled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: {type: string}
+      responses:
+        "200": {description: "{plan_id, plan}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/workflows/refine:
+    post:
+      tags: [runs]
+      summary: Rewrite an existing plan and return a field-level diff.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id]
+              properties:
+                plan_id: {type: string}
+                instruction: {type: string}
+      responses:
+        "200": {description: "{plan_id, plan, diff}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/runs:
+    post:
+      tags: [runs]
+      summary: Start a run from a compiled plan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id]
+              properties:
+                plan_id: {type: string}
+                dataset_name: {type: string}
+      responses:
+        "200": {description: "{run_id, status}"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/runs/{run_id}:
+    get:
+      tags: [runs]
+      summary: Run status, progress, counters and terminal error.
+      parameters: [{$ref: "#/components/parameters/run_id"}]
+      responses:
+        "200":
+          description: |
+            `data` is a stored run row. `partial: true` means the runtime budget
+            stopped the run and only what it had verified was kept; `status` is
+            then FAILED or PARTIAL, never COMPLETED.
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/runs/{run_id}/stream:
+    get:
+      tags: [runs]
+      summary: Server-sent events for one run.
+      parameters: [{$ref: "#/components/parameters/run_id"}]
+      responses:
+        "200": {description: "text/event-stream; one event per run_events row"}
+
+  /api/runs/{run_id}/cancel:
+    post:
+      tags: [runs]
+      summary: Cancel an in-flight run.
+      parameters: [{$ref: "#/components/parameters/run_id"}]
+      responses:
+        "200": {description: "{run_id, status}"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/runs/{run_id}/pages:
+    get:
+      tags: [evidence]
+      summary: Stored evidence pages for a run. Content truncated for transport.
+      parameters:
+        - {$ref: "#/components/parameters/run_id"}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 200}
+      responses:
+        "200":
+          description: |
+            `markdown` is the exact reduced text the extractor saw, so the
+            `start`/`end` offsets on any quote into it resolve against text that
+            is actually stored. `raw_html` is omitted here; use `/api/pages/{id}`.
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/jobs/{run_id}:
+    get:
+      tags: [runs]
+      summary: Job state for a run, for polling clients.
+      parameters: [{$ref: "#/components/parameters/run_id"}]
+      responses:
+        "200": {description: Job state}
+
+  /api/pages/{page_id}:
+    get:
+      tags: [evidence]
+      summary: One stored page in full, including raw_html.
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200": {description: The stored page}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/datasets:
+    get:
+      tags: [datasets]
+      summary: Every dataset with its counts. Does not include records.
+      responses:
+        "200": {description: List}
+
+  /api/dashboard:
+    get:
+      tags: [datasets]
+      summary: |
+        What this installation contains, aggregated once from stored evidence.
+
+        Read-only. Every figure comes from the same coverage function the
+        per-dataset views use, so this page and the dataset page cannot report
+        different numbers for the same dataset. Datasets past `limit` are
+        reported as `truncated: true` rather than silently omitted.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+      responses:
+        "200":
+          description: |
+            `{totals, datasets[], top_hosts[], truncated, limit}`. `totals.proven_pct`
+            is verified cells over all cells; unverified is reported beside it
+            rather than folded in, because a dataset where every value has a
+            quote and no verdict looks complete and is not.
+
+  /api/datasets/{did}:
+    get:
+      tags: [datasets]
+      summary: |
+        One dataset. Lean by default — records are opt-in.
+
+        `?include_records=true` attaches every record. Omitting it is what keeps
+        this page's cost proportional to the dataset's metadata rather than its
+        size: the same request with records included measured 402KB and 3340ms,
+        against 2.3KB and 117ms without.
+      parameters:
+        - {$ref: "#/components/parameters/did"}
+        - name: include_records
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200": {description: Dataset}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/datasets/{did}/records:
+    get:
+      tags: [datasets]
+      summary: Records, filtered and paged in the database.
+      parameters:
+        - {$ref: "#/components/parameters/did"}
+        - name: q
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 5000, default: 100}
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        "200": {description: "{records[], total, limit, offset}"}
+
+  /api/datasets/{did}/sources:
+    get:
+      tags: [datasets]
+      summary: |
+        Sources the run fetched, including which were reused from an earlier run
+        and when the underlying page was actually retrieved. A reused source is
+        a fact, not a failure, and it is reported as its own status rather than
+        as an error.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      responses:
+        "200": {description: "{sources_attempted, sources_successful, sources_failed, sources[]}"}
+
+  /api/datasets/{did}/yield:
+    get:
+      tags: [datasets]
+      summary: |
+        Which hosts have actually produced records, learned from stored evidence.
+
+        Derived by reading the quotes every verified cell already carries.
+        Nothing is estimated, and a host with no evidence behind it is reported
+        at zero rather than given a default — "we have no evidence this site is
+        useful" and "this site is useless" are different claims.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      responses:
+        "200": {description: "{hosts{}, ranking[], records_read, sampled}"}
+
+  /api/datasets/{did}/coverage:
+    get:
+      tags: [datasets]
+      summary: |
+        Per field, how many records carry a value and how that value earned its
+        keep (verified / unverified / conflicting / absent). A field declared but
+        never extracted appears, because that gap is the point of the view.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      responses:
+        "200": {description: "{records, fields[]}"}
+
+  /api/datasets/{did}/conflicts:
+    get:
+      tags: [datasets]
+      summary: |
+        Every disputed cell, with the incumbent and each rival's evidence —
+        so a conflict count becomes one decidable question per cell.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      responses:
+        "200": {description: List of conflicts}
+
+  /api/datasets/{did}/conflicts/resolve:
+    post:
+      tags: [datasets]
+      summary: |
+        Record a human decision about one cell.
+
+        Two moves exist and neither invents data: keep what was extracted, or
+        adopt a rival that was actually extracted from another source. There is
+        no free-text value, because that would put unquoted text into a dataset
+        whose claim is that every value carries evidence.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [record_id, field, choice]
+              properties:
+                record_id: {type: string}
+                field: {type: string}
+                choice: {type: string, enum: [keep, adopt]}
+                rival_index: {type: integer}
+      responses:
+        "200": {description: The cell after the decision}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/datasets/{did}/propose:
+    post:
+      tags: [datasets]
+      summary: |
+        Read a sentence and say what it would do. Executes nothing.
+
+        Returns an intent, the existing endpoint that will carry it out, and the
+        cost, for the user to approve separately. Intents are `query`,
+        `backfill`, `refine`, `add_column` and `refresh`; a sentence that cannot
+        be classified is reported as unrecognised rather than interpreted
+        loosely, and any sentence ending in a question mark resolves to `query`,
+        so asking can never write.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: {type: string}
+      responses:
+        "200": {description: A proposal. `writes` and `needs_confirmation` say what approval means.}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/datasets/{did}/backfill:
+    get:
+      tags: [datasets]
+      summary: |
+        What a backfill would cover, and what it would cost. Reads only.
+
+        By default only fields with no value on any record are offered.
+        `include_partial=true` widens it to columns filled on some records and
+        empty on others; the write rule is unchanged either way.
+      parameters:
+        - {$ref: "#/components/parameters/did"}
+        - name: fields
+          in: query
+          schema: {type: string}
+          description: Comma-separated field names.
+        - name: limit_pages
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 20, default: 8}
+        - name: include_partial
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200": {description: "{fields, fields_detail, empty_cells, pages, estimated_*} | backfillable: false, reason"}
+        "422": {$ref: "#/components/responses/Validation"}
+    post:
+      tags: [datasets]
+      summary: |
+        Fill empty cells from pages this run already stored. Nothing is crawled.
+
+        `apply: false` is the default and is a real dry run: extraction and
+        verification both execute and only the writing is withheld.
+
+        Two rules make it safe. New values are matched to an existing record by
+        exact identity over the plan's `dedupe_keys` only — the deduper's fuzzy
+        tier merges rows and must not attach a value to a record it does not
+        belong to. And a cell that already holds a value is never overwritten,
+        including in `include_partial` mode, where such cells are counted in
+        `skipped_existing`. A written cell carries its own quote and verdict or
+        it is not written.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fields: {type: array, items: {type: string}}
+                limit_pages: {type: integer, minimum: 1, maximum: 20, default: 8}
+                apply: {type: boolean, default: false}
+                include_partial: {type: boolean, default: false}
+      responses:
+        "200": {description: "{fillable, written, filled_fields, skipped_existing, unmatched, judge_calls_used}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/datasets/{did}/refresh:
+    get:
+      tags: [datasets]
+      summary: |
+        Which sources a refresh would re-read, and what it would cost. Reads only.
+
+        Sources are matched on host, so "re-read techcrunch" selects that site
+        without knowing which of its URLs the dataset used. Unnamed sources are
+        ordered by recorded yield, because refresh budget should go to the hosts
+        that have historically produced verified cells.
+      parameters:
+        - {$ref: "#/components/parameters/did"}
+        - name: sources
+          in: query
+          schema: {type: string}
+          description: Comma-separated hosts or URLs. Omit to use highest-yield sources.
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 25, default: 10}
+      responses:
+        "200": {description: "{sources, hosts, cells_reverified, estimated_*} | refreshable: false, reason}"}
+    post:
+      tags: [datasets]
+      summary: |
+        Re-read this dataset's sources and re-verify the values they supplied.
+
+        The one write path that can replace a value which already exists, so it
+        is the strictest. Sources are re-fetched rather than reused, a
+        replacement must carry its own verified quote, an unchanged value is
+        left alone rather than rewritten, and the replaced value is kept as a
+        rival so the change stays visible instead of becoming a silent
+        correction.
+
+        `apply: false` re-fetches and re-verifies for real and withholds only
+        the writing.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sources: {type: array, items: {type: string}}
+                limit: {type: integer, minimum: 1, maximum: 25, default: 10}
+                apply: {type: boolean, default: false}
+      responses:
+        "200": {description: "{sources, changed, written, unchanged, unverifiable, unmatched}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/datasets/{did}/columns:
+    post:
+      tags: [datasets]
+      summary: |
+        Declare a field the schema does not have yet.
+
+        Kept separate from the value write it usually precedes: declaring and
+        filling under one approval would let a half-succeeding request leave a
+        column that exists and is empty, which reads as a bug. Existing records
+        are untouched; the new field starts empty on every one of them.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, pattern: "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
+                type: {type: string, default: string}
+                description: {type: string}
+      responses:
+        "200": {description: "{added, entry, schema, next}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/datasets/{did}/query:
+    post:
+      tags: [datasets]
+      summary: |
+        Answer a question about one dataset by running SQL a model wrote.
+
+        The model proposes; it does not execute. The statement is checked against
+        a read-only allowlist first, and a literal `%` is escaped — a LIKE against
+        `%labs%` previously failed to match because the statement was built with
+        Python string interpolation.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: {type: string}
+      responses:
+        "200": {description: "{sql, columns, rows}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/datasets/{did}/export:
+    post:
+      tags: [datasets]
+      summary: |
+        Export the dataset. The response reports what was actually written and
+        refuses to claim a row count it did not produce.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                format: {type: string, enum: [csv, jsonl, xlsx], default: csv}
+      responses:
+        "200": {description: "{export_id, format, bytes, rows}"}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/history:
+    get:
+      tags: [runs]
+      summary: Run history, newest first, with `partial` and `error` as facts.
+      responses:
+        "200": {description: List of runs}
+
+  /api/selectors:
+    get:
+      tags: [intel]
+      summary: Learned CSS selectors learned from past runs.
+      responses:
+        "200": {description: List}
+
+  /api/selectors/propose:
+    post:
+      tags: [intel]
+      summary: |
+        Propose a selector for a site. Read-only; nothing is saved.
+
+        Each candidate selector is executed against real HTML, so a proposal
+        that matches nothing says so rather than being returned as a candidate.
+      responses:
+        "200": {description: Candidates with match counts}
+
+  /api/selectors/save:
+    post:
+      tags: [intel]
+      summary: Save a chosen selector for reuse.
+      responses:
+        "200": {description: Saved selector}
+
+  /api/intel/ask:
+    post:
+      tags: [intel]
+      summary: |
+        Ask one question about a page or a prompt and get every model's answer
+        plus their agreement. With a `url` the page is fetched server-side
+        through the same crawler waterfall runs use, so the browser never talks
+        to a target site directly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                prompt: {type: string, maxLength: 20000}
+                url: {type: string}
+      responses:
+        "200": {description: Answers, agreement, and the source that was read}
+        "422": {$ref: "#/components/responses/Validation"}
+
+  /api/models/free:
+    get:
+      tags: [intel]
+      summary: The free-tier models this installation will call.
+      responses:
+        "200": {description: List of models}
+
+  /api/map:
+    post:
+      tags: [intel]
+      summary: Map a question to candidate source URLs.
+      responses:
+        "200": {description: Mapped sources}
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    run_id:
+      name: run_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    did:
+      name: did
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+
+  responses:
+    Validation:
+      description: The request cannot be served as written. Nothing was changed.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Envelope"}
+    NotFound:
+      description: No such resource.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Envelope"}
+
+  schemas:
+    Envelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: {description: Payload, or null on failure.}
+        error:
+          oneOf:
+            - {type: "null"}
+            - type: object
+              required: [code, message]
+              properties:
+                code: {type: string}
+                message: {type: string}
+        meta:
+          type: object
+          properties:
+            correlation_id: {type: string}
