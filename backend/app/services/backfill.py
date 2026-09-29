@@ -34,6 +34,7 @@ from typing import Any
 from app.services import coverage as coverage_svc
 from app.services import extractor as extractor_svc
 from app.services import validator as validator_svc
+from app.services import yieldmap as yieldmap_svc
 from app.services.deduper import _sig
 from app.services.reducer import page_evidence_text
 
@@ -117,9 +118,55 @@ def absent_fields(coverage: dict, requested: list[str] | None = None) -> list[st
     return names
 
 
+def topup_fields(coverage: dict, requested: list[str] | None = None,
+                 include_partial: bool = False) -> tuple[list[str], dict]:
+    """Fields a backfill may fill, and why each one qualified.
+
+    Two different gaps were being conflated. A field no record carries is a
+    schema problem the sources may simply not answer; a field *some* records
+    carry is a coverage gap, and it is the one a top-up closes. The original
+    rule — backfill only entirely-absent fields — was right about not
+    *overwriting*, but it read the same refusal as "partial fields are
+    off-limits", which left the commonest kind of gap unfixable without a full
+    re-run.
+
+    So the selection widens; the write rule does not. `run()` still refuses every
+    cell that already holds a value, and `skipped_existing` reports how many it
+    declined. The distinction the caller sees is the reason string: "never
+    extracted" and "missing on 12 of 88 records" are different problems and the
+    proposal should not blur them.
+
+    Returns (fields, detail) where detail maps each field to its counts, so the
+    proposal can quote real numbers instead of a bare list.
+    """
+    detail: dict[str, dict] = {}
+    for f in coverage.get("fields") or []:
+        name = f.get("field")
+        if not name:
+            continue
+        present, missing = int(f.get("present") or 0), int(f.get("missing") or 0)
+        if present == 0:
+            kind = "never_extracted"
+        elif missing:
+            kind = "partial"
+        else:
+            continue
+        detail[name] = {"kind": kind, "present": present, "missing": missing,
+                        "records": int(f.get("records") or 0)}
+    if requested:
+        wanted = {str(n) for n in requested}
+        detail = {k: v for k, v in detail.items() if k in wanted}
+    if not include_partial:
+        # The original, narrower contract, kept as the default so nothing that
+        # relied on it changes behaviour by upgrading.
+        detail = {k: v for k, v in detail.items() if v["kind"] == "never_extracted"}
+    return sorted(detail), detail
+
+
 def _candidate_pages(store, run_id: str, limit: int,
                     records: list[dict] | None = None,
-                    keys: list[str] | None = None) -> list[dict]:
+                    keys: list[str] | None = None,
+                    yieldmap: dict | None = None) -> list[dict]:
     """Stored pages worth re-reading, most likely to describe the records first.
 
     Ordering matters more than it looks. Taking the newest N pages picked
@@ -134,6 +181,11 @@ def _candidate_pages(store, run_id: str, limit: int,
     however recently it was fetched. Falls back to recency when there is
     nothing to match on.
 
+    Recorded yield is then added as a bounded tiebreaker, never as a replacement
+    for relevance. The run that failed above would also have failed on yield
+    alone: a host that has never supplied a verified cell has a yield of zero
+    and gets no bonus, so this can only order pages that already look plausible.
+
     Full page rows, because extraction needs the DOM for the deterministic
     selector path and the markdown for the evidence text. `get_pages` omits
     raw_html on purpose (it is a listing endpoint), so each candidate is read
@@ -143,13 +195,25 @@ def _candidate_pages(store, run_id: str, limit: int,
     listing = [r for r in listing if r.get("markdown") or r.get("raw_html")]
 
     needles = _identity_needles(records or [], keys or [])
+    ym = yieldmap or {}
+    for row in listing:
+        body = f"{row.get('markdown', '')} {row.get('raw_html', '')}".lower()
+        row["_match_hits"] = sum(1 for n in needles if n in body)
+        if ym:
+            row["_yield_bonus"] = yieldmap_svc.bonus(
+                ym, yieldmap_svc.host_of(row.get("url")))
+        else:
+            row["_yield_bonus"] = 0.0
+
     if needles and listing:
-        for row in listing:
-            body = f"{row.get('markdown', '')} {row.get('raw_html', '')}".lower()
-            row["_match_hits"] = sum(1 for n in needles if n in body)
-        listing.sort(key=lambda r: -r["_match_hits"])
+        # Relevance first, yield as the tiebreaker, then the URL so the order is
+        # stable across runs — an unstable order would make two identical
+        # proposals report different pages.
+        listing.sort(key=lambda r: (-r["_match_hits"], -r["_yield_bonus"],
+                                    r.get("url", "")))
         chosen = listing[:limit] or listing[:1]
     else:
+        listing.sort(key=lambda r: (-r["_yield_bonus"], r.get("url", "")))
         chosen = listing[:limit]
 
     # The listing omits raw_html (it is a transport-shaped endpoint), and
@@ -197,7 +261,7 @@ def _identity_needles(records: list[dict], keys: list[str]) -> list[str]:
 
 
 def propose(store, dataset_id: str, fields: list[str] | None = None,
-            limit_pages: int = 8) -> dict:
+            limit_pages: int = 8, include_partial: bool = False) -> dict:
     """What a backfill would do, and what it would cost. Writes nothing.
 
     The cost is the point. Without it, "fill the missing fields" is an
@@ -209,10 +273,18 @@ def propose(store, dataset_id: str, fields: list[str] | None = None,
     records = (store.get_records(dataset_id, "", 1000, 0) or {}).get("records", [])
     matrix = coverage_svc.field_coverage(
         records, ds.get("schema") or plan.get("fields", []))
-    targets = absent_fields(matrix, fields)
+    targets, detail = topup_fields(matrix, fields, include_partial)
     if not targets:
+        if include_partial:
+            reason = ("every field is filled on every record, so there is no cell "
+                      "left to top up")
+        else:
+            reason = ("every declared field already has a value on at least one "
+                      "record; pass include_partial to also top up fields that are "
+                      "filled on some records but not all")
         return {"dataset_id": dataset_id, "fields": [], "backfillable": False,
-                "reason": "every declared field already has a value on at least one record",
+                "include_partial": bool(include_partial), "reason": reason,
+                "fields_detail": {},
                 "pages": 0, "estimated_judge_calls": 0}
 
     keys = [str(k) for k in (plan.get("dedupe_keys") or [])]
@@ -220,11 +292,14 @@ def propose(store, dataset_id: str, fields: list[str] | None = None,
     # identity to be matched on, and the whole operation would find nothing it
     # could safely attach to anything.
     extract_fields = sorted(set(targets) | set(keys))
+    ym = yieldmap_svc.build(store, dataset_id, records, str(ds.get("run_id") or ""))
     pages = _candidate_pages(store, ds.get("run_id", ""), max(1, int(limit_pages)),
-                             records, keys)
+                             records, keys, ym)
     if not pages:
         return {"dataset_id": dataset_id, "fields": targets, "backfillable": False,
+                "include_partial": bool(include_partial),
                 "reason": "this run stored no readable pages, so there is nothing to re-read",
+                "fields_detail": detail,
                 "pages": 0, "estimated_judge_calls": 0}
 
     matchable = 0
@@ -232,10 +307,20 @@ def propose(store, dataset_id: str, fields: list[str] | None = None,
         if _sig(_plain(rec.get("fields", {})), keys):
             matchable += 1
 
+    empty_cells = sum(v["missing"] for k, v in detail.items() if k in targets)
     return {
         "dataset_id": dataset_id,
         "fields": targets,
         "backfillable": bool(pages) and bool(matchable) and bool(keys),
+        "include_partial": bool(include_partial),
+        "fields_detail": detail,
+        # What a top-up can actually close: the empty cells, not the fields. A
+        # field present on 76 of 88 records is 12 cells of work, and a proposal
+        # that said "1 field" would understate it by an order of magnitude.
+        "empty_cells": empty_cells,
+        "never_extracted": [k for k, v in detail.items()
+                            if v["kind"] == "never_extracted"],
+        "partial": {k: v for k, v in detail.items() if v["kind"] == "partial"},
         "reason": (
             "" if (keys and matchable and pages) else
             "this plan declares no dedupe_keys, so a new extraction could not be "
@@ -251,23 +336,32 @@ def propose(store, dataset_id: str, fields: list[str] | None = None,
         "matchable_records": matchable,
         "pages": len(pages),
         "page_urls": [p.get("url", "") for p in pages],
+        "top_hosts": ym.get("ranking", [])[:5],
         # One extraction call per page, and a judge call per field per record
         # that actually matches. Both are shown so the number is not a surprise.
         "estimated_extractions": len(pages),
         "estimated_judge_calls": len(pages) * JUDGE_CALLS_PER_RECORD,
         "reuses_stored_pages": True,
+        "writes_only_empty_cells": True,
     }
 
 
 async def run(store, dataset_id: str, fields: list[str] | None = None, *,
-              llm: Any, limit_pages: int = 8, apply: bool = False) -> dict:
-    """Re-extract the absent fields from stored pages and report what would fill.
+              llm: Any, limit_pages: int = 8, apply: bool = False,
+              include_partial: bool = False) -> dict:
+    """Re-extract the target fields from stored pages and report what would fill.
 
     `apply=False` is a dry run that still does the real extraction and the real
     verification, and stops before writing. It exists so the proposal's numbers
     can be checked against reality rather than trusted — the difference between
     "8 pages, about 48 judge calls" and what actually happens is exactly the
     kind of thing that should not be discovered by a write.
+
+    `include_partial=True` widens the target set to fields that are filled on
+    some records and empty on others. It widens *which cells are considered*, not
+    what may be written: the loop below still refuses any cell that already
+    holds a value, and counts the refusal in `skipped_existing`. A partially
+    filled column is topped up from its empties; no value is ever replaced here.
     """
     plan = plan_for_dataset(store, dataset_id)
     ds = _dataset_row(store, dataset_id)
@@ -275,19 +369,26 @@ async def run(store, dataset_id: str, fields: list[str] | None = None, *,
     records = (store.get_records(dataset_id, "", 1000, 0) or {}).get("records", [])
     matrix = coverage_svc.field_coverage(
         records, ds.get("schema", ds.get("schema_json", [])) or plan.get("fields", []))
-    targets = absent_fields(matrix, fields)
+    targets, detail = topup_fields(matrix, fields, include_partial)
     if not targets:
         # Same keys as the full return below. An early exit that renames
         # `fillable` to `filled` is a shape the caller has to special-case, and
         # the one place it matters is the "nothing to do" case — exactly the
         # case a caller checks first.
+        if include_partial:
+            why = ("no field has an empty cell left, so there is nothing to top up")
+        else:
+            why = ("no field is entirely absent, so there is nothing to backfill; "
+                   "pass include_partial to also top up partially filled fields")
         return {"dataset_id": dataset_id, "applied": bool(apply),
+                "include_partial": bool(include_partial),
+                "fields_detail": {},
                 "pages_read": 0, "records_matched": 0,
                 "fillable": 0, "written": 0, "filled_fields": {},
                 "skipped_existing": 0, "unmatched": 0, "unmatched_examples": [],
                 "judge_calls_used": 0, "reuses_stored_pages": True,
                 "fields": [],
-                "reason": "no field is entirely absent, so there is nothing to backfill"}
+                "reason": why}
 
     keys = [str(k) for k in (plan.get("dedupe_keys") or [])]
     if not keys:
@@ -303,7 +404,9 @@ async def run(store, dataset_id: str, fields: list[str] | None = None, *,
     if not extract_specs:
         raise BackfillRefused("the plan's schema does not describe the requested fields")
 
-    pages = _candidate_pages(store, run_id, max(1, int(limit_pages)), records, keys)
+    pages = _candidate_pages(store, run_id, max(1, int(limit_pages)), records, keys,
+                             yieldmap_svc.build(store, dataset_id, records,
+                                                str(run_id or "")))
     if not pages:
         raise BackfillRefused("this run stored no readable pages to re-read")
 
@@ -414,18 +517,25 @@ async def run(store, dataset_id: str, fields: list[str] | None = None, *,
                 written += 1
 
     per_field: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
     for item in filled:
         per_field[item["field"]] = per_field.get(item["field"], 0) + 1
+        kind = (detail.get(item["field"]) or {}).get("kind", "never_extracted")
+        by_kind[kind] = by_kind.get(kind, 0) + 1
 
     return {
         "dataset_id": dataset_id,
         "applied": bool(apply),
         "fields": targets,
+        "include_partial": bool(include_partial),
+        "fields_detail": detail,
+        "empty_cells": sum(v["missing"] for k, v in detail.items() if k in targets),
         "pages_read": len(pages),
         "records_matched": len(matched_records),
         "fillable": len(filled),
         "written": written,
         "filled_fields": per_field,
+        "filled_by_kind": by_kind,
         "skipped_existing": skipped_existing,
         "unmatched": len(unmatched),
         "unmatched_examples": unmatched[:5],
