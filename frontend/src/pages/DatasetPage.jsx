@@ -840,7 +840,10 @@ const CHART_ROWS = 8;
 
 
 function BarChart({ title, items, unit = '' }) {
-  if (!items?.length) return null;
+  // One bar is not a chart. It is a sentence with axes, and drawing it implies
+  // a distribution where there is only one value — which is what a model
+  // writing `LIMIT 1` produces.
+  if (!items || items.length < 2) return null;
   const max = Math.max(...items.map((i) => i.value)) || 1;
   return (
     <div className="min-w-0">
@@ -951,6 +954,14 @@ function ProposalCard({ datasetId, question, onExecuted }) {
     return <p className="text-xs text-muted">Asked as a question. No changes proposed.</p>;
   }
 
+  // Only a backfill can be approved from here. A plan change goes to
+  // /workflows/refine, which needs the plan's own id — and a dataset carries a
+  // run id, not a plan id. Rendering one shared "Approve and fill" button for
+  // both intents meant that asking for "only two sources instead of five" and
+  // approving it ran a *backfill*: the wrong write, on a data path, from a
+  // button that said something else. It is better to say where the change goes.
+  const canFill = question.intent === 'backfill';
+
   return (
     <div className="space-y-2 rounded-lg border border-rule-2/60 p-2.5">
       <div className="flex items-baseline justify-between gap-2">
@@ -973,6 +984,11 @@ function ProposalCard({ datasetId, question, onExecuted }) {
       ) : null}
       {question.reason ? (
         <Notice tone="warn">{question.reason}</Notice>
+      ) : !canFill ? (
+        <Notice tone="info">
+          A plan change is made where the plan is — start a run from this goal
+          and adjust it there. Nothing here will touch the records.
+        </Notice>
       ) : question.backfillable === false ? (
         <Notice tone="warn">This cannot be done safely on this dataset.</Notice>
       ) : (
@@ -1044,6 +1060,7 @@ function AskPanel({ datasetId }) {
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           placeholder="e.g. how many companies are in each industry?"
+          aria-label="Question for this dataset"
           className="min-w-0 flex-1 rounded border border-rule-2 bg-transparent px-2 py-1.5 text-sm"
         />
         <button

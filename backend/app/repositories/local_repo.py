@@ -114,6 +114,13 @@ class LocalRepo:
         rows = [p for p in self._scan("pages") if p.get("run_id") == run_id]
         return rows[-max(1, min(int(limit), 500)):]
 
+    def get_pages_by_ids(self, page_ids: list[str]) -> list[dict]:
+        """Full page rows for specific ids, in one pass. See PostgresRepo."""
+        wanted = {str(p) for p in (page_ids or []) if p}
+        if not wanted:
+            return []
+        return [p for p in self._scan("pages") if str(p.get("id")) in wanted]
+
     def get_page(self, page_id: str) -> dict | None:
         rows = [p for p in self._scan("pages") if p.get("id") == page_id]
         return rows[-1] if rows else None

@@ -67,11 +67,13 @@ def main() -> int:
             fails.append("no Coverage tab")
         else:
             coverage_tab.click()
-            # These views read every stored record, so they take seconds against
-            # a remote database. A short fixed wait reported them as blank.
+            # Wait for the content, not for the loading text to disappear.
+            # "No longer loading" is also true before the panel has mounted, so
+            # that wait returned immediately and then asserted against a blank
+            # tab. These views read every stored record, so allow real time too.
             page.wait_for_function(
-                "() => !document.body.innerText.includes('Reading stored records')",
-                timeout=30_000,
+                "() => /Per-field coverage/.test(document.body.innerText)",
+                timeout=90_000,
             )
             page.wait_for_timeout(500)
             body = page.inner_text("body")

@@ -9,6 +9,24 @@ OUT = os.environ.get(
 )
 os.makedirs(OUT, exist_ok=True)
 
+
+def _discover_dataset() -> str:
+    """The newest dataset, found at run time.
+
+    This was a hardcoded id. It worked until that dataset was deleted,
+    and then the suite failed for a reason that had nothing to do with the
+    code under test. A test that breaks when unrelated data changes is not
+    testing anything.
+    """
+    import json as _json
+    import urllib.request as _u
+    api = os.environ.get("DG_API_URL", "http://127.0.0.1:8000")
+    with _u.urlopen(f"{api}/api/datasets", timeout=60) as r:
+        items = _json.loads(r.read().decode("utf-8"))["data"] or []
+    if not items:
+        raise SystemExit("no datasets exist; run a collection first")
+    return items[0]["id"]
+
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -19,7 +37,7 @@ from playwright.async_api import async_playwright
 # app hanging. Stub it so the suite needs no network.
 OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
 
-DS = "4d347326-7675-4179-858c-f22d04255e9a"
+DS = _discover_dataset()
 
 async def main():
     fails = []

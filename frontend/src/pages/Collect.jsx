@@ -159,6 +159,12 @@ function AskPanel({
                   className="input-sm input font-mono text-[12px]"
                 />
               </Field>
+              <Toggle
+                checked={forceRefresh}
+                onChange={setForceRefresh}
+                label="Force re-fetch"
+                hint="By default a URL this machine has already fetched is reused from stored evidence instead of being requested again — cheaper, and reported as reused with the date it was actually retrieved. Turn this on when the page has changed and you need the current version."
+              />
             </div>
           ) : null}
         </div>
@@ -254,12 +260,6 @@ function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBu
                         {f.description}
                       </span>
               ) : null}
-              <Toggle
-                checked={forceRefresh}
-                onChange={setForceRefresh}
-                label="Force re-fetch"
-                hint="By default a URL this machine has already fetched is reused from stored evidence instead of being requested again — cheaper, and reported as reused with the date it was actually retrieved. Turn this on when the page has changed and you need the current version."
-              />
                   </span>
                 </li>
               ))}

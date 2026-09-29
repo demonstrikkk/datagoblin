@@ -580,6 +580,36 @@ class PostgresRepo:
                  FROM pages WHERE run_id=%s ORDER BY retrieved_at DESC LIMIT %s""",
             (run_id, max(1, min(int(limit), 500))))
 
+    def get_pages_by_ids(self, page_ids: list[str]) -> list[dict]:
+        """Page rows for specific ids, in one round trip, WITHOUT raw_html.
+
+        Backfill picked its candidate pages one `get_page` at a time, which over
+        a remote database is one round trip each: six candidates cost 45
+        seconds, and the Coverage tab fires that on every load. One query
+        returns them.
+
+        `raw_html` is deliberately excluded. Measured on this instance, one
+        page with its raw_html took 2.7s and the same page without it took
+        0.13s — the HTML is the whole cost and backfill does not need it. The
+        `markdown` column *is* the stored evidence text (the crawler writes
+        `page_evidence_text(page)` into it), so handing that to the extractor
+        reproduces the same string the offsets were computed against. Losing the
+        DOM costs the CSS-selector fast path, which a backfill plan never
+        matched anyway.
+        """
+        ids = [str(p) for p in (page_ids or []) if p]
+        if not ids:
+            return []
+        rows = self._rows(
+            "get_pages_by_ids",
+            "SELECT id,run_id,url,final_url,parent_url,depth,method,status,error,"
+            "content_hash,markdown,snapshot_chars,retrieved_at"
+            " FROM pages WHERE id = ANY(%s::uuid[]) ORDER BY retrieved_at DESC",
+            (ids,))
+        order = {p: i for i, p in enumerate(ids)}
+        rows.sort(key=lambda r: order.get(str(r.get("id")), 1 << 30))
+        return rows
+
     def get_page(self, page_id: str) -> dict | None:
         rows = self._rows("get_page", "SELECT * FROM pages WHERE id=%s", (page_id,))
         return rows[0] if rows else None

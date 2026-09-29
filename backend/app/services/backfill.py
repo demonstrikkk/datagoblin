@@ -140,21 +140,32 @@ def _candidate_pages(store, run_id: str, limit: int,
     in full by id.
     """
     listing = store.get_pages(run_id, limit=MAX_CANDIDATE_PAGES) or []
+    listing = [r for r in listing if r.get("markdown") or r.get("raw_html")]
+
+    needles = _identity_needles(records or [], keys or [])
+    if needles and listing:
+        for row in listing:
+            body = f"{row.get('markdown', '')} {row.get('raw_html', '')}".lower()
+            row["_match_hits"] = sum(1 for n in needles if n in body)
+        listing.sort(key=lambda r: -r["_match_hits"])
+        chosen = listing[:limit] or listing[:1]
+    else:
+        chosen = listing[:limit]
+
+    # The listing omits raw_html (it is a transport-shaped endpoint), and
+    # extraction needs the DOM. Fetch the chosen rows in one query rather than
+    # one round trip each.
+    fetcher = getattr(store, "get_pages_by_ids", None)
+    if callable(fetcher):
+        rows = fetcher([r["id"] for r in chosen])
+        if rows:
+            return rows
+
     pages = []
-    for row in listing:
+    for row in chosen:
         full = store.get_page(row["id"])
         if full and (full.get("markdown") or full.get("raw_html")):
             pages.append(full)
-
-    needles = _identity_needles(records or [], keys or [])
-    if needles and pages:
-        for page in pages:
-            body = f"{page.get('markdown', '')} {page.get('raw_html', '')}".lower()
-            page["_match_hits"] = sum(1 for n in needles if n in body)
-        pages.sort(key=lambda p: -p["_match_hits"])
-        pages = pages[:limit] or pages[:1]
-    else:
-        pages = pages[:limit]
     return pages
 
 
@@ -316,12 +327,21 @@ async def run(store, dataset_id: str, fields: list[str] | None = None, *,
 
     async def _one_page(page: dict) -> list[dict]:
         async with sem:
-            # The same reduction the run used. Rebuilding the evidence text any
-            # other way would produce offsets that do not address the stored
-            # markdown, and every quote in a backfilled cell would become
-            # unresolvable — a silent break of the one guarantee this product
-            # makes.
-            working = {**page, "markdown": page.get("markdown", "")}
+            # The stored `markdown` column is already the evidence text: the
+            # crawler writes `page_evidence_text(page)` into it, and that is
+            # the function the extractor calls. Handing it back as `markdown`
+            # with no DOM reproduces the same string, so every offset a new
+            # quote carries addresses the text that is actually stored. Fetching
+            # the raw HTML to recompute it cost ~3s a page over the wire and
+            # could only ever produce the same answer.
+            working = {**page, "html": "", "markdown": page.get("markdown", "")}
+            if not working["markdown"]:
+                # Nothing was stored to quote from. Fall back to the DOM rather
+                # than extracting from an empty page and reporting nothing.
+                full = store.get_page(page.get("id", ""))
+                if not full:
+                    return []
+                working = {**full, "html": full.get("raw_html", "") or full.get("html", "")}
             try:
                 source_text = await asyncio.to_thread(page_evidence_text, working)
             except Exception:  # noqa: BLE001
