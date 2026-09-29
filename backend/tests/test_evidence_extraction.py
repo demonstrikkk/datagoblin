@@ -89,8 +89,44 @@ def test_coerce_backfills_null_fields_from_evidence():
     ], "coverage": "partial"}}
     recs, _ = extractor_svc.coerce_output(out, "u")
     assert recs[0]["fields"]["company_name"] == "Acme AI"  # adopted from evidence
-    assert recs[0]["fields"]["founder"] == "NA"  # blank evidence value: stays
+    # Changed from `== "NA"`. The blank evidence value means there is nothing to
+    # adopt, and the old expectation kept the literal "NA" in the record — which
+    # is the behaviour that filled a real dataset with "NA" and "—" cells that
+    # reached the UI as stray symbols. Absence is now expressed by the field not
+    # being there, and the validator is still the gate: a value it cannot
+    # support was never a value the coercer should have preserved.
+    assert "founder" not in recs[0]["fields"]
     assert recs[0]["fields"]["location"] == "Nowhere"  # real value untouched
+
+
+def test_coerce_drops_punctuation_rather_than_storing_it_as_a_value():
+    """The reported defect: a 15-field schema stored mostly as em dashes and
+    curly quotes, every cell present, unverified, and shown as `â€”` / `â€"`."""
+    out = {"data": {"records": [
+        {"fields": {"company_name": "Acme", "country": "—",
+                    "industry": "”", "founded_year": "2024"},
+         "evidence": [
+             {"field": "company_name", "value": "Acme", "quote": "Acme",
+              "source_url": "u"},
+             {"field": "founded_year", "value": "2024", "quote": "2024",
+              "source_url": "u"}]},
+    ], "coverage": "partial"}}
+    recs, _ = extractor_svc.coerce_output(out, "u")
+    assert recs[0]["fields"] == {"company_name": "Acme", "founded_year": "2024"}
+
+
+def test_coerce_keeps_evidence_for_a_field_it_dropped_nothing_for():
+    """Evidence may carry no value of its own; the coercer has never been the
+    gate for that, the validator is. Dropping it here silently downgraded
+    records from verified to unverified."""
+    out = {"data": {"records": [
+        {"fields": {"company_name": "Acme"},
+         "evidence": [{"field": "company_name", "quote": "Acme",
+                       "source_url": "u"}]},
+    ], "coverage": "full"}}
+    recs, _ = extractor_svc.coerce_output(out, "u")
+    assert len(recs[0]["evidence"]) == 1
+    assert recs[0]["evidence"][0]["quote"] == "Acme"
 
 
 # -- tolerant JSON -------------------------------------------------------------

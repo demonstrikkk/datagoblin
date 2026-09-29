@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.logging import log
 from app.schemas.evidence import (ExtractedRecord, coverage_tripwire,
                                   parse_llm_json, simplify_schema)
+from app.services.normalizer import clean_value, is_placeholder
 
 _CHUNK_CHARS = 6000
 _CHUNK_OVERLAP = 600
@@ -41,6 +42,14 @@ def build_prompt(plan: dict, url: str, title: str, clean: str, part: str = "") -
         f"Do not start the response with ```json. "
         f"Rules: extract ONLY values present in the content; "
         f"if you cannot find a value put \"NA\"; "
+        # The models obey "NA" most of the time. When they do not, the usual
+        # substitutes are punctuation, and punctuation is what actually turned up
+        # in a stored dataset: cells containing an em dash and a curly quote,
+        # rendered as `â€”` and `â€"`. Naming the specific offenders stops them
+        # at the source; `is_placeholder` still drops whatever slips through,
+        # because a prompt is a request and only code is a guarantee.
+        f"never use a dash, em dash, question mark, quote mark, \"N/A\", "
+        f"\"unknown\" or \"not available\" as a value — those are not answers; "
         f"every non-NA field MUST have an evidence item whose quote is copied "
         f"word-for-word from the content; "
         f"every evidence item MUST repeat the same value in its \"value\" key; "
@@ -109,7 +118,7 @@ def coerce_output(out: object, url: str) -> tuple[list[dict], str]:
         for e in r.evidence:
             if not e.field or not e.quote:
                 continue
-            evidence.append({"field": e.field[:100], "value": e.value,
+            evidence.append({"field": e.field[:100], "value": clean_value(e.value),
                              "quote": e.quote[:2000],
                              "source_url": e.source_url or url,
                              "reference_id": e.reference_id[:20]})
@@ -120,12 +129,30 @@ def coerce_output(out: object, url: str) -> tuple[list[dict], str]:
         for e in evidence:
             by_field.setdefault(e["field"], e)
         for k, v in list(fields.items()):
-            if v is None or (isinstance(v, str)
-                             and v.strip().lower() in ("", "na", "n/a", "null", "none")):
+            if is_placeholder(v):
                 cand = by_field.get(k, {}).get("value")
-                if cand is not None and str(cand).strip() \
-                        and str(cand).strip().lower() not in ("na", "n/a", "null", "none"):
+                if cand is not None and not is_placeholder(cand):
                     fields[k] = cand
+        # Anything still a placeholder is dropped outright, rather than stored.
+        # The extraction prompt says to write "NA" for an absent value and the
+        # models usually do, but when they do not the usual substitutes are
+        # punctuation — an em dash, a curly quote. One live run filled a
+        # 15-field schema with them, and every one became a cell that was present,
+        # unverified, and displayed as a stray symbol: a dataset that looked
+        # corrupt instead of empty. Absence is the truthful reading and the
+        # coverage view already knows how to show it.
+        fields = {k: clean_value(v) for k, v in fields.items()
+                  if not is_placeholder(v)}
+        # Evidence is kept for the fields that survived, and only then. An
+        # evidence row may legitimately carry no value of its own — the models
+        # are asked to repeat it but do not always, and this layer has never been
+        # the gate for that, the validator is. Dropping evidence on the strength
+        # of a missing value instead threw away perfectly good quotes and
+        # silently downgraded records from verified to unverified; narrowing to
+        # "the field is gone" keeps that contract and still leaves no evidence
+        # pointing at a value that was never stored.
+        if fields:
+            evidence = [e for e in evidence if e["field"] in fields]
         if not fields:
             continue
         clean.append({"fields": {str(k)[:100]: v for k, v in fields.items()},

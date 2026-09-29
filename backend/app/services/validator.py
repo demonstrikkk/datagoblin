@@ -13,6 +13,7 @@ import re
 
 from app.providers.decision import jev
 from app.schemas.evidence import locate_quote
+from app.services.normalizer import is_placeholder
 
 _WS = re.compile(r"\s+")
 #: Currency symbols and magnitude suffixes a scraped number realistically carries.
@@ -134,7 +135,13 @@ async def verify_field(value: object, quote: str, source_text: str,
       judgment_unavailable the quote IS in the page, but nothing judged it
       verified             judged, or deduced from the quote itself
     """
-    if value is None or (isinstance(value, str) and not value.strip()):
+    if is_placeholder(value):
+        # `—`, `”`, `N/A` and friends mean "not here". Storing one produces a
+        # cell that is present, unverified, and shows a punctuation mark where a
+        # reader expects either a value or a dash — it reads as corruption
+        # rather than as absence. Absence is already expressible, so it is what
+        # gets stored. Unverified-but-real values are untouched: this is not a
+        # shortcut for dropping values the judge was not reached for.
         return None, "unverified"
     if not type_ok(value, ftype):
         return None, "unverified"
