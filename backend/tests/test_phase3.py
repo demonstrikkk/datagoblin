@@ -419,7 +419,17 @@ def test_markdown_report_renders_evidence():
     assert "## Record 2" in md and "Beta" in md
     fmt, content, name = exporter_svc.export_dataset(schema, _report_rows(), "md",
                                                      meta=meta)
-    assert (fmt, name) == ("md", "report.md") and content == md
+    assert (fmt, name) == ("md", "report.md")
+    # Compared with the generation stamp removed, not byte for byte.
+    # `to_markdown_report` writes `datetime.utcnow()` into the output, so two
+    # calls made microseconds apart differ in exactly one line — and asserting
+    # otherwise is a coin flip, not a check. It passed for weeks and then failed
+    # at random, which is the worst property a test can have: it looks like
+    # coverage of the export path while actually only testing the clock.
+    def _without_stamp(doc: str) -> str:
+        return "\n".join(l for l in doc.splitlines() if not l.startswith("Generated (UTC):"))
+
+    assert _without_stamp(content) == _without_stamp(md)
 
 
 def test_markdown_report_empty_is_honest():

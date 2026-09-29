@@ -428,3 +428,36 @@ export function verifySummary(...runs) {
     records: Number(c.records) || 0,
   };
 }
+
+// -- Ask result charts -------------------------------------------------------
+// These two decide what a chart shows, so they are here with the other
+// formatting helpers rather than inside a component: a wrong decision draws a
+// confident, meaningless picture, and that should be checkable without a
+// browser.
+
+/** Fraction of a column's non-empty values that parse as numbers. */
+export function numericShare(rows, col) {
+  const seen = (rows || [])
+    .map((r) => r?.[col])
+    .filter((v) => v !== null && v !== undefined && v !== '');
+  if (!seen.length) return 0;
+  const ok = seen.filter((v) =>
+    Number.isFinite(Number(String(v).replace(/[,$%\s]/g, '')))).length;
+  return ok / seen.length;
+}
+
+/** The most frequent distinct values of a column, biggest first.
+
+ * Empty below two distinct values: one category is not a distribution, and a
+ * bar chart of a single full-width bar says nothing a sentence would not. */
+export function topCategories(rows, col, limit = 8) {
+  const counts = new Map();
+  for (const r of rows || []) {
+    const v = r?.[col];
+    if (v === null || v === undefined || v === '') continue;
+    const key = String(v);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  if (counts.size < 2) return [];
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+}

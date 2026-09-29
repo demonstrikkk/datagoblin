@@ -19,7 +19,17 @@ import {
   Stat,
   Toggle,
 } from '../components/ui.jsx';
-import { REC_VERIFY, bytes, host, num, toneClass, truncate, when } from '../lib/format.js';
+import {
+  REC_VERIFY,
+  bytes,
+  host,
+  num,
+  numericShare,
+  toneClass,
+  topCategories,
+  truncate,
+  when,
+} from '../lib/format.js';
 
 const PAGE = 50;
 
@@ -820,6 +830,103 @@ function ConflictsPanel({ datasetId }) {
   );
 }
 
+// Charts for an Ask result. The decision of what to draw is made from the
+// data, not asked for: a column that parses as numbers gets magnitudes, a
+// column with a handful of distinct values gets counts, and a `*__status`
+// column gets a proportion bar. Anything else is left to the table, because a
+// chart of 400 distinct strings is a picture of nothing.
+
+const CHART_ROWS = 8;
+
+
+function BarChart({ title, items, unit = '' }) {
+  if (!items?.length) return null;
+  const max = Math.max(...items.map((i) => i.value)) || 1;
+  return (
+    <div className="min-w-0">
+      <div className="mb-1.5 text-xs font-medium text-ink">{title}</div>
+      <ul className="space-y-1">
+        {items.map((i) => (
+          <li key={i.label} className="grid grid-cols-[minmax(0,7rem)_1fr_auto] items-center gap-2">
+            <span className="truncate text-[11px] text-muted" title={i.label}>
+              {i.label}
+            </span>
+            <span className="h-2.5 w-full overflow-hidden rounded-full bg-warm">
+              <span
+                className="block h-full rounded-full"
+                style={{
+                  width: `${Math.max(1.5, (i.value / max) * 100)}%`,
+                  background: i.tone ? `var(--${i.tone})` : 'var(--accent)',
+                }}
+              />
+            </span>
+            <span className="tnum shrink-0 text-[11px] text-ink-2">
+              {i.display ?? i.value}
+              {unit}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ResultCharts({ columns, rows }) {
+  if (!rows?.length || !columns?.length) return null;
+
+  const numericCols = columns.filter((c) => numericShare(rows, c) >= 0.6).slice(0, 2);
+  const catCols = columns.filter(
+    (c) => !c.endsWith('__status') && !numericCols.includes(c) && topCategories(rows, c).length >= 2
+  );
+  const statusCols = columns.filter((c) => c.endsWith('__status')).slice(0, 1);
+
+  const toneFor = (status) => (status === 'verified' ? 'ok'
+    : status === 'conflicting' ? 'danger'
+      : status === 'judgment_unavailable' ? 'judge' : 'warn');
+
+  const charts = [];
+
+  for (const col of numericCols) {
+    const items = rows
+      .map((r) => ({ label: String(r[col] ?? ''), value: Number(String(r[col]).replace(/[,$\s]/g, '')) }))
+      .filter((i) => i.label && Number.isFinite(i.value))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, CHART_ROWS)
+      .map((i) => ({ ...i, display: num(i.value) }));
+    charts.push(<BarChart key={`n:${col}`} title={`${col} — top values`} items={items} />);
+  }
+
+  for (const col of catCols.slice(0, 2 - charts.length)) {
+    const items = topCategories(rows, col).map(([label, value]) => ({ label, value }));
+    charts.push(<BarChart key={`c:${col}`} title={`${col} — by count`} items={items} />);
+  }
+
+  for (const col of statusCols) {
+    const items = topCategories(rows, col, 6).map(([label, value]) => ({
+      label: String(label || 'no verdict'),
+      value,
+      tone: toneFor(label),
+    }));
+    charts.push(
+      <BarChart
+        key={`s:${col}`}
+        title={`${col.replace(/__status$/, '')} — how its values earned their keep`}
+        items={items}
+      />
+    );
+  }
+
+  if (!charts.length) return null;
+  return (
+    <div className="space-y-2 rounded-lg border border-rule-2/60 p-2.5">
+      <div className="text-xs uppercase tracking-wide text-muted">
+        Charts — drawn from these {rows.length} row{rows.length === 1 ? '' : 's'}
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">{charts}</div>
+    </div>
+  );
+}
+
 function AskPanel({ datasetId }) {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
@@ -880,6 +987,7 @@ function AskPanel({ datasetId }) {
             {answer.row_count} row{answer.row_count === 1 ? '' : 's'}
             {answer.truncated ? ' (capped)' : ''}
           </div>
+          <ResultCharts columns={answer.columns} rows={answer.rows} />
           {answer.rows?.length ? (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
