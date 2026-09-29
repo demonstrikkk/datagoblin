@@ -162,8 +162,14 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     async def _emit2(ev: dict) -> None:
         await _emit_stamped(emit, run_id)(ev)
 
+    # Reuse is injected, not imported: the crawler keeps no repository, and a
+    # run without this hook (unit tests, /api/map) simply always fetches.
+    async def _reuse(url: str) -> dict | None:
+        fn = ctx.get("reuse")
+        return (await fn(url)) if fn is not None else None
+
     pages, counts = await crawler_svc.fetch_all(sources, fetch_fn, _emit2, _persist_source,
-                                                plan, _persist_page)
+                                                plan, _persist_page, _reuse)
     await _bill("fetch_page", counts["attempted"])
     # Published as soon as they exist, so a later timeout can still keep them.
     progress["pages"], progress["counts"] = pages, counts

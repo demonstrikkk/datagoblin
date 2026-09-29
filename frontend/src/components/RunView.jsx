@@ -206,8 +206,18 @@ export default function RunView({ runId, title, enriched }) {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat
           label="Sources fetched"
-          value={<Counter value={c.successful ?? stream.counts.sourcesFetched} />}
+          value={<Counter value={c.fetched ?? (c.reused ? (c.successful ?? 0) - c.reused : c.successful) ?? stream.counts.sourcesFetched} />}
           sub={`${num(c.attempted ?? stream.counts.sourcesDiscovered)} attempted`}
+        />
+        <Stat
+          label="Reused, not re-fetched"
+          value={<Counter value={c.reused ?? stream.counts.sourcesReused ?? 0} />}
+          tone={c.reused ? 'info' : 'muted'}
+          sub={
+            c.reused
+              ? 'stored evidence, not requested again'
+              : 'nothing was reused'
+          }
         />
         <Stat
           label="Records"
@@ -292,6 +302,8 @@ export default function RunView({ runId, title, enriched }) {
                           ? 'warn'
                           : e.type === 'source.fetched'
                           ? 'ok'
+                          : e.type === 'source.reused'
+                          ? 'info'
                           : 'muted'
                       }
                     />

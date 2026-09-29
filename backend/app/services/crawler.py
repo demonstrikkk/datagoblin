@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.core.constants import RunStage
 from app.core.errors import AppError
 from app.providers.crawl import fetcher
 from app.services import impersonation as impersonation_svc
@@ -257,19 +258,33 @@ def _child_links(page: dict) -> list[str]:
 
 async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: Any,
                     plan: dict | None = None,
-                    persist_page: Any = None) -> tuple[list[dict], dict]:
+                    persist_page: Any = None,
+                    reuse: Any = None) -> tuple[list[dict], dict]:
     """Seeds (depth 0) then breadth-first same-host traversal within caps.
 
-    Returns (pages, {attempted, successful, failed, skipped}). Every settled URL is
-    persisted exactly once (progressive; idempotent on retry via run_id+url).
+    Returns (pages, {attempted, successful, failed, skipped, reused}). Every
+    settled URL is persisted exactly once (progressive; idempotent on retry via
+    run_id+url).
 
     `persist_page` stores the page body and returns its id. That id is what makes
     the rest of the pipeline checkable: previously a page was fetched, reduced in
     RAM, extracted from and thrown away, so every evidence quote and offset pointed
     at text that no longer existed. When it is not supplied (unit tests, the /api/map
     probe) the run still works, it just carries no re-verifiable evidence.
+
+    `reuse` is a coroutine `(url) -> stored page dict | None`, injected rather
+    than imported so this stays testable with a fake fetch and so the repository
+    stays out of the crawler. When it returns a page, the URL is not fetched
+    again: the stored evidence is used, the source row records where it came from
+    and when it was actually retrieved, and a `source.reused` event is emitted.
+
+    Reuse is a cost decision with a correctness cost attached — a URL
+    fingerprint cannot tell that the page changed upstream — so it is
+    `source.reused` rather than a silent `source.fetched`, carries the original
+    `retrieved_at`, and can be switched off with `plan["reuse_stored_pages"]`.
     """
     plan = plan or {}
+    reuse_enabled = bool(plan.get("reuse_stored_pages", True)) and reuse is not None
     traversal = plan.get("traversal", {}) or {}
     per_domain_cap = max(1, min(int(traversal.get("max_pages_per_domain", 3)),
                                 settings.RUN_MAX_DOMAIN_PAGES))
@@ -279,6 +294,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     sem = asyncio.Semaphore(4)
     pages: list[dict] = []
     ok = fail = skipped = 0
+    reused = 0
     seen: set[str] = set()
     domain_count: dict[str, int] = {}
     # Seeds are canonicalised on entry so a seeded fragment variant cannot
@@ -289,7 +305,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     ]
 
     async def _settle(item: dict, depth: int) -> None:
-        nonlocal ok, fail, skipped
+        nonlocal ok, fail, skipped, reused
         # Canonical before anything keys off the URL: the seen set, the
         # per-domain cap, the stored row and the crawl all agree on one
         # identity per resource.
@@ -311,6 +327,70 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         if dom:
             domain_count[dom] = domain_count.get(dom, 0) + 1
         route = item.get("route") or triage_source(url)
+
+        # Reuse before the fetch, not after: the point is to not spend the
+        # request. Asked after `_one` returns, the money is already gone and the
+        # check would only be a label on work that was paid for twice.
+        if reuse_enabled:
+            try:
+                stored = await reuse(url)
+            except Exception:  # noqa: BLE001
+                # A reuse lookup that fails must fall through to a real fetch.
+                # Silently "reusing" nothing would drop the URL and shrink the
+                # dataset for a reason that is not the data's fault.
+                stored = None
+            if stored and stored.get("markdown"):
+                reused += 1
+                ok += 1
+                # A page shaped like one `_one` returns, so extraction and
+                # validation cannot tell it was reused. `page_id` points at the
+                # stored row, so every quote still resolves against real text.
+                page = {
+                    "url": stored.get("url") or url,
+                    "final_url": stored.get("final_url", ""),
+                    "title": stored.get("title") or item.get("title", ""),
+                    "html": stored.get("raw_html", "") or "",
+                    "markdown": stored.get("markdown", ""),
+                    "content_hash": stored.get("content_hash", ""),
+                    "method": stored.get("method", "") or "reused",
+                    "page_id": str(stored.get("id", "")),
+                    "depth": depth,
+                    "parent_url": item.get("parent_url", "") or "",
+                    "reused_from_run_id": str(stored.get("run_id", "")),
+                    "retrieved_at": stored.get("retrieved_at"),
+                }
+                pages.append(page)
+                await persist_source({
+                    "url": url, "title": page["title"], "status": "reused",
+                    "method": page["method"], "error": "",
+                    "content_hash": page["content_hash"],
+                    "snapshot_chars": len(page["markdown"]),
+                    "media": _media_counts(page, url),
+                    "reused_from_run_id": page["reused_from_run_id"],
+                    "reused_page_id": page["page_id"],
+                    "retrieved_at": page["retrieved_at"],
+                    "fingerprint": politeness_svc.fingerprint("GET", url)})
+                if emit is not None:
+                    await emit({"type": "source.reused", "run_id": "",
+                                "message": f"reused stored page from an earlier run: {url[:90]}",
+                                "stage": RunStage.FETCHING,
+                                "data": {"url": url,
+                                         "page_id": page["page_id"],
+                                         "reused_from_run_id": page["reused_from_run_id"],
+                                         "retrieved_at": page["retrieved_at"]}})
+                # Traversal still proceeds: the stored page carries its links,
+                # and a reused page that stopped discovery would quietly shrink
+                # every subsequent run.
+                if depth < max_depth:
+                    for link in _child_links(page):
+                        link = canonical_url(link)
+                        if link and link not in seen and traversal_allowed(link, plan):
+                            queue.append(({"url": link, "title": "",
+                                           "parent_url": url}, depth + 1))
+                        if len(queue) >= budget + 100:
+                            break
+                return
+
         try:
             page = await _one(url, route, fetch_fn or _default_fetch, sem)
         except Exception as e:  # noqa: BLE001 (skip-and-continue by design)
@@ -437,8 +517,13 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
 
     await asyncio.gather(*(_worker() for _ in range(_WORKERS)))
 
+    # `fetched` is reported next to `reused` because the pair is the whole
+    # point of reuse. `successful` alone could not show it: a reused page
+    # counts as a success, so a run that fetched nothing and reused
+    # everything looked identical to one that did the work.
     counts = {"attempted": ok + fail + skipped, "successful": ok,
-              "failed": fail, "skipped": skipped}
+              "failed": fail, "skipped": skipped, "reused": reused,
+              "fetched": max(0, ok - reused)}
     return pages, counts
 
 

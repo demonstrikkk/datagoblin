@@ -72,6 +72,18 @@ class LocalRepo:
             row["completed_at"] = (datetime.datetime.utcnow().isoformat() + "Z")
         self._append("runs", row)
 
+    def find_page_by_url(self, url: str, include_html: bool = True) -> dict | None:
+        """The stored page for `url` from any run, newest first. See PostgresRepo."""
+        found = None
+        for p in self._scan("pages"):
+            if p.get("url") != url or p.get("status", "ok") != "ok":
+                continue
+            if found is None or str(p.get("retrieved_at") or "") >= str(found.get("retrieved_at") or ""):
+                found = p
+        if found and not include_html:
+            found = {k: v for k, v in found.items() if k != "raw_html"}
+        return found
+
     def upsert_source(self, run_id: str, source: dict) -> None:
         self._append("sources", {"run_id": run_id, **source})
 

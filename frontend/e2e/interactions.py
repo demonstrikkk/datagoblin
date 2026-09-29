@@ -154,7 +154,7 @@ async def main() -> int:
         # Click every record-status filter. The tab list shrinks when the
         # Records panel unmounts, so re-count and stop at the first gap.
         while True:
-            filters = p.locator('[role=tab]')
+            filters = p.locator('[role=tablist][aria-label="Record status filter"] [role=tab]')
             n = await filters.count()
             target = None
             for i in range(n):

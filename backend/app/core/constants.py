@@ -39,7 +39,7 @@ LEGAL_TRANSITIONS = {
 #: removed rather than left as a contract nothing honours.
 EVENT_TYPES = ["run.partial",
     "stage.started", "stage.progress",
-    "source.discovered", "source.fetched",
+    "source.discovered", "source.fetched", "source.reused",
     "record.extracted", "record.verified", "record.needs_review", "record.rejected",
     "duplicate.merged",
     "run.completed", "run.failed", "run.cancelled"]

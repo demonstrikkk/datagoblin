@@ -249,6 +249,12 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
             plan["credit_budget"] = max(0, int(body["credit_budget"]))
         except (TypeError, ValueError):
             raise validation("credit_budget must be an integer >= 0")
+    # Reuse is on by default, which means a URL already fetched is not fetched
+    # again. This is the escape hatch for "I know it changed, go look": without
+    # it, once a URL has been seen it could never be refreshed and a changed
+    # page would stay stale with no way out short of a new database.
+    if "reuse_stored_pages" in body:
+        plan["reuse_stored_pages"] = bool(body["reuse_stored_pages"])
     try:
         planner_svc.coerce_plan(plan)
     except Exception as e:
@@ -324,12 +330,34 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         """
         return await asyncio.to_thread(r.upsert_page, run_id, page)
 
+    async def _reuse(url: str) -> dict | None:
+        """Stored evidence for a URL this instance has already fetched, or None.
+
+        The fingerprint write side has been live all along (`_persist_source`
+        notes every settled URL; the table holds 101 rows across 14 runs). What
+        was missing was the read, so every re-run re-fetched URLs it already
+        had in hand and paid for them again.
+
+        Two gates, both required. The fingerprint says we have seen this exact
+        request before; the stored page is what we would have to reuse. If the
+        fingerprint is known but no page survived — runs are deleted by cascade,
+        so a page can outlive neither its run nor its fingerprint — the answer
+        is None and the URL is fetched for real. Treating "seen" as "reusable"
+        would drop the page and quietly shrink the dataset.
+        """
+        fp = politeness_svc.fingerprint("GET", url)
+        if not fp:
+            return None
+        if not await asyncio.to_thread(r.seen_fingerprint, fp):
+            return None
+        return await asyncio.to_thread(r.find_page_by_url, url, True)
+
     def _record_charge(entry: dict) -> None:
         r.record_charge(run_id, entry)
 
     ctx = {"search": search_provider.search, "fetch": _fetch, "llm": _llm,
            "store": _store, "persist_source": _persist_source,
-           "persist_page": _persist_page,
+           "persist_page": _persist_page, "reuse": _reuse,
            "record_charge": _record_charge,
            "cancelled": lambda: RUNS.get(run_id, {}).get("status") == "CANCELLED"}
     TASKS[run_id] = asyncio.create_task(runner_svc.execute_run(run_id, plan, ctx, _emit))

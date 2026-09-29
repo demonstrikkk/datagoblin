@@ -40,6 +40,10 @@ const initial = {
     stages: 0,
     sourcesDiscovered: 0,
     sourcesFetched: 0,
+    // Kept apart from sourcesFetched: a reused source is a source the run did
+    // not request. Counting it as fetched would make a run that re-fetched
+    // nothing look identical to one that did the work.
+    sourcesReused: 0,
     extracted: 0,
     verified: 0,
     needsReview: 0,
@@ -58,6 +62,9 @@ function tally(counts, e) {
       break;
     case 'source.fetched':
       counts.sourcesFetched += 1;
+      break;
+    case 'source.reused':
+      counts.sourcesReused += 1;
       break;
     case 'record.extracted':
       counts.extracted += 1;

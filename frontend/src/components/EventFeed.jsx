@@ -45,6 +45,12 @@ function describe(e) {
       return e.url || e.domain || e.title || 'candidate source';
     case 'source.fetched':
       return `${e.url || e.domain || 'source'}${e.char_count ? ` · ${e.char_count} chars` : ''}`;
+    case 'source.reused':
+      // A distinct kind rather than folded into `source.fetched`, so the feed
+      // shows that nothing was requested for this URL.
+      return `${e.url || 'source'} — reused, not re-fetched${
+        e.retrieved_at ? ` (${e.retrieved_at})` : ''
+      }`;
     case 'record.extracted':
       return e.qualifier || e.value || e.title || 'record extracted';
     case 'record.verified':

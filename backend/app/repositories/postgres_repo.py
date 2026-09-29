@@ -241,14 +241,40 @@ class PostgresRepo:
 
     def upsert_source(self, run_id: str, source: dict) -> None:
         self._run("upsert_source", lambda cur: cur.execute(
-            """INSERT INTO sources (run_id,url,title,content_hash,status,error)
-               VALUES (%s,%s,%s,%s,%s,%s)
+            """INSERT INTO sources (run_id,url,title,content_hash,status,error,
+                                   reused_from_run_id,reused_page_id,retrieved_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id,url) DO UPDATE SET title=EXCLUDED.title,
                  content_hash=EXCLUDED.content_hash, status=EXCLUDED.status,
-                 error=EXCLUDED.error""",
+                 error=EXCLUDED.error,
+                 reused_from_run_id=EXCLUDED.reused_from_run_id,
+                 reused_page_id=EXCLUDED.reused_page_id,
+                 retrieved_at=EXCLUDED.retrieved_at""",
             (run_id, source.get("url", ""), source.get("title", ""),
              source.get("content_hash", ""), source.get("status", "ok"),
-             source.get("error", ""))))
+             source.get("error", ""), source.get("reused_from_run_id") or None,
+             source.get("reused_page_id") or None, source.get("retrieved_at") or None)))
+
+    def find_page_by_url(self, url: str, include_html: bool = True) -> dict | None:
+        """The stored page for `url` from any run, newest first.
+
+        `get_pages` is deliberately run-scoped and omits raw_html, so neither
+        could answer "have we already fetched this exact URL?" across runs —
+        which is the question reuse asks.
+
+        Newest first: if a page was re-fetched at some point, the freshest copy
+        is the one worth reusing, and the unique index is (run_id, url) so the
+        same URL can legitimately exist once per run.
+        """
+        cols = ("id,run_id,url,final_url,parent_url,depth,method,status,error,"
+                "content_hash,markdown,snapshot_chars,retrieved_at")
+        if include_html:
+            cols += ",raw_html"
+        rows = self._rows(
+            "find_page_by_url",
+            f"SELECT {cols} FROM pages WHERE url=%s AND status='ok'"
+            f" ORDER BY retrieved_at DESC LIMIT 1", (url,))
+        return rows[0] if rows else None
 
     def upsert_page(self, run_id: str, page: dict) -> str:
         """Store the evidence. Returns the page id that records cite.
@@ -503,7 +529,9 @@ class PostgresRepo:
         row = ds[0]
         run_id = row.get("run_id", "")
         srcs = self._rows("sources",
-                          """SELECT url,title,content_hash,status,error FROM sources
+                          """SELECT url,title,content_hash,status,error,
+                                    reused_from_run_id,reused_page_id,retrieved_at
+                               FROM sources
                              WHERE run_id=%s ORDER BY url LIMIT 500""", (run_id,))
         return {"dataset_id": dataset_id,
                 "sources_attempted": row.get("sources_attempted", 0),

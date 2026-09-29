@@ -248,11 +248,16 @@ export function StackedBar({ rows, total, onSelect, activeKey, height = 8, class
   );
 }
 
-export function Segmented({ options, value, onChange, size = 'sm', className = '' }) {
+export function Segmented({ options, value, onChange, size = 'sm', className = '', label }) {
   const h = size === 'xs' ? 'h-6' : 'h-7';
   return (
     <div
       role="tablist"
+      // A tablist with no name is indistinguishable from every other tablist
+      // on the page. The dataset view has two: the panel switcher and the
+      // record-status filter. Naming this group is what lets a screen-reader
+      // user — and any automation — tell them apart.
+      aria-label={label}
       className={`inline-flex items-center gap-0.5 rounded-sm border border-rule bg-warm/60 p-0.5 ${className}`}
     >
       {options.map((o) => {

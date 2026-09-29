@@ -132,6 +132,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Segmented
           size="xs"
+          label="Record status filter"
           value={statusFilter}
           onChange={setStatusFilter}
           options={[
@@ -819,6 +820,7 @@ function SourceGrid({ datasetId }) {
 
   const fetchRate =
     attempted && successful !== null ? successful / attempted : null;
+  const reusedCount = sources.filter((s) => s.status === 'reused').length;
 
   return (
     <div className="space-y-3">
@@ -829,9 +831,14 @@ function SourceGrid({ datasetId }) {
           sub={attempted !== null ? `${num(attempted)} attempted` : undefined}
         />
         <Stat
-          label="Domains"
-          value={num(byHost.size)}
-          sub={fetchRate !== null ? `${pctSafe(fetchRate)} fetch success` : undefined}
+          label="Reused, not re-fetched"
+          value={num(reusedCount)}
+          tone={reusedCount ? 'info' : 'muted'}
+          sub={
+            reusedCount
+              ? 'stored evidence, shown with its real age'
+              : 'everything was fetched for this run'
+          }
         />
         <Stat
           label="Failed fetches"
@@ -859,6 +866,12 @@ function SourceGrid({ datasetId }) {
                 {list.map((s, i) => {
                   const url = s.url || s.page_url;
                   const good = s.status === 'ok';
+                  // A reused source is a page this machine already had. It is
+                  // not `ok`-shaped in the same way: nothing was requested, and
+                  // the evidence may predate the page changing upstream. It
+                  // gets its own marker and its real retrieval date, because
+                  // presenting it as a fresh fetch would be a quiet lie.
+                  const wasReused = s.status === 'reused';
                   return (
                     <li key={`${s.content_hash || url}-${i}`}>
                       <div className="row flex items-center gap-2.5 px-3.5 py-2">
@@ -883,9 +896,23 @@ function SourceGrid({ datasetId }) {
                           {s.content_hash ? (
                             <span
                               className="font-mono text-[9.5px] text-muted"
-                              title="Content hash â€” re-fetch and confirm the page has not changed"
+                              title="Content hash — re-fetch and confirm the page has not changed"
                             >
                               {String(s.content_hash).slice(0, 12)}
+                            </span>
+                          ) : null}
+                          {wasReused ? (
+                            <span
+                              className="shrink-0 text-[10px] text-info"
+                              title={
+                                s.retrieved_at
+                                  ? `Not re-fetched. This is the copy stored on ${new Date(
+                                      s.retrieved_at
+                                    ).toLocaleString('en-US')}. It may predate a change to the page.`
+                                  : 'Not re-fetched; reused from an earlier run.'
+                              }
+                            >
+                              reused{s.retrieved_at ? ` · ${when(s.retrieved_at)}` : ''}
                             </span>
                           ) : null}
                         </div>
@@ -1177,6 +1204,7 @@ export default function DatasetPage() {
       </header>
 
       <Segmented
+        label="Dataset section"
         value={tab}
         onChange={setTab}
         options={[

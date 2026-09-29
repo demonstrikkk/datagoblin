@@ -39,6 +39,8 @@ function AskPanel({
   setBudget,
   useSeeds,
   setUseSeeds,
+  forceRefresh,
+  setForceRefresh,
 }) {
   const [advanced, setAdvanced] = useState(false);
   const ref = useRef(null);
@@ -251,7 +253,13 @@ function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBu
                       <span className="mt-0.5 block text-[11.5px] leading-snug text-muted">
                         {f.description}
                       </span>
-                    ) : null}
+              ) : null}
+              <Toggle
+                checked={forceRefresh}
+                onChange={setForceRefresh}
+                label="Force re-fetch"
+                hint="By default a URL this machine has already fetched is reused from stored evidence instead of being requested again — cheaper, and reported as reused with the date it was actually retrieved. Turn this on when the page has changed and you need the current version."
+              />
                   </span>
                 </li>
               ))}
@@ -442,6 +450,7 @@ export default function Collect() {
   const [seeds, setSeeds] = useState('');
   const [useSeeds, setUseSeeds] = useState(false);
   const [budget, setBudget] = useState('');
+  const [forceRefresh, setForceRefresh] = useState(false);
   const [plan, setPlan] = useState(null);
   const [planId, setPlanId] = useState(null);
   const [provider, setProvider] = useState(null);
@@ -479,6 +488,9 @@ export default function Collect() {
       const res = await api.createRun({
         plan_id: planId,
         ...(budget ? { credit_budget: Number(budget) } : {}),
+        // Sent only when set, so an older backend that ignores the flag keeps
+        // its own default rather than being handed `false` by an absent toggle.
+        ...(forceRefresh ? { reuse_stored_pages: false } : {}),
       });
       const id = res?.run_id;
       if (id) {
@@ -490,7 +502,7 @@ export default function Collect() {
     } finally {
       setStarting(false);
     }
-  }, [planId, budget, setLastRun]);
+  }, [planId, budget, forceRefresh, setLastRun]);
 
   // Resume an in-flight run after a reload instead of stranding the operator.
   useEffect(() => {
@@ -527,6 +539,8 @@ export default function Collect() {
               setUseSeeds={setUseSeeds}
               budget={budget}
               setBudget={setBudget}
+    forceRefresh={forceRefresh}
+    setForceRefresh={setForceRefresh}
               onCompiled={compile}
               busy={compiling}
               error={error}

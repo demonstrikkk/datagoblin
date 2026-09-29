@@ -416,7 +416,8 @@ def test_fetch_traversal_depth_and_caps():
     urls = sorted(p["url"] for p in pages)
     assert urls == ["https://x.example/a", "https://x.example/b", "https://x.example/c"]
     assert {p.get("depth", -1) for p in pages} == {0, 1}
-    assert counts == {"attempted": 3, "successful": 3, "failed": 0, "skipped": 0}
+    assert counts == {"attempted": 3, "successful": 3, "failed": 0, "skipped": 0,
+                      "reused": 0, "fetched": 3}
     assert all(s["status"] == "ok" for s in persisted)
     assert "https://other.example/z" not in seen_calls  # cross-host never traversed
 
@@ -491,7 +492,8 @@ def test_fetch_all_worker_pool_exact_under_overlap():
     pages, counts = run(crawler_svc.fetch_all([{"url": "https://x.example/a", "title": ""}],
                                               _fetch, _emit, _persist, plan))
     assert state["max"] >= 2  # workers genuinely overlapped
-    assert counts == {"attempted": 5, "successful": 5, "failed": 0, "skipped": 0}
+    assert counts == {"attempted": 5, "successful": 5, "failed": 0, "skipped": 0,
+                      "reused": 0, "fetched": 5}
     assert sorted({p["url"] for p in pages}) == sorted(set(seen_calls))
     assert len([s for s in persisted if s["status"] == "ok"]) == 5
 
