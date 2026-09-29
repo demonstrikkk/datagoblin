@@ -208,6 +208,12 @@ export const api = {
     request(`/datasets/${encodeURIComponent(id)}/query`, { ...o, method: 'POST', body, timeout: o?.timeout ?? 300_000 }),
   refinePlan: (body, o) =>
     request('/workflows/refine', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
+  backfillProposal: (id, params, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/backfill${qs(params)}`, o),
+  backfill: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/backfill`, {
+      ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
+    }),
   proposeSelectors: (body, o) =>
     request('/selectors/propose', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
   saveSelectors: (body, o) =>

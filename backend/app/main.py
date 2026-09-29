@@ -28,6 +28,7 @@ from app.providers.search import tavily as search_provider
 from app.repositories import factory as factory_repo
 from app.repositories.factory import build_repo
 from app.schemas.run import DatasetView, Envelope, RunView
+from app.services import backfill as backfill_svc
 from app.services import crawler as crawler_svc
 from app.services import coverage as coverage_svc
 from app.services import exporter as exporter_svc
@@ -519,6 +520,62 @@ async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
     out = await asyncio.to_thread(repo().get_sources, did)
     if not out:
         raise not_found("dataset", did)
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/backfill", dependencies=[Depends(require_api_key)])
+async def backfill_proposal(did: str, fields: str = "",
+                            limit_pages: int = Query(default=8, ge=1, le=20),
+                            cid: str = Depends(correlation_id)) -> dict:
+    """What a backfill would cover, and what it would cost. Reads only.
+
+    Only fields with no value on any record are offered. A field that some
+    records carry is a coverage gap, and widening this to partial fields would
+    quietly change what backfill is allowed to rewrite.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    try:
+        out = backfill_svc.propose(
+            r, did, [f for f in fields.split(",") if f.strip()] or None,
+            limit_pages)
+    except backfill_svc.BackfillRefused as exc:
+        raise validation(str(exc))
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/backfill", dependencies=[Depends(require_api_key)])
+async def backfill_run(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Fill entirely-absent fields from pages this run already stored.
+
+    `apply: false` is the default and is a real dry run: the extraction and the
+    verification both execute, and only the writing is withheld, so the numbers
+    in the proposal can be checked against what actually happens.
+
+    Nothing is crawled. A backfilled value carries its own quote and verdict, or
+    it is not written.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    fields = [str(f) for f in (body.get("fields") or []) if str(f).strip()]
+    apply_flag = bool(body.get("apply"))
+    # Bounded in the route, not clamped: this number decides how many stored
+    # pages are re-read, and a typo that silently became 1 would make a backfill
+    # report success while quietly doing a twentieth of the work.
+    limit_pages = int(body.get("limit_pages") or 8)
+    if not 1 <= limit_pages <= 20:
+        raise validation("limit_pages must be between 1 and 20")
+
+    async def _llm(prompt: str, schema: dict) -> dict:
+        return await llm_provider.structured_generate(prompt, schema)
+
+    try:
+        out = await backfill_svc.run(r, did, fields or None, llm=_llm,
+                                     limit_pages=limit_pages, apply=apply_flag)
+    except backfill_svc.BackfillRefused as exc:
+        raise validation(str(exc))
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 

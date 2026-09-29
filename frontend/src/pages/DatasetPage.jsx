@@ -284,6 +284,141 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
 /* ---------------------------------------------------------------- sources */
 
+function BackfillPanel({ datasetId }) {
+  const [proposal, setProposal] = useState(null);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    // A read, so it can load on mount rather than waiting for a click. The cost
+    // is one query and no model call: the proposal is arithmetic over stored
+    // records, and it is the number the user needs before deciding anything.
+    api.backfillProposal(datasetId, { limit_pages: 6 })
+      .then((p) => { if (alive) { setProposal(p); setLoaded(true); } })
+      .catch((e) => { if (alive) { setFailure(e); setLoaded(true); } });
+    return () => { alive = false; };
+  }, [datasetId]);
+
+  async function run(apply) {
+    setBusy(true);
+    setFailure(null);
+    try {
+      setResult(await api.backfill(datasetId, { apply, limit_pages: 6 }));
+      if (apply) {
+        // Coverage and the backlog both just changed.
+        const p = await api.backfillProposal(datasetId, { limit_pages: 6 });
+        setProposal(p);
+        setResult((r) => ({ ...r }));
+      }
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!loaded) return null;
+  if (failure && !proposal) return <ErrorNote error={failure} compact />;
+
+  const p = proposal || {};
+  if (!p.fields?.length) {
+    return (
+      <Notice tone="ok">
+        Nothing to backfill — every declared field already has a value on at
+        least one record.
+      </Notice>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-medium">Backfill from stored pages</h3>
+          <p className="text-xs text-muted">
+            {p.fields.length} field{p.fields.length === 1 ? '' : 's'} no record
+            carries: <span className="font-mono">{p.fields.join(', ')}</span>.
+            Re-reads {p.pages} page{p.pages === 1 ? '' : 's'} this run already
+            stored — nothing is crawled — and fills only empty cells.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={busy || !p.backfillable}
+            className="rounded border border-rule-2 px-2 py-1 text-xs disabled:opacity-40"
+            onClick={() => run(false)}
+          >
+            {busy ? 'Working…' : 'Check what would fill'}
+          </button>
+          <button
+            type="button"
+            disabled={busy || !p.backfillable}
+            className="rounded border border-ink px-2 py-1 text-xs disabled:opacity-40"
+            onClick={() => run(true)}
+          >
+            Fill them
+          </button>
+        </div>
+      </div>
+
+      {!p.backfillable && p.reason ? (
+        <Notice tone="warn">{p.reason}</Notice>
+      ) : (
+        <p className="text-xs text-muted">
+          Matched by {p.dedupe_keys?.join(' + ')} — exact only, so a value can
+          never be attached to the wrong record. About{' '}
+          {p.estimated_extractions} extraction
+          {p.estimated_extractions === 1 ? '' : 's'} and up to{' '}
+          {p.estimated_judge_calls} verification calls.
+        </p>
+      )}
+
+      {failure ? <ErrorNote error={failure} compact onRetry={() => run(false)} /> : null}
+
+      {result ? (
+        <div className="space-y-1 rounded-lg border border-rule-2/60 p-2 text-xs">
+          <div>
+            Read {result.pages_read} stored page{result.pages_read === 1 ? '' : 's'},
+            matched {result.records_matched} record
+            {result.records_matched === 1 ? '' : 's'}.
+          </div>
+          <div>
+            <strong>{result.filled ?? result.fillable}</strong> value
+            {(result.filled ?? result.fillable) === 1 ? '' : 's'} found
+            {result.applied ? ' — written' : ' — nothing written (this was a check)'}.
+          </div>
+          {result.filled_fields && Object.keys(result.filled_fields).length ? (
+            <div className="text-muted">
+              {Object.entries(result.filled_fields)
+                .map(([k, v]) => `${k}: ${v}`).join(' · ')}
+            </div>
+          ) : null}
+          {result.unmatched ? (
+            <div className="text-muted">
+              {result.unmatched} extraction
+              {result.unmatched === 1 ? '' : 's'} matched no record and were
+              left alone. Reported, never guessed.
+            </div>
+          ) : null}
+          {result.applied ? (
+            <button
+              type="button"
+              className="mt-1 text-[11px] text-muted underline underline-offset-2"
+              onClick={() => { setResult(null); window.location.reload(); }}
+            >
+              Reload to see updated coverage
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SelectorLearner({ runId, neverExtracted }) {
   const { data: pages } = useResource((o) => api.runPages(runId, o), [runId]);
   const [busy, setBusy] = useState(false);
@@ -496,6 +631,8 @@ function CoveragePanel({ datasetId, runId }) {
           </div>
         ))}
       </div>
+
+      <BackfillPanel datasetId={datasetId} />
 
       <SelectorLearner
         runId={runId}
