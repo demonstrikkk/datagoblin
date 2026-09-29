@@ -36,6 +36,7 @@ from app.services import impersonation as impersonation_svc
 from app.services import jobs as jobs_svc
 from app.services import metering as metering_svc
 from app.services import planner as planner_svc
+from app.services import proposals as proposals_svc
 from app.services import runner as runner_svc
 from app.services import selector_learn as selector_learn_svc
 from app.services import selectors as selectors_svc
@@ -520,6 +521,28 @@ async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
     out = await asyncio.to_thread(repo().get_sources, did)
     if not out:
         raise not_found("dataset", did)
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/propose", dependencies=[Depends(require_api_key)])
+async def propose_change(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Read a sentence and say what it would do. Executes nothing.
+
+    The whole point of asking in words is not having to know which endpoint
+    fills a gap you noticed — but the answer must never be a model writing into
+    a dataset. So this returns an intent, the existing endpoint that will carry
+    it out, and the cost, for the user to approve separately.
+    """
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise validation("say what you want asked or changed")
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    try:
+        out = proposals_svc.propose(r, question, did)
+    except ValueError as exc:
+        raise validation(str(exc))
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 

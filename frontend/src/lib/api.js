@@ -214,6 +214,10 @@ export const api = {
     request(`/datasets/${encodeURIComponent(id)}/backfill`, {
       ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
     }),
+  proposeChange: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/propose`, {
+      ...o, method: 'POST', body, timeout: o?.timeout ?? 60_000,
+    }),
   proposeSelectors: (body, o) =>
     request('/selectors/propose', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
   saveSelectors: (body, o) =>

@@ -927,10 +927,78 @@ function ResultCharts({ columns, rows }) {
   );
 }
 
+function ProposalCard({ datasetId, question, onExecuted }) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState(null);
+
+  async function approve() {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await api.backfill(datasetId, { apply: true, limit_pages: 6 });
+      onExecuted?.();
+    } catch (e) {
+      setFailure(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (failure) return <ErrorNote error={failure} compact onRetry={approve} />;
+  if (!question) return null;
+
+  if (question.intent === 'query') {
+    return <p className="text-xs text-muted">Asked as a question. No changes proposed.</p>;
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg border border-rule-2/60 p-2.5">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-xs uppercase tracking-wide text-muted">
+          Proposal: {question.intent}
+        </span>
+        <span className="text-[11px] text-muted">
+          confidence {question.confidence} · nothing has run
+        </span>
+      </div>
+      <p className="text-xs">{question.summary}</p>
+      {question.cost ? (
+        <p className="text-[11px] text-muted">
+          About {question.cost.extractions} extraction
+          {question.cost.extractions === 1 ? '' : 's'} and up to{' '}
+          {question.cost.judge_calls} verification calls, re-reading{' '}
+          {question.cost.pages} stored page{question.cost.pages === 1 ? '' : 's'}.
+          Nothing is crawled.
+        </p>
+      ) : null}
+      {question.reason ? (
+        <Notice tone="warn">{question.reason}</Notice>
+      ) : question.backfillable === false ? (
+        <Notice tone="warn">This cannot be done safely on this dataset.</Notice>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            className="rounded border border-ink px-2 py-1 text-xs disabled:opacity-40"
+            onClick={approve}
+          >
+            {busy ? 'Running…' : 'Approve and fill'}
+          </button>
+          <span className="text-[11px] text-muted">
+            Runs the verified path — every new value gets its own quote.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AskPanel({ datasetId }) {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [answer, setAnswer] = useState(null);
+  const [proposal, setProposal] = useState(null);
   const [failure, setFailure] = useState(null);
 
   async function ask(e) {
@@ -939,10 +1007,22 @@ function AskPanel({ datasetId }) {
     setBusy(true);
     setFailure(null);
     try {
-      setAnswer(await api.queryDataset(datasetId, { question, limit: 200 }));
+      // Ask the SQL path and the proposal layer about the same sentence. The
+      // proposal is read-only, so asking both costs one cheap request and
+      // means a sentence that turns out to be a change never silently runs as
+      // a query and never silently becomes a write.
+      const text = question.trim();
+      const p = await api.proposeChange(datasetId, { question: text });
+      setProposal(p);
+      if (p.intent === 'query') {
+        setAnswer(await api.queryDataset(datasetId, { question: text, limit: 200 }));
+      } else {
+        setAnswer(null);
+      }
     } catch (err) {
       setFailure(err);
       setAnswer(null);
+      setProposal(null);
     } finally {
       setBusy(false);
     }
@@ -953,9 +1033,9 @@ function AskPanel({ datasetId }) {
       <div>
         <h3 className="text-sm font-medium">Ask this dataset</h3>
         <p className="text-xs text-muted">
-          A model writes the SQL, not you — and it can only read this dataset. The
-          query is shown before the rows, and it runs read-only against a
-          row-capped, rolled-back transaction, so it cannot change anything.
+          A question runs the guarded read-only SQL path. A request to change
+          something becomes a proposal you approve first — the model never
+          writes to a dataset on its own.
         </p>
       </div>
 
@@ -971,11 +1051,21 @@ function AskPanel({ datasetId }) {
           disabled={busy || !question.trim()}
           className="shrink-0 rounded border border-rule-2 px-3 py-1.5 text-sm disabled:opacity-40"
         >
-          {busy ? 'Asking…' : 'Ask'}
+          {busy ? 'Working…' : 'Ask'}
         </button>
       </form>
 
       {failure ? <ErrorNote error={failure} onRetry={ask} /> : null}
+      {proposal ? (
+        <ProposalCard
+          datasetId={datasetId}
+          question={proposal}
+          onExecuted={() => {
+            setProposal(null);
+            window.location.reload();
+          }}
+        />
+      ) : null}
 
       {answer ? (
         <div className="space-y-2">
