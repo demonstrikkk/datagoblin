@@ -24,8 +24,9 @@ are exact (tests assert sorted/counts, never order).
 _WORKERS = 4
 import asyncio
 import hashlib
+import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from app.core.config import settings
 from app.core.constants import RunStage
@@ -76,7 +77,7 @@ def _domain(url: str) -> str:
 
 
 def canonical_url(url: str) -> str:
-    """The URL as the *server* sees it: no fragment, no HTML entities.
+    """The URL as the *server* sees it: no fragment, no entities, no campaigns.
 
     A fragment is resolved by the browser, never sent to the server, so
     `page`, `page#/about-us`, `page#/login` and `page#/` are one resource.
@@ -88,8 +89,16 @@ def canonical_url(url: str) -> str:
     `&amp;` is also decoded: it arrives as a literal entity from scraped HTML,
     and `?a=1&amp;b=2` is a different key to the server than `?a=1&b=2`.
 
-    The query string is preserved — it genuinely selects content. Only the
-    fragment is dropped.
+    Campaign and affiliate parameters are dropped, and the `?` with them when
+    nothing is left. The document served is identical either way, so
+    `…/companies?utm_source=x`, `…/companies?gclid=y` and `…/companies` are one
+    resource. Replay of this instance's stored pages found the same listing
+    under `partner_category`/`partner_medium` labels, each of which would have
+    taken a page budget of its own — and, because the reuse fingerprint is taken
+    from the canonical form, stripping them also lets a re-run recognise the
+    page it already has.
+
+    Other query strings are preserved: they genuinely select content.
     """
     raw = (url or "").strip()
     if not raw:
@@ -101,6 +110,13 @@ def canonical_url(url: str) -> str:
         return raw.split("#", 1)[0]
     if not p.netloc:
         return raw.split("#", 1)[0]
+    if p.query:
+        try:
+            kept = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+                    if k.lower() not in _TRACKING_QUERY_KEYS]
+        except ValueError:
+            kept = []
+        p = p._replace(query=urlencode(kept))
     return p._replace(fragment="").geturl()
 
 
@@ -124,6 +140,149 @@ def _plan_domains(plan: dict) -> list[str]:
 
 def _domain_allowed(host: str, allowed: list[str]) -> bool:
     return (not allowed or any(host == a or host.endswith("." + a) for a in allowed))
+
+
+#: Path segments that almost never carry the records a plan is looking for.
+#: Measured on this instance: 19% of every page ever fetched (28 of 151) was
+#: one of these or a bare root, and none of them contributed a record. The
+#: budget is finite, so a login page is a slot a real listing page did not get.
+_NAV_SEGMENTS = frozenset("""
+about about-us contact contact-us login signin sign-in signup sign-up register
+privacy privacy-policy terms terms-of-service legal cookies cookie-policy
+careers jobs employment blog news tag tags category categories search
+cart checkout account my-account help faq support subscribe newsletter press
+media events sitemap feed rss share print wishlist returns shipping
+""".split())
+
+#: Query keys that are navigation state rather than a distinct resource. Two
+#: pages that differ only by `?page=2` are one resource twice, and
+#: `canonical_url` strips fragments but not these.
+_NAV_QUERY_KEYS = frozenset({"page", "offset", "start", "sort", "orderby", "order",
+                             "filter", "q", "search", "ref", "from", "view"})
+
+#: Campaign and affiliate parameters. The destination is unchanged by them, so a
+#: link carrying them is the same page under a different label — and a real page
+#: found that way was queued from `…&partner_category=index&partner_medium=web`
+#: in a replay of this instance's own stored pages.
+_TRACKING_QUERY_KEYS = frozenset("""
+utm_source utm_medium utm_campaign utm_term utm_content utm_id utm_name
+gclid fbclid msclkid mc_cid mc_eid igshid ref ref_src referrer source
+campaign campaign_id ad_id adid aff aff_id affid partner partner_id
+partner_category partner_medium partner_network cid icid
+""".split())
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _terms(text: object) -> set[str]:
+    return {w for w in _WORD.findall(str(text or "").lower()) if len(w) >= 4}
+
+
+def plan_terms(plan: dict | None) -> set[str]:
+    """The vocabulary a plan is looking for, from the plan itself.
+
+    Taken from the entity, the dedupe keys, the field names and the search
+    queries — the things the user typed or the planner inferred. A link whose
+    anchor or slug shares a word with those is more likely to hold the records.
+    """
+    plan = plan or {}
+    out: set[str] = set()
+    for key in ("entity", "goal"):
+        out |= _terms(plan.get(key))
+    for k in (plan.get("dedupe_keys") or []):
+        out |= _terms(k)
+    for f in (plan.get("fields") or []):
+        if isinstance(f, dict):
+            out |= _terms(f.get("name"))
+    for q in (plan.get("search_queries") or []):
+        out |= _terms(q)
+    return out
+
+
+def score_link(link: str, anchor: str = "", plan: dict | None = None,
+               terms: set[str] | None = None) -> float:
+    """How likely this link is to hold records for this plan. Higher is better.
+
+    This reorders and trims the crawl queue. It never admits anything
+    `traversal_allowed` has already refused, and it never bypasses a cap — it
+    only decides which allowed links are worth a page budget when there are more
+    candidates than budget.
+
+    The sign convention is deliberate: a link can score *negative*, and those
+    are dropped first rather than merely last, because a page budget spent on
+    `/privacy-policy` is a page budget not spent on a company.
+    """
+    if not link:
+        return -99.0
+    # Scored on the canonical resource, not on the label it was found under.
+    # The pipeline already canonicalises before scoring, but this function is
+    # callable on its own and must judge the same document either way.
+    try:
+        link = canonical_url(link)
+    except Exception:
+        return -99.0
+    try:
+        p = urlparse(link)
+    except Exception:
+        return -99.0
+    # Must be absolute. `ht tp://%%%` parses with an empty scheme and a path of
+    # `ht tp://%%%`, so it collected the anchor and segment bonuses and scored
+    # +4.0 — a malformed href was ranked above a real company page. Every link
+    # that reaches here has been through urljoin, so a missing netloc means the
+    # href was junk.
+    if not p.netloc:
+        return -50.0
+    if p.scheme and p.scheme not in ("http", "https"):
+        return -50.0
+    raw_path = (p.path or "").strip("/")
+    # Compare on the stem: `sitemap.xml` is the same furniture as `sitemap`,
+    # and the extension denylist in `traversal_allowed` never sees it either
+    # because it only matches a known-bad extension list.
+    segs = [re.sub(r"\.[a-z0-9]{1,5}$", "", s, flags=re.I) or s
+            for s in raw_path.lower().split("/") if s]
+    words = terms if terms is not None else plan_terms(plan)
+    score = 0.0
+
+    # --- negatives: things that are page furniture, not records ---------------
+    if not segs:
+        score -= 2.0
+    if any(s in _NAV_SEGMENTS for s in segs[:2]):
+        score -= 5.0
+    # parse_qsl yields (key, value) PAIRS. Reading them as bare keys raised
+    # AttributeError, and the broad except below turned that into "no query
+    # penalty at all" — so `?page=2` scored positive and pagination was
+    # followed as if it were a new resource. Narrowed, and the unpack is
+    # explicit, because a scoring bug that silently disables a penalty is worse
+    # than one that crashes.
+    try:
+        qs = {k.lower() for k, _v in parse_qsl(p.query or "", keep_blank_values=False)}
+    except (ValueError, TypeError) as exc:  # pragma: no cover - defensive
+        raise ValueError(f"unparseable query in {link!r}: {exc}") from exc
+    if qs & _NAV_QUERY_KEYS:
+        score -= 4.0
+    tracking = len(qs & _TRACKING_QUERY_KEYS)
+    if tracking:
+        score -= min(4.0, 2.0 + 0.5 * tracking)
+
+    # --- positives: things that look like the thing being asked for ----------
+    if words:
+        hits = _terms(anchor) & words
+        if hits:
+            score += 2.0 + 0.5 * (len(hits) - 1)
+        # Only the LAST segment counts. `/companies/northwind` was earning a
+        # slug bonus for "companies" — its parent — which is the least
+        # informative word in the path and the reason a section index used to
+        # outrank the detail pages it links to.
+        if segs and _terms(segs[-1]) & words:
+            score += 1.0
+    if anchor:
+        score += 0.5
+    if len(segs) == 2:
+        score += 0.5           # /companies/acme — the shape a detail page takes
+    elif len(segs) >= 4:
+        score -= 1.0           # deep, usually a permalink past the data
+
+    return score
 
 
 def traversal_allowed(link: str, plan: dict) -> bool:
@@ -234,26 +393,88 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
 
 
 def _child_links(page: dict) -> list[str]:
-    """Same-host child URLs of a settled page, from whichever rung produced it.
+    """Same-host child URLs of a settled page. URLs only.
 
-    The static rungs return `html`; the rendered rungs return `markdown` plus a
-    parsed `links` list and never an `html` key. Reading only `html` therefore
-    found children on plain pages and none at all on rendered ones, so a
-    JS-heavy seed never expanded at all. Both are honoured now, in that order,
-    with the renderer's own parsed links preferred because they are post-JS.
+    Kept for callers that do not need anchor text. `_child_links_with_text` is
+    what the queue uses, because scoring a link without its anchor throws away
+    the only signal that distinguishes a listing from a login page.
+    """
+    return [u for u, _t in _child_links_with_text(page)]
+
+
+def _child_links_with_text(page: dict) -> list[tuple[str, str]]:
+    """Same-host child URLs of a settled page, paired with anchor text.
+
+    From whichever rung produced it. The static rungs return `html`; the
+    rendered rungs return `markdown` plus a parsed `links` list and never an
+    `html` key. Reading only `html` therefore found children on plain pages and
+    none at all on rendered ones, so a JS-heavy seed never expanded at all.
+    Both are honoured now, in that order, with the renderer's own parsed links
+    preferred because they are post-JS.
+
+    A rendered page's parsed `links` carries no anchor text, so those come back
+    with an empty string and are scored on their URL alone. That is a worse
+    score, not a wrong one: an informative URL still scores, and an uninformative
+    one is pushed behind links that say what they are.
     """
     parsed = page.get("links")
     if isinstance(parsed, list) and parsed:
-        out = [str(x) for x in parsed if isinstance(x, (str, bytes))]
+        out: list[tuple[str, str]] = []
+        seen_urls: set[str] = set()
+        for x in parsed:
+            if isinstance(x, (list, tuple)) and len(x) >= 2:
+                u, t = str(x[0]), str(x[1])
+            elif isinstance(x, (str, bytes)):
+                u, t = (x.decode() if isinstance(x, bytes) else x), ""
+            else:
+                continue
+            # Deduped here, not only in the static extractor. The rendered rungs
+            # hand over a flat list of links that routinely repeats the same URL
+            # once per navigation bar that contains it, and each repeat consumed
+            # a page budget slot: a replay of six real pages queued the same
+            # `dezerv?partner` link several times over.
+            if u in seen_urls:
+                continue
+            seen_urls.add(u)
+            out.append((u, t))
         if out:
-            return [x.decode() if isinstance(x, bytes) else x for x in out]
+            return out
     html = page.get("html") or page.get("rendered_html") or ""
     if html:
         try:
-            return list(fetcher.extract_links(html, page.get("url", "")))
+            return list(fetcher.extract_links_with_text(html, page.get("url", "")))
         except Exception:  # noqa: BLE001 (malformed markup must not kill the crawl)
             return []
     return []
+
+
+def _rank_children(pairs: list[tuple[str, str]], plan: dict, terms: set[str],
+                   seen: set[str], depth: int, budget: int,
+                   per_parent: int) -> list[str]:
+    """Canonicalise, gate, score, trim, and return the URLs worth a fetch.
+
+    One function for both queue sites — the reused-page path and the fetched
+    path — so the two cannot drift apart. They are the same decision about the
+    same links, and having them written twice is how a fix lands in one and not
+    the other.
+    """
+    scored: list[tuple[float, str]] = []
+    added: set[str] = set()
+    for raw, anchor in pairs:
+        link = canonical_url(raw)
+        # Canonical before the seen check: a client-side route such as
+        # `/#/login` is the same document as the page we are on, and following
+        # it costs a fetch and a budget slot for a byte-identical response.
+        if not link or link in seen or link in added:
+            continue
+        if not traversal_allowed(link, plan):
+            continue
+        added.add(link)
+        scored.append((score_link(link, anchor, plan, terms), link))
+    # Best first, then by URL so the order is stable for a given page.
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    out = [link for score, link in scored if score >= 0]
+    return out[:per_parent]
 
 
 async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: Any,
@@ -285,6 +506,15 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     """
     plan = plan or {}
     reuse_enabled = bool(plan.get("reuse_stored_pages", True)) and reuse is not None
+    # Computed once for the whole crawl. `plan_terms` walks the schema and the
+    # search queries, and doing that per link per page turned a cheap comparison
+    # into a repeated parse of the plan.
+    terms = plan_terms(plan)
+    # How many children one page may contribute. Generous on purpose: scoring
+    # orders and trims, it must not starve a page that legitimately has many
+    # real candidates, and a listing page can link to hundreds of companies.
+    per_parent_cap = max(2, min(int((plan.get("traversal", {}) or {}).get(
+        "max_children_per_page", 8)), 40))
     traversal = plan.get("traversal", {}) or {}
     per_domain_cap = max(1, min(int(traversal.get("max_pages_per_domain", 3)),
                                 settings.RUN_MAX_DOMAIN_PAGES))
@@ -382,13 +612,11 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                 # and a reused page that stopped discovery would quietly shrink
                 # every subsequent run.
                 if depth < max_depth:
-                    for link in _child_links(page):
-                        link = canonical_url(link)
-                        if link and link not in seen and traversal_allowed(link, plan):
-                            queue.append(({"url": link, "title": "",
-                                           "parent_url": url}, depth + 1))
-                        if len(queue) >= budget + 100:
-                            break
+                    for link in _rank_children(
+                            _child_links_with_text(page), plan, terms, seen, depth,
+                            budget, per_parent_cap):
+                        queue.append(({"url": link, "title": "",
+                                       "parent_url": url}, depth + 1))
                 return
 
         try:
@@ -469,16 +697,15 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         # 2 < 2 and stopped. The setting now means what it says - that many
         # levels below the seeds.
         if depth < max_depth:
-            for link in _child_links(page):
-                # Canonical before the seen check: a client-side route such as
-                # `/#/login` is the same document as the page we are on, and
-                # following it costs a fetch and a budget slot for a byte-
-                # identical response.
-                link = canonical_url(link)
-                if link and link not in seen and traversal_allowed(link, plan):
-                    queue.append(({"url": link, "title": "",
-                                   "parent_url": url}, depth + 1))
+            for link in _rank_children(
+                    _child_links_with_text(page), plan, terms, seen, depth,
+                    budget, per_parent_cap):
+                queue.append(({"url": link, "title": "",
+                               "parent_url": url}, depth + 1))
                 if len(queue) >= budget + 100:
+                    # The queue cannot outgrow the budget by more than this
+                    # headroom, or a page with thousands of links would let the
+                    # workers keep pulling while the budget is already spent.
                     break
 
     settled: dict[str, int] = {}

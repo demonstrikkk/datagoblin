@@ -20,7 +20,8 @@ from app.services import crawler as crawler_svc
 #: one test that is about traversal uses LINKED_HTML instead.
 HTML = "<html><body><h1>Northwind</h1><p>Berlin, Germany, founded 2011.</p></body></html>"
 LINKED_HTML = ("<html><body><h1>Northwind</h1><p>Berlin.</p>"
-               "<a href='https://x.example/about'>About</a></body></html>")
+               "<a href='https://x.example/companies/northwind'>Northwind Traders</a>"
+               "</body></html>")
 
 
 def run(coro):
@@ -134,7 +135,43 @@ def test_traversal_still_continues_from_a_reused_page():
 
     assert counts["reused"] == 1
     # The child was followed and fetched for real: only the known URL was reused.
-    assert "https://x.example/about" in calls
+    assert "https://x.example/companies/northwind" in calls
+
+
+def test_reuse_expands_only_into_links_worth_a_page_budget():
+    """Both halves of the same requirement.
+
+    A reused page that stopped discovery would mean the second run of a goal
+    finds strictly less than the first. A reused page that expands into
+    /login and /privacy-policy spends page slots a real listing page needed.
+    """
+    html = ("<html><body>"
+            "<a href='https://x.example/companies/northwind'>Northwind Traders</a>"
+            "<a href='https://x.example/privacy-policy'>Privacy Policy</a>"
+            "<a href='https://x.example/login'>Sign in</a>"
+            "</body></html>")
+    calls: list[str] = []
+    reused_urls = {"https://x.example/a"}
+
+    async def _reuse(url):
+        return _stored(url, html=html) if url in reused_urls else None
+
+    async def _emit(ev):
+        pass
+
+    async def _persist_source(s):
+        pass
+
+    run(crawler_svc.fetch_all(
+        [{"url": "https://x.example/a", "title": ""}],
+        _fetcher(calls, html), _emit, _persist_source,
+        {"traversal": {"max_pages_per_domain": 10}}, None, _reuse))
+
+    assert "https://x.example/companies/northwind" in calls
+    assert "https://x.example/privacy-policy" not in calls, \
+        "a privacy page was given a page budget"
+    assert "https://x.example/login" not in calls, \
+        "a login page was given a page budget"
 
 
 # -- the cases where reuse must NOT happen ---------------------------------

@@ -202,7 +202,12 @@ def test_traversal_domain_cap_respects_settings(monkeypatch):
     async def _persist(s):
         pass
 
-    plan = {"max_pages": 40, "traversal": {"max_pages_per_domain": 30}}
+    plan = {"max_pages": 40,
+            # Raised deliberately: this test is about the per-domain cap, and a
+            # page may only contribute `max_children_per_page` links per parent.
+            # Left at the default of 8 it would stop at 8 and never reach the
+            # domain cap it is named for.
+            "traversal": {"max_pages_per_domain": 30, "max_children_per_page": 40}}
     pages, counts = run(crawler_svc.fetch_all([{"url": "https://x.example/a", "title": ""}],
                                               _fetch, _emit, _persist, plan))
     cap = config_mod.settings.RUN_MAX_DOMAIN_PAGES

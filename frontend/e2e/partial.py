@@ -38,7 +38,18 @@ async def main():
 
         await p.goto(f"{BASE}/runs/{rid}", wait_until="domcontentloaded")
         await p.wait_for_selector("main", timeout=20000)
-        await p.wait_for_timeout(4000)
+        # Wait for the run's own content, not a fixed sleep. The page mounts as
+        # a bare "Loading run" and fills in when /api/runs/{id} resolves; under
+        # full-suite load that resolved after a flat 4s wait, so the checks
+        # below read an empty shell and reported two honest-looking failures
+        # against a page that rendered correctly.
+        await p.wait_for_function(
+            """() => {
+                 const t = document.querySelector('main')?.innerText || '';
+                 return t.length > 200 && !/^Loading run\\s*$/.test(t.trim());
+               }""",
+            timeout=45000)
+        await p.wait_for_timeout(600)
         txt = await p.inner_text("main")
 
         print("\n=== partial run rendering ===")

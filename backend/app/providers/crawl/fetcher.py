@@ -206,6 +206,45 @@ async def backoff(attempt: int) -> None:
     await asyncio.sleep(min(8.0, 2.0 ** attempt) + random.uniform(0, 0.5))
 
 
+def extract_links_with_text(html: str, base_url: str, limit: int = 50) -> list[tuple[str, str]]:
+    """Same links as `extract_links`, each paired with its anchor text.
+
+    The URL alone does not say what a link is. `/tag/saas` and `/companies/acme`
+    are both plausible paths; their anchors say "SaaS" and "Acme Corp", which is
+    the difference between spending a page budget and wasting one. Scoring
+    needs the text, and the existing extractor threw it away.
+    """
+    from bs4 import BeautifulSoup
+    try:
+        base_host = (urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return []
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    try:
+        soup = BeautifulSoup(html or "", "html.parser")
+        for a in soup.find_all("a", href=True):
+            try:
+                abs_url = urljoin(base_url, str(a["href"]).strip())
+            except Exception:
+                continue
+            p = urlparse(abs_url)
+            if p.scheme not in ("http", "https"):
+                continue
+            host = (p.hostname or "").lower()
+            if host != base_host and not host.endswith("." + base_host):
+                continue
+            if abs_url in seen:
+                continue
+            seen.add(abs_url)
+            out.append((abs_url, re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()))
+            if len(out) >= limit:
+                break
+    except Exception:  # noqa: BLE001 (malformed markup must not kill the crawl)
+        return []
+    return out
+
+
 def extract_links(html: str, base_url: str, limit: int = 50) -> list[str]:
     """Same-host links only (bounded in-domain traversal fuel). Pure function."""
     from bs4 import BeautifulSoup

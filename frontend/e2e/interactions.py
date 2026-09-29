@@ -150,7 +150,19 @@ async def main() -> int:
         link = await p.query_selector("a[href^='/library/']")
         await link.click()
         await p.wait_for_selector("table tbody tr", timeout=45000)
-        await p.wait_for_timeout(1200)
+        # Wait for the filter counts to hold real numbers before clicking any of
+        # them. The row renders as soon as the panel mounts and is replaced when
+        # the records arrive (`All0` -> `All50`), so a click issued during that
+        # swap lands on an element that no longer exists — which is a test
+        # timing bug dressed up as a UI failure.
+        await p.wait_for_function(
+            """() => {
+                 const g = document.querySelector(
+                   '[role=tablist][aria-label="Record status filter"]');
+                 return !!g && /[1-9]/.test(g.innerText);
+               }""",
+            timeout=45000)
+        await p.wait_for_timeout(600)
         # Click every record-status filter. The tab list shrinks when the
         # Records panel unmounts, so re-count and stop at the first gap.
         while True:
