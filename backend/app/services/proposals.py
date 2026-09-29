@@ -11,18 +11,26 @@ So the shape is always the same, and it is deliberate:
              -> explicit approval -> the existing verified path executes it
 
 Three intents, because those are the three things actually worth doing to a
-dataset:
+dataset. Two more were added once backfill could not express the request:
 
-* ``query``     — answer a question by running the guarded SQL path.
-* ``backfill``  — name fields that no record has and can be filled from stored
-  pages, and say what it would cost before doing it.
-* ``refine``    — change the plan the dataset came from and show a field diff.
+* ``query``      — answer a question by running the guarded SQL path.
+* ``backfill``   — name fields that are empty and can be filled from stored
+  pages, and say what it would cost before doing it. ``include_partial`` widens
+  it to columns that are filled on some records and not others.
+* ``refine``     — change the plan the dataset came from and show a field diff.
+* ``add_column`` — declare a field the schema does not have, then backfill it.
+  Separate from ``backfill`` because the schema write is a different kind of
+  change from a value write, and a user who says "add a funding column" means
+  both without having said the second one.
+* ``refresh``    — re-read the sources a dataset already used and re-verify the
+  values they supplied. Separate because it is the one intent that can replace
+  a value that already exists.
 
-There is no fourth. A proposal that cannot be classified is reported as
-unrecognised along with the three that exist, rather than being interpreted
+There is no sixth. A proposal that cannot be classified is reported as
+unrecognised along with the five that exist, rather than being interpreted
 loosely. Being told "I did not understand that" is the correct answer far more
-often than forcing a sentence into one of these three, and it is the only
-answer that cannot quietly do the wrong thing.
+often than forcing a sentence into one of these, and it is the only answer that
+cannot quietly do the wrong thing.
 """
 from __future__ import annotations
 
@@ -31,7 +39,7 @@ import re
 #: What the user asked for, and how each is carried out. `run` is the name of
 #: the existing, already-verified path each intent delegates to — this module
 #: never performs the work itself.
-INTENTS = ("query", "backfill", "refine")
+INTENTS = ("query", "backfill", "refine", "add_column", "refresh")
 
 _BACKFILL_HINTS = (
     "add", "fill", "missing", "backfill", "empty", "blank", "capture",
@@ -41,6 +49,15 @@ _BACKFILL_TARGETS = (
     "field", "column", "value", "data", "info", "detail", "details", "round",
     "founder", "funding", "valuation", "size", "industry", "city", "country",
     "year", "ticker", "employee", "hq", "url", "website", "salary", "price",
+)
+_REFRESH_HINTS = (
+    "refresh", "recheck", "re-check", "update", "stale", "outdated", "wrong",
+    "changed", "revisit", "re-read", "reread", "current", "now", "correct",
+    "fix", "repair", "again",
+)
+_REFRESH_TARGETS = (
+    "source", "sources", "page", "pages", "url", "site", "website", "value",
+    "values", "cell", "cells", "data",
 )
 _REFINE_HINTS = (
     "instead", "rather", "change", "narrow", "wider", "more", "fewer",
@@ -84,12 +101,43 @@ def classify(question: str) -> tuple[str, float]:
 
     backfill = len(words & set(_BACKFILL_HINTS)) + 0.5 * len(words & set(_BACKFILL_TARGETS))
     refine = len(words & set(_REFINE_HINTS)) + 0.5 * len(words & set(_PLAN_SUBJECTS))
+    refresh = len(words & set(_REFRESH_HINTS)) + 0.5 * len(words & set(_REFRESH_TARGETS))
 
-    if backfill <= 0 and refine <= 0:
+    # "add a column" and "fill the missing funding" are the same request by
+    # another name, and which one it is only matters for the schema write. The
+    # distinction that is made here is the *opposite* of the intuitive one: a
+    # sentence that names a column as new and does not name an existing gap is
+    # a schema change, because backfill alone cannot make a field exist.
+    add_column = 0.0
+    if _asks_for_new_column(question or ""):
+        add_column = max(backfill, 1.5) + 1.0
+
+    scores = {"backfill": backfill, "refine": refine, "refresh": refresh}
+    if add_column > 0:
+        scores["add_column"] = add_column
+    if not any(v > 0 for v in scores.values()):
         return "query", 0.0
-    if backfill >= refine:
-        return "backfill", backfill
-    return "refine", refine
+    # Ties resolve toward the safer intent. Writing a value is the harder act to
+    # undo and the easier one to be wrong about, so a sentence that reads equally
+    # as a read and a write is read.
+    order = ("query", "add_column", "refresh", "backfill", "refine")
+    best = max(order, key=lambda k: (scores.get(k, 0.0), -order.index(k)))
+    return best, scores[best]
+
+
+#: Wording that means "a field which does not exist yet". Kept narrow: a field
+#: that already exists and is merely empty is a backfill, and treating the two
+#: the same would rewrite the schema on a sentence that only asked for values.
+_NEW_COLUMN_HINTS = (
+    "new column", "new field", "another column", "another field", "extra column",
+    "extra field", "add a column", "add a field", "add column", "add field",
+    "track", "capture a", "also capture", "column for", "field for",
+)
+
+
+def _asks_for_new_column(text: str) -> bool:
+    low = " ".join(str(text or "").lower().split())
+    return any(h in low for h in _NEW_COLUMN_HINTS)
 
 
 def _mentioned_fields(question: str, known: list[str]) -> list[str]:
@@ -110,6 +158,117 @@ def _mentioned_fields(question: str, known: list[str]) -> list[str]:
     return out
 
 
+def _mentioned_hosts(text: str) -> list[str]:
+    """Dotted tokens in a sentence, which is how a source gets named in words.
+
+    Only shapes that can be a host are kept. A bare word like "the" is not a
+    host, and offering it to the refresh path would produce a proposal that
+    names a source nobody has.
+    """
+    out = []
+    for t in _tokens(text):
+        if "." in t and len(t) > 4 and not t.endswith("."):
+            out.append(t)
+    return sorted(set(out))
+
+
+def _refresh_proposal(store, dataset_id: str, text: str, score: float,
+                      named: list[str]) -> dict:
+    from app.services import refresh as refresh_svc
+    try:
+        block = refresh_svc.propose(store, dataset_id, named or None)
+    except Exception:  # noqa: BLE001
+        block = {"refreshable": False, "reason": "this dataset's sources could not be read"}
+    if not block.get("refreshable"):
+        return {
+            "intent": "refresh",
+            "question": text,
+            "confidence": round(min(1.0, 0.5 + score * 0.1), 2),
+            "action": "refresh_sources",
+            "endpoint": f"POST /api/datasets/{dataset_id}/refresh",
+            "sources": 0,
+            "summary": "Nothing to re-read.",
+            "reason": block.get("reason", ""),
+            "writes": False,
+            "needs_confirmation": False,
+        }
+    hosts = ", ".join(block.get("hosts") or []) or "its highest-yield sources"
+    return {
+        "intent": "refresh",
+        "question": text,
+        "confidence": round(min(1.0, 0.5 + score * 0.1), 2),
+        "action": "refresh_sources",
+        "endpoint": f"POST /api/datasets/{dataset_id}/refresh",
+        "hosts": block.get("hosts") or [],
+        "sources": block.get("sources", 0),
+        "cells_reverified": block.get("cells_reverified", 0),
+        "cost": {"pages": block.get("sources", 0),
+                 "extractions": block.get("estimated_extractions", 0),
+                 "judge_calls": block.get("estimated_judge_calls", 0)},
+        "summary": (
+            f"Re-fetch {block.get('sources', 0)} source(s) ({hosts}) and re-verify the "
+            f"{block.get('cells_reverified', 0)} value(s) they supplied. A value is "
+            f"replaced only if the new one carries its own quote, and the value it "
+            f"replaces is kept as a reviewable rival rather than discarded."),
+        "writes": True,
+        "needs_confirmation": True,
+    }
+
+
+def _add_column_proposal(store, dataset_id: str, text: str, score: float,
+                         backfill_svc) -> dict:
+    """Declare a field the schema lacks, then fill it from stored pages.
+
+    Two writes, reported as one request because the user asked for one outcome:
+    the schema gains a column, and backfill then treats it as a never-extracted
+    field and fills it like any other. The proposal says which column and what it
+    would cost, and the two steps are applied in that order by the caller — a
+    column declared and left empty would look like a bug on the next page load.
+    """
+    schema = (store.get_dataset(dataset_id) or {}).get("schema") or []
+    known = {str(f.get("name")).lower() for f in schema
+             if isinstance(f, dict) and f.get("name")}
+    # The column name is not invented from the sentence. It is taken from the
+    # plan when the plan has an obvious candidate, and otherwise the request is
+    # reported as needing a name — a schema with a guessed field is worse than no
+    # schema, because the guess is what the next reader will trust.
+    candidate = ""
+    for f in schema:
+        if isinstance(f, dict) and f.get("name"):
+            known.add(str(f["name"]).lower())
+    for name in _mentioned_fields(text, sorted(known)):
+        if name.lower() not in known:
+            candidate = name
+    if not candidate:
+        return {
+            "intent": "add_column",
+            "question": text,
+            "confidence": round(min(1.0, 0.5 + score * 0.1), 2),
+            "action": "add_column",
+            "endpoint": f"POST /api/datasets/{dataset_id}/backfill",
+            "summary": ("I can add a column, but I will not guess its name. "
+                        "Name the field and this becomes a concrete proposal."),
+            "reason": "no field name could be read from the request",
+            "writes": False,
+            "needs_confirmation": False,
+        }
+    return {
+        "intent": "add_column",
+        "question": text,
+        "confidence": round(min(1.0, 0.5 + score * 0.1), 2),
+        "action": "add_column",
+        "endpoint": f"POST /api/datasets/{dataset_id}/backfill",
+        "fields": [candidate],
+        "declares_field": candidate,
+        "summary": (
+            f"Add `{candidate}` to this dataset's schema, then backfill it from the "
+            f"pages this run already stored. The schema write and the value write "
+            f"are separate steps and both are confirmed before either happens."),
+        "writes": True,
+        "needs_confirmation": True,
+    }
+
+
 def propose(store, question: str, dataset_id: str = "") -> dict:
     """Read-only. Returns a proposal the caller can show and then approve.
 
@@ -118,6 +277,7 @@ def propose(store, question: str, dataset_id: str = "") -> dict:
     so "approve" has a definite meaning.
     """
     from app.services import backfill as backfill_svc
+    from app.services import refresh as refresh_svc
 
     text = (question or "").strip()
     if not text:
@@ -138,6 +298,16 @@ def propose(store, question: str, dataset_id: str = "") -> dict:
             "writes": False,
             "needs_confirmation": False,
         }
+
+    if intent == "refresh":
+        # A refresh names sources or pages; a sentence that names neither gets
+        # the highest-yield sources, which is a choice the user can see in the
+        # proposal rather than one made for them.
+        named = _mentioned_hosts(text)
+        return _refresh_proposal(store, dataset_id, text, score, named)
+
+    if intent == "add_column":
+        return _add_column_proposal(store, dataset_id, text, score, backfill_svc)
 
     if intent == "backfill":
         plan = backfill_svc.plan_for_dataset(store, dataset_id)

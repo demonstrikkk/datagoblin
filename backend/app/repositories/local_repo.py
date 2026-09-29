@@ -257,6 +257,22 @@ class LocalRepo:
                                   "records": records, "counts": ds.get("counts", {})})
         return True
 
+    def update_dataset_schema(self, dataset_id: str, schema: list) -> bool:
+        """Replace the declared schema. See PostgresRepo for the whole-array write.
+
+        Records are carried across untouched: declaring a column must not disturb
+        the rows that are already there, and the new column starts empty on every
+        one of them, which is what backfill then fills.
+        """
+        ds = self.get_dataset(dataset_id)
+        if ds is None:
+            return False
+        self._append("datasets", {"id": dataset_id, "run_id": ds.get("run_id", ""),
+                                  "name": ds.get("name", ""), "schema": list(schema or []),
+                                  "records": ds.get("records", []),
+                                  "counts": ds.get("counts", {})})
+        return True
+
     def get_sources(self, dataset_id: str) -> dict:
         ds = self.get_dataset(dataset_id)
         if ds is None:

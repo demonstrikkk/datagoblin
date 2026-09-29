@@ -326,10 +326,21 @@ class PostgresRepo:
         return str(found[0]["id"]) if found else pid
 
     def append_event(self, run_id: str, event: dict) -> None:
+        """Store one run event, keeping its kind.
+
+        `type` is written separately from the message because the message is
+        prose and gets reworded, while the kind is a fixed string the code
+        already chooses. Storing only the message made every question about a
+        run ("which pages failed", "how many records were rejected") a LIKE over
+        a sentence, and an answer that changed when someone edited a message.
+        Events written before the column existed keep an empty type, which reads
+        as "kind unknown" rather than as a wrong kind.
+        """
         self._run("append_event", lambda cur: cur.execute(
-            """INSERT INTO run_events (run_id,stage,message,metadata_json)
-               VALUES (%s,%s,%s,%s)""",
-            (run_id, event.get("stage", ""), str(event.get("message", ""))[:2000],
+            """INSERT INTO run_events (run_id,stage,type,message,metadata_json)
+                 VALUES (%s,%s,%s,%s,%s)""",
+            (run_id, event.get("stage", ""), str(event.get("type", ""))[:120],
+             str(event.get("message", ""))[:2000],
              _jsonb(event.get("data", {}) or {}))))
 
     def finalize_dataset(self, run_id: str, plan: dict, rows: list[dict],
@@ -549,6 +560,24 @@ class PostgresRepo:
             return bool(cur.fetchall())
 
         return bool(self._run("update_record_cell", _fn))
+
+    def update_dataset_schema(self, dataset_id: str, schema: list) -> bool:
+        """Replace the declared schema of a dataset.
+
+        Writing the whole array rather than appending in SQL, because a
+        concurrent add of the same column must not produce two copies of it: the
+        read-modify-write here is atomic under the row lock, and the caller
+        re-reads the schema anyway to build the diff. Returns False when the
+        dataset does not exist, which is a real answer rather than a silent
+        success on nothing.
+        """
+        def _fn(cur):
+            cur.execute("""UPDATE datasets SET schema_json=%s::jsonb
+                            WHERE id=%s RETURNING id""",
+                        (_jsonb(schema or []), dataset_id))
+            return bool(cur.fetchall())
+
+        return bool(self._run("update_dataset_schema", _fn))
 
     def get_sources(self, dataset_id: str) -> dict:
         ds = self._rows("get_sources",
