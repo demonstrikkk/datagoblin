@@ -7,9 +7,35 @@ page error, or failed request.
 """
 import asyncio
 import os
+import json
 import re
+import urllib.request
 
 BASE = os.environ.get("DG_BASE_URL", "http://localhost:4173")
+API = os.environ.get("DG_API_URL", "http://127.0.0.1:8000")
+
+
+async def _dataset_with_records():
+    """The dataset with the most stored records, or None.
+
+    Discovered rather than positioned, for the same reason ask.py and ops.py
+    query the API instead of hardcoding an id: a literal stops working the day
+    that dataset is deleted, and an expectation that the *first* card has
+    records stops working the day a run produces an empty one.
+    """
+    def _fetch():
+        with urllib.request.urlopen(f"{API}/api/datasets", timeout=60) as fh:
+            return json.loads(fh.read().decode("utf-8"))["data"] or []
+
+    try:
+        rows = await asyncio.to_thread(_fetch)
+    except Exception:
+        return None
+    rows = [r for r in rows if (r.get("record_count") or 0) > 0]
+    if not rows:
+        return None
+    return "/library/" + max(rows, key=lambda r: r.get("record_count") or 0)["id"]
+
 OUT = os.environ.get(
     "DG_SHOT_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "screenshots"),
@@ -148,11 +174,28 @@ async def main() -> int:
         print(f"  library via nav     : {page.url}")
 
         # A dataset row should be clickable and open the inspector.
+        #
+        # Picked by record count from the API, not by position on the page. Taking
+        # the first card worked until a run finished with zero records — a
+        # provider auth failure creates a real, empty dataset, and the library
+        # sorts newest first — and then this waited 30s for a table row that
+        # cannot exist and reported the app as broken. An empty dataset is a
+        # legitimate state; a test that assumes otherwise is testing the
+        # library's sort order.
         await page.wait_for_timeout(900)
-        link = await page.query_selector("a[href^='/library/']")
-        if link:
-            await link.click()
-            await page.wait_for_selector("table tbody tr", timeout=15000)
+        target = await _dataset_with_records()
+        if not target:
+            failures.append("no dataset with stored records exists to open")
+        else:
+            if not re.search(r"\b[1-9]\d*\s+records?\b", await page.inner_text("body"), re.I):
+                failures.append("no library card reported a non-zero record count")
+            await page.goto(f"{BASE}{target}", wait_until="domcontentloaded")
+            try:
+                await page.wait_for_selector("table tbody tr", timeout=30000)
+            except Exception:
+                failures.append(
+                    "a dataset with records rendered no table rows. The page said: "
+                    + repr((await page.inner_text("main"))[-200:]))
             await page.wait_for_timeout(700)
             has_table = await page.evaluate("!!document.querySelector('table')")
             has_inspector = await page.evaluate("!!document.querySelector('[aria-label=\"Inspector\"]')")
@@ -169,18 +212,38 @@ async def main() -> int:
                 insp_text = await page.inner_text('[aria-label="Inspector"]')
                 print(f"  record inspector   : {bool(insp_text)}")
 
-                expander = await page.query_selector(
-                    'aside[aria-label="Inspector"] button[aria-expanded]'
-                )
-                if not expander:
+                # Expand fields until one reveals its quote.
+                #
+                # Tries several rather than the first. Which field comes first is
+                # a property of the dataset, and an absent or unverified field
+                # has no quote to reveal — so asserting on the first one tested
+                # the schema, not the evidence, and failed on any dataset that
+                # opens with a gap. The claim worth checking is that a field
+                # *with* provenance can show it.
+                expanders = await page.query_selector_all(
+                    'aside[aria-label="Inspector"] button[aria-expanded]')
+                if not expanders:
                     failures.append("no expandable field in the record inspector")
                     has_quote = False
+                    has_page = False
                 else:
-                    await expander.click()
-                    await page.wait_for_timeout(500)
-                    insp_text = await page.inner_text('[aria-label="Inspector"]')
-                    has_quote = "“" in insp_text
-                    has_page = "page " in insp_text.lower()
+                    has_quote = has_page = False
+                    for exp in expanders[:6]:
+                        if await exp.get_attribute("aria-expanded") == "true":
+                            await exp.click()
+                        else:
+                            await exp.click()
+                        await page.wait_for_timeout(350)
+                        insp_text = await page.inner_text('[aria-label="Inspector"]')
+                        if "“" in insp_text and "page " in insp_text.lower():
+                            has_quote = has_page = True
+                            break
+                        # Collapse again so the next attempt starts clean.
+                        try:
+                            await exp.click()
+                            await page.wait_for_timeout(150)
+                        except Exception:
+                            break
 
                 print(f"  expands to quote   : {has_quote}")
                 print(f"  cites stored page  : {has_page}")
@@ -211,9 +274,6 @@ async def main() -> int:
                     failures.append("sources tab did not render its summary")
             except Exception as e:
                 failures.append(f"could not open sources tab: {e}")
-        else:
-            print("  (no dataset links - library empty, skipping dataset checks)")
-            failures.append("library rendered no dataset links despite 10 datasets in the API")
 
         # Mobile viewport
         console.clear()

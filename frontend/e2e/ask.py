@@ -47,6 +47,43 @@ def a_dataset_with_pages() -> dict:
     return items[0] if items else {}
 
 
+def a_column_with_values(dataset_id: str) -> str:
+    """A field name that actually has at least two distinct values in this dataset.
+
+    The chart check used to ask "which industry appears most often?" against
+    whatever dataset happened to be first, and a chart of a count is a legitimate
+    outcome — but a *group-by* of a column that is empty on every record returns
+    no rows, and then the suite reported that chart rendering was broken on a
+    dataset whose `industry` was simply blank throughout.
+
+    So the question is asked about a column this dataset really populates. The
+    subject under test is whether a result gets charted, not whether a particular
+    column happens to be filled.
+    """
+    with urllib.request.urlopen(
+            f"{API}/api/datasets/{dataset_id}/records?limit=200&offset=0", timeout=120) as r:
+        data = json.loads(r.read().decode("utf-8"))["data"] or {}
+    rows = data.get("records") or []
+    best, best_distinct = "", 0
+    for rec in rows:
+        for name, cell in (rec.get("fields") or {}).items():
+            v = cell.get("value") if isinstance(cell, dict) else cell
+            if v in (None, "") or str(v).strip() == "":
+                continue
+            key = str(v).strip().casefold()
+            # Distinctness is approximated per field with a small set; enough to
+            # tell a populated categorical field from a constant or empty one.
+            bucket = _distinct.setdefault((dataset_id, name), set())
+            if len(bucket) < 40:
+                bucket.add(key)
+            if len(bucket) > best_distinct:
+                best, best_distinct = name, len(bucket)
+    return best
+
+
+_distinct: dict = {}
+
+
 def main() -> int:
     ds = a_dataset_with_pages()
     if not ds:
@@ -91,8 +128,14 @@ def main() -> int:
         if "never writes to a dataset on its own" not in body:
             fails.append("the Ask panel did not state that a model cannot write")
 
-        # A real question, through the real endpoint, into the real table.
-        page.fill("input[aria-label='Question for this dataset']", "which industry appears most often?")
+        # A real question, through the real endpoint, into the real table. Asked
+        # about a column this dataset really populates — see a_column_with_values.
+        column = a_column_with_values(did)
+        print(f"  asking about       : {column or '(no populated column found)'}")
+        if not column:
+            fails.append("no dataset column has values, so there is nothing to chart")
+        page.fill("input[aria-label='Question for this dataset']",
+                  f"which {column} appears most often?" if column else "list the records")
         page.locator("button", has_text=re.compile("^Ask$")).last.click()
         try:
             # Wait for the SQL it actually wrote, not for the word "SQL" — which

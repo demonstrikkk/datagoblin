@@ -11,21 +11,28 @@ os.makedirs(OUT, exist_ok=True)
 
 
 def _discover_dataset() -> str:
-    """The newest dataset, found at run time.
+    """The dataset with the most stored records, found at run time.
 
-    This was a hardcoded id. It worked until that dataset was deleted,
-    and then the suite failed for a reason that had nothing to do with the
-    code under test. A test that breaks when unrelated data changes is not
-    testing anything.
+    This was a hardcoded id. It worked until that dataset was deleted, and then
+    the suite failed for a reason that had nothing to do with the code under
+    test. A test that breaks when unrelated data changes is not testing anything.
+
+    It was then the *newest* dataset, which has the same problem from the other
+    end: the library sorts newest first, and a run that ends with zero records
+    — a provider auth failure produces exactly that — puts an empty dataset on
+    top. This suite then waited for table rows that cannot exist and reported the
+    app as broken. "Newest" was standing in for "has data"; it now says so.
     """
     import json as _json
     import urllib.request as _u
     api = os.environ.get("DG_API_URL", "http://127.0.0.1:8000")
     with _u.urlopen(f"{api}/api/datasets", timeout=60) as r:
         items = _json.loads(r.read().decode("utf-8"))["data"] or []
-    if not items:
-        raise SystemExit("no datasets exist; run a collection first")
-    return items[0]["id"]
+    with_records = [d for d in items if (d.get("record_count") or 0) > 0]
+    if not with_records:
+        raise SystemExit(
+            "no dataset with stored records exists; run a collection first")
+    return max(with_records, key=lambda d: d.get("record_count") or 0)["id"]
 
 import sys
 
@@ -58,15 +65,37 @@ async def main():
         print("  has 'page ' ref :", "page " in before)
         print("  has quote marks :", "“" in before)
 
-        # click the first field row (the FOUNDERS row button)
-        field_btn = await p.query_selector('aside[aria-label="Inspector"] button[aria-expanded]')
-        if field_btn:
-            await field_btn.click()
-            await p.wait_for_timeout(600)
-            after = await p.inner_text('aside[aria-label="Inspector"]')
-            has_quote = "“" in after
-            has_page = "page " in after
-            has_host = "failory.com" in after or ".com" in after
+        # Try fields until one reveals its quote.
+        #
+        # This used to click the first expander and called it "the FOUNDERS row",
+        # which is a property of one dataset's schema rather than a fact about
+        # the inspector. Any dataset whose first field is empty has nothing to
+        # reveal, and the suite then reported a broken evidence chain on a page
+        # that was correct. The claim worth checking is that a field *with*
+        # provenance can show it, so several are tried before giving up.
+        expanders = await p.query_selector_all(
+            'aside[aria-label="Inspector"] button[aria-expanded]')
+        # `after` is printed below, so it has to exist even on the path where
+        # there is nothing to expand.
+        after = before
+        if not expanders:
+            has_quote = has_page = has_host = False
+            fails.append("no expandable field in the record inspector")
+        else:
+            has_quote = has_page = has_host = False
+            for btn in expanders[:6]:
+                await btn.click()
+                await p.wait_for_timeout(400)
+                after = await p.inner_text('aside[aria-label="Inspector"]')
+                if "“" in after and "page " in after:
+                    has_quote = has_page = True
+                    has_host = ".com" in after
+                    break
+                try:
+                    await btn.click()      # collapse, so the next try is clean
+                    await p.wait_for_timeout(150)
+                except Exception:
+                    break
             print("\n=== after expanding a field ===")
             print("  quote revealed  :", has_quote)
             print("  page id shown   :", has_page)
@@ -79,8 +108,6 @@ async def main():
             print("\n  --- expanded excerpt ---")
             for line in [l for l in after.splitlines() if l.strip()][8:26]:
                 print(f"    {line[:120]}")
-        else:
-            fails.append("no expandable field button in inspector")
 
         # --- sources tab ---
         print("\n=== sources tab ===")

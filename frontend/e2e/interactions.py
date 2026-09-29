@@ -5,9 +5,32 @@ panel is opened, so a suite that never expands a panel cannot find it. This
 clicks every disclosure control, toggles every switch, and drives both dialogs.
 """
 import asyncio
+import json
 import os
-
+import urllib.request
 BASE = os.environ.get("DG_BASE_URL", "http://localhost:4173")
+API = os.environ.get("DG_API_URL", "http://127.0.0.1:8000")
+
+
+async def _dataset_with_records():
+    """The dataset with the most stored records, or None.
+
+    Same reason as in smoke.py: a literal id stops working when that dataset is
+    deleted, and "the first card" stops working the day a run produces an empty
+    dataset.
+    """
+    def _fetch():
+        with urllib.request.urlopen(f"{API}/api/datasets", timeout=60) as fh:
+            return json.loads(fh.read().decode("utf-8"))["data"] or []
+
+    try:
+        rows = await asyncio.to_thread(_fetch)
+    except Exception:
+        return None
+    rows = [r for r in rows if (r.get("record_count") or 0) > 0]
+    if not rows:
+        return None
+    return "/library/" + max(rows, key=lambda r: r.get("record_count") or 0)["id"]
 OUT = os.environ.get(
     "DG_SHOT_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "screenshots"),
@@ -146,9 +169,18 @@ async def main() -> int:
         clicked: set[str] = set()
         errs.clear()
         await p.goto(f"{BASE}/library", wait_until="domcontentloaded")
-        await p.wait_for_selector("a[href^='/library/']", timeout=20000)
-        link = await p.query_selector("a[href^='/library/']")
-        await link.click()
+        # Opened by record count from the API, not by clicking the first card.
+        # The library sorts newest first, and a run that ends with zero records
+        # — a provider auth failure produces exactly that — leaves an empty
+        # dataset at the top, so this waited 45s for table rows that cannot
+        # exist and reported the app as broken. An empty dataset is a
+        # legitimate state; a test that assumes otherwise tests sort order.
+        target = await _dataset_with_records()
+        if not target:
+            fails.append("no dataset with stored records exists to open")
+            await b.close()
+            return 1
+        await p.goto(f"{BASE}{target}", wait_until="domcontentloaded")
         await p.wait_for_selector("table tbody tr", timeout=45000)
         # Wait for the filter counts to hold real numbers before clicking any of
         # them. The row renders as soon as the panel mounts and is replaced when

@@ -31,16 +31,27 @@ async def main():
         await p.route(OFFLINE_FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
 
         await p.goto(f"{BASE}/", wait_until="networkidle")
-        await p.wait_for_timeout(2500)
 
         # Is the WebGL field actually drawing, or is the canvas blank?
-        stats = await p.evaluate(
-            """() => {
+        #
+        # Polled rather than sampled once after a sleep. "Is the shader drawing?"
+        # is a question about whether it *ever* draws, and a single read at an
+        # arbitrary 2.5s answers a different question — whether it had drawn by
+        # 2.5s. Under a full e2e chain that reported a flat canvas twice on a
+        # machine where the shader was working fine, which is a test reporting a
+        # product bug that did not exist.
+        #
+        # Reading the pixels back needs a live GL context, so it is polled until
+        # something is drawn or the budget runs out. `range` is the channel
+        # spread: a uniform buffer is a flat range, and 3 is the floor below
+        # which "drawing" and "a solid fill" are indistinguishable.
+        READ = """() => {
               const c = document.querySelector('canvas.field-canvas');
               if (!c) return {ok:false, why:'no canvas'};
               const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
               if (!gl) return {ok:false, why:'no gl context (css fallback active)'};
               const w = c.width, h = c.height;
+              if (!w || !h) return {ok:false, why:'canvas has no size yet'};
               const px = new Uint8Array(w*h*4);
               gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px);
               let min=[255,255,255], max=[0,0,0], sum=[0,0,0], n=0;
@@ -56,13 +67,25 @@ async def main():
                       mean: sum.map(s=>Math.round(s/n)),
                       range: max.map((m,k)=>m-min[k])};
             }"""
-        )
+
+        stats = {"ok": False, "why": "never sampled"}
+        drew = False
+        for _ in range(20):
+            await p.wait_for_timeout(500)
+            stats = await p.evaluate(READ)
+            if not stats.get("ok"):
+                continue
+            if max(stats["range"]) >= 3:
+                drew = True
+                break
         print("=== WebGL field ===")
         print(" ", stats)
         if stats.get("ok"):
             r = stats["range"]
-            if max(r) < 3:
-                fails.append(f"shader canvas is flat (range {r}) - nothing is being drawn")
+            if not drew:
+                fails.append(
+                    f"shader canvas never drew (range {r} after 10s) - nothing is "
+                    f"being rendered")
             else:
                 print(f"  -> drawing, channel spread {r} (paper base with tinted field)")
         else:
