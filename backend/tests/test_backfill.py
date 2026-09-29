@@ -379,3 +379,66 @@ def test_an_empty_new_value_is_not_written(monkeypatch):
     out = _run(bf.run(store, "d1", llm=_llm, apply=True))
     assert store.written == []
     assert out["fillable"] == 0
+
+
+# --- which pages get re-read ------------------------------------------------
+def test_pages_are_chosen_for_mentioning_the_records_not_for_recency():
+    """Ordering decides whether a backfill does anything.
+
+    Taking the newest N pages picked a travel site for a dataset of companies:
+    every page was read successfully and none of them described the entities in
+    the records, so the run matched almost nothing and filled nothing at the
+    full cost of the calls.
+    """
+    recs = [_rec("1", name=_cell("Northwind Traders"))]
+    pages = [
+        {"id": "new", "url": "https://travel.example/", "markdown": "hotels and flights",
+         "raw_html": "h", "retrieved_at": "2026-09-30T00:00:00Z"},
+        {"id": "old", "url": "https://x.example/companies",
+         "markdown": "A list including Northwind Traders and Globex",
+         "raw_html": "h", "retrieved_at": "2026-09-01T00:00:00Z"},
+    ]
+
+    class S(_Store):
+        def get_pages(self, run_id, limit=50):
+            return pages
+
+        def get_page(self, pid):
+            return next((x for x in pages if x["id"] == pid), None)
+
+    got = bf._candidate_pages(S(), "r1", 1, recs, ["name"])
+    assert got[0]["id"] == "old", "the newest page won despite naming nothing"
+
+
+def test_page_scoring_falls_back_to_order_when_there_is_nothing_to_match():
+    pages = [{"id": "a", "url": "u1", "markdown": "x", "raw_html": "h"}]
+
+    class S(_Store):
+        def get_pages(self, run_id, limit=50):
+            return pages
+
+        def get_page(self, pid):
+            return pages[0]
+
+    got = bf._candidate_pages(S(), "r1", 1, [], [])
+    assert len(got) == 1
+
+
+def test_very_short_names_are_not_used_as_needles():
+    """A one or two character name appears on most pages, so scoring against
+    it would rank pages essentially at random."""
+    recs = [_rec("1", name=_cell("X")), _rec("2", name=_cell("AB"))]
+    assert bf._identity_needles(recs, ["name"]) == []
+    recs = [_rec("3", name=_cell("Globex"))]
+    assert bf._identity_needles(recs, ["name"]) == ["globex"]
+
+
+def test_a_non_string_identity_value_is_skipped_rather_than_coerced():
+    recs = [_rec("1", name=_cell(12345)), _rec("2", name=_cell("Globex"))]
+    assert bf._identity_needles(recs, ["name"]) == ["globex"]
+
+
+def test_punctuation_in_a_name_does_not_break_needle_matching():
+    recs = [_rec("1", name=_cell("Hewlett-Packard, Inc."))]
+    needles = bf._identity_needles(recs, ["name"])
+    assert needles == ["hewlett packard inc"]

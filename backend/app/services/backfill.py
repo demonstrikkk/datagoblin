@@ -28,6 +28,7 @@ Three rules make it safe to run against real data:
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from app.services import coverage as coverage_svc
@@ -57,20 +58,48 @@ def plan_for_dataset(store, dataset_id: str) -> dict:
     on the dataset — only the fields are. It is recovered the same way the run
     did, by walking dataset -> run -> workflow, so a backfill cannot invent a
     key set that does not match how the rows were actually deduplicated.
+
+    Read through the dataset's own row, not `get_dataset`. The latter attaches
+    every record to its result, so asking it for a run id pulled the whole
+    dataset over the wire to read two strings — measured at 15.7s for a
+    proposal on a 77-record dataset, most of it fetching rows nobody looked at.
     """
-    ds = store.get_dataset(dataset_id)
-    if not ds:
+    row = _dataset_row(store, dataset_id)
+    if not row:
         raise BackfillRefused("unknown dataset")
-    run_id = ds.get("run_id", "")
+    run_id = str(row.get("run_id") or "")
     if not run_id:
         raise BackfillRefused("dataset has no run, so its plan cannot be recovered")
     run = store.get_run(run_id)
     if not run:
-        raise BackfillRefused(f"run {run_id} is gone, so the plan cannot be recovered")
+        # A different situation from the one above, and a different fix: this
+        # dataset was produced by a run that no longer exists.
+        raise BackfillRefused(
+            "the run behind this dataset is gone, so its plan cannot be recovered")
     plan = store.get_plan(run.get("workflow_id", ""))
     if not plan:
         raise BackfillRefused("the plan behind this run is not stored")
     return plan
+
+
+def _dataset_row(store, dataset_id: str) -> dict:
+    """The dataset's own columns, without its records.
+
+    Prefers the adapter's cheap row read and falls back to `get_dataset`, which
+    is correct but pulls every record to answer the question. The fallback
+    exists so an older or partial adapter still works rather than raising an
+    AttributeError in the middle of a request.
+    """
+    lister = getattr(store, "get_dataset_row", None)
+    if callable(lister):
+        row = lister(dataset_id)
+        if row is not None:
+            return row
+    return store.get_dataset(dataset_id) or {}
+
+
+def _run_id_for(store, dataset_id: str) -> str:
+    return str(_dataset_row(store, dataset_id).get("run_id", "") or "")
 
 
 def _plain(fields: dict) -> dict:
@@ -88,8 +117,22 @@ def absent_fields(coverage: dict, requested: list[str] | None = None) -> list[st
     return names
 
 
-def _candidate_pages(store, run_id: str, limit: int) -> list[dict]:
-    """Stored pages worth re-reading, biggest evidence first.
+def _candidate_pages(store, run_id: str, limit: int,
+                    records: list[dict] | None = None,
+                    keys: list[str] | None = None) -> list[dict]:
+    """Stored pages worth re-reading, most likely to describe the records first.
+
+    Ordering matters more than it looks. Taking the newest N pages picked
+    booking.com and kayak.com for a dataset of companies, and a dry run then
+    matched 1 record out of 5 and filled nothing — every page had been read
+    successfully and none of them described the entities in the dataset. The
+    cost was real; the result was zero.
+
+    So the pages are scored by how many of the dataset's own identifying values
+    their stored text actually mentions. A page that names fifty of the
+    companies in the records is worth re-reading; a page that names none is not,
+    however recently it was fetched. Falls back to recency when there is
+    nothing to match on.
 
     Full page rows, because extraction needs the DOM for the deterministic
     selector path and the markdown for the evidence text. `get_pages` omits
@@ -102,9 +145,44 @@ def _candidate_pages(store, run_id: str, limit: int) -> list[dict]:
         full = store.get_page(row["id"])
         if full and (full.get("markdown") or full.get("raw_html")):
             pages.append(full)
-        if len(pages) >= limit:
-            break
+
+    needles = _identity_needles(records or [], keys or [])
+    if needles and pages:
+        for page in pages:
+            body = f"{page.get('markdown', '')} {page.get('raw_html', '')}".lower()
+            page["_match_hits"] = sum(1 for n in needles if n in body)
+        pages.sort(key=lambda p: -p["_match_hits"])
+        pages = pages[:limit] or pages[:1]
+    else:
+        pages = pages[:limit]
     return pages
+
+
+def _identity_needles(records: list[dict], keys: list[str]) -> list[str]:
+    """The identifying values to look for in a page's text.
+
+    Long enough to be distinctive. A one-character or very short name would
+    match most pages and make the score meaningless — which is why they are
+    skipped rather than truncated into uselessness.
+    """
+    if not keys:
+        keys = ["company_name"]
+    out: set[str] = set()
+    for rec in records:
+        plain = _plain(rec.get("fields", {}))
+        for k in keys:
+            v = plain.get(k)
+            if not isinstance(v, str):
+                continue
+            # Punctuation becomes a space, then runs of spaces collapse. Without
+            # the collapse, "Hewlett-Packard, Inc." produced
+            # "hewlett packard  inc" with a double space — a needle that could
+            # never appear in any page, so the page scored zero and was ranked
+            # as if it named nothing.
+            t = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", v.lower())).strip()
+            if len(t) >= 4:
+                out.add(t)
+    return sorted(out)
 
 
 def propose(store, dataset_id: str, fields: list[str] | None = None,
@@ -116,10 +194,10 @@ def propose(store, dataset_id: str, fields: list[str] | None = None,
     to do it.
     """
     plan = plan_for_dataset(store, dataset_id)
-    ds = store.get_dataset(dataset_id) or {}
+    ds = _dataset_row(store, dataset_id)
     records = (store.get_records(dataset_id, "", 1000, 0) or {}).get("records", [])
     matrix = coverage_svc.field_coverage(
-        records, ds.get("schema", ds.get("schema_json", [])) or plan.get("fields", []))
+        records, ds.get("schema") or plan.get("fields", []))
     targets = absent_fields(matrix, fields)
     if not targets:
         return {"dataset_id": dataset_id, "fields": [], "backfillable": False,
@@ -131,7 +209,8 @@ def propose(store, dataset_id: str, fields: list[str] | None = None,
     # identity to be matched on, and the whole operation would find nothing it
     # could safely attach to anything.
     extract_fields = sorted(set(targets) | set(keys))
-    pages = _candidate_pages(store, ds.get("run_id", ""), max(1, int(limit_pages)))
+    pages = _candidate_pages(store, ds.get("run_id", ""), max(1, int(limit_pages)),
+                             records, keys)
     if not pages:
         return {"dataset_id": dataset_id, "fields": targets, "backfillable": False,
                 "reason": "this run stored no readable pages, so there is nothing to re-read",
@@ -180,7 +259,7 @@ async def run(store, dataset_id: str, fields: list[str] | None = None, *,
     kind of thing that should not be discovered by a write.
     """
     plan = plan_for_dataset(store, dataset_id)
-    ds = store.get_dataset(dataset_id) or {}
+    ds = _dataset_row(store, dataset_id)
     run_id = ds.get("run_id", "")
     records = (store.get_records(dataset_id, "", 1000, 0) or {}).get("records", [])
     matrix = coverage_svc.field_coverage(
@@ -213,7 +292,7 @@ async def run(store, dataset_id: str, fields: list[str] | None = None, *,
     if not extract_specs:
         raise BackfillRefused("the plan's schema does not describe the requested fields")
 
-    pages = _candidate_pages(store, run_id, max(1, int(limit_pages)))
+    pages = _candidate_pages(store, run_id, max(1, int(limit_pages)), records, keys)
     if not pages:
         raise BackfillRefused("this run stored no readable pages to re-read")
 

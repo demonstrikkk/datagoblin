@@ -121,7 +121,24 @@ class PostgresRepo:
                         # the row factory must be set when the pooled
                         # connections are created, or reads come back as tuples.
                         kwargs={"connect_timeout": self._connect_timeout,
-                                "row_factory": dict_row})
+                                "row_factory": dict_row,
+                                # Required for a transaction-mode pooler.
+                                # psycopg auto-prepares a statement once it has
+                                # run twice on a connection and then issues
+                                # EXECUTE, which needs a session-scoped
+                                # prepared statement. PgBouncer in transaction
+                                # mode hands the same backend to different
+                                # clients, so one client's prepared statement
+                                # collides with another's and the query fails
+                                # with `DuplicatePreparedStatement: prepared
+                                # statement "_pg3_0" already exists`. That
+                                # surfaced as intermittent 503s reading pages,
+                                # and it is not a race — it recurs on any pool
+                                # that serves more than one caller.
+                                # prepare_threshold=None turns the cache off.
+                                # The cost is a re-parse per execution; the
+                                # alternative is an unstable connection.
+                                "prepare_threshold": None})
                 except Exception as e:  # noqa: BLE001 (mapped to a typed error)
                     raise dependency(f"Postgres pool open failed: {str(e)[:200]}")
         return self._pool
@@ -408,6 +425,20 @@ class PostgresRepo:
                           """SELECT id,run_id,name,record_count,created_at
                              FROM datasets ORDER BY created_at DESC LIMIT %s""",
                           (max(1, min(int(limit), 100)),))
+
+    def get_dataset_row(self, dataset_id: str) -> dict | None:
+        """The dataset's own columns, with no records attached.
+
+        `get_dataset` pulls every record, so asking it for a run id or a schema
+        cost a full table read. This is the same row without that.
+        """
+        rows = self._rows("get_dataset_row",
+                          "SELECT id,run_id,name,schema_json,record_count,created_at"
+                          " FROM datasets WHERE id=%s", (dataset_id,))
+        if not rows:
+            return None
+        rows[0]["schema"] = rows[0].pop("schema_json", None) or []
+        return rows[0]
 
     def get_dataset(self, dataset_id: str) -> dict | None:
         rows = self._rows("get_dataset", "SELECT * FROM datasets WHERE id=%s",

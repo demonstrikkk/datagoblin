@@ -492,17 +492,32 @@ async def list_datasets(cid: str = Depends(correlation_id)) -> dict:
 
 
 @app.get("/api/datasets/{did}", dependencies=[Depends(require_api_key)])
-async def get_dataset(did: str, cid: str = Depends(correlation_id)) -> dict:
-    ds = await asyncio.to_thread(repo().get_dataset, did)
+async def get_dataset(did: str, include_records: bool = False,
+                       cid: str = Depends(correlation_id)) -> dict:
+    """The dataset's own columns, and its records only when asked for.
+
+    `records` used to be attached unconditionally, which meant this endpoint
+    shipped the entire dataset — measured at 402 kB and 3.3 s for 56 records —
+    while the page separately asked `/records` for the same rows and got
+    another 400 kB. Every dataset page load transferred its data twice over a
+    remote database, and the payload grew with the dataset.
+
+    `get_dataset` in the repository still attaches records, because callers
+    inside the pipeline want the whole thing; this route simply stops shipping
+    them by default. `?include_records=true` brings the old shape back.
+    """
+    ds = await asyncio.to_thread(repo().get_dataset_row, did)
     if not ds:
         raise not_found("dataset", did)
     view = DatasetView(id=ds.get("id", did), run_id=ds.get("run_id", ""),
                        name=ds.get("name", ""),
                        schema=ds.get("schema", ds.get("schema_json", [])),
-                       record_count=ds.get("record_count", len(ds.get("records", []))),
+                       record_count=ds.get("record_count", 0),
                        counts=ds.get("counts", {}),
                        created_at=ds.get("created_at", "")).model_dump(by_alias=True)
-    view["records"] = ds.get("records", [])
+    if include_records:
+        full = await asyncio.to_thread(repo().get_dataset, did)
+        view["records"] = (full or {}).get("records", [])
     return {"data": view, "error": None, "meta": {"correlation_id": cid}}
 
 

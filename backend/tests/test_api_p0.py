@@ -68,7 +68,11 @@ def test_full_path_offline(client):
     hist = client.get("/api/history").json()["data"]
     assert any(h.get("id") == run_id or h.get("run_id") == run_id for h in hist)
 
-    ds = client.get(f"/api/datasets/{st['dataset_id']}").json()["data"]
+    # Records are opt-in: the page fetches them from /records, and shipping
+    # the whole dataset here as well doubled every dataset page load.
+    lean = client.get(f"/api/datasets/{st['dataset_id']}").json()["data"]
+    assert "records" not in lean
+    ds = client.get(f"/api/datasets/{st['dataset_id']}?include_records=true").json()["data"]
     assert ds["id"] == st["dataset_id"] and ds["records"] == []
 
     recs = client.get(f"/api/datasets/{st['dataset_id']}/records").json()["data"]
@@ -91,7 +95,7 @@ def test_read_export_path_with_real_row(client):
         {"attempted": 1, "successful": 1, "failed": 0, "skipped": 0,
          "records": 1, "verified": 1, "needs_review": 0})
 
-    ds = client.get(f"/api/datasets/{did}").json()["data"]
+    ds = client.get(f"/api/datasets/{did}?include_records=true").json()["data"]
     assert len(ds["records"]) == 1
     assert ds["records"][0]["fields"]["company_name"]["value"] == "Acme AI"
 

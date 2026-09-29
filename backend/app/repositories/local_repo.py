@@ -190,6 +190,17 @@ class LocalRepo:
                                "This instance runs on the local JSONL adapter "
                                "(PERSISTENCE=local), which has no query engine.")
 
+    def get_dataset_row(self, dataset_id: str) -> dict | None:
+        """The dataset's own columns, with no records attached. See PostgresRepo."""
+        found = None
+        for d in self._scan("datasets"):
+            if d.get("id") == dataset_id:
+                found = {"id": d["id"], "run_id": d.get("run_id", ""),
+                         "name": d.get("name", ""), "schema": d.get("schema", []),
+                         "record_count": len(d.get("records", [])),
+                         "created_at": d.get("_ts", "")}
+        return found
+
     def get_dataset_schema(self, dataset_id: str) -> list | None:
         """Just the declared schema — no record copy. See PostgresRepo."""
         for d in self._scan("datasets"):
