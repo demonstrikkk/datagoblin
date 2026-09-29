@@ -43,7 +43,7 @@ function Cell({ prov }) {
 
   const text =
     raw === null || raw === undefined || raw === ''
-      ? 'â€”'
+      ? '—'
       : typeof raw === 'object'
       ? Array.isArray(raw)
         ? raw.join(', ')
@@ -57,7 +57,7 @@ function Cell({ prov }) {
         title={m?.hint || 'No judge assessment for this field'}
         aria-hidden="true"
       >
-        {m ? m.glyph : 'Â·'}
+        {m ? m.glyph : '·'}
       </span>
       <span className="sr-only">{m ? m.label : 'unjudged'}: </span>
       <span className="truncate" title={text}>
@@ -86,7 +86,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
     [datasetId, page, debounced]
   );
 
-  // The endpoint returns `{dataset_id, total, records}` â€” not a bare array.
+  // The endpoint returns `{dataset_id, total, records}` — not a bare array.
   // `total` is the whole dataset, which is what makes real pagination possible.
   const rows = useMemo(() => data?.records || [], [data]);
   const total = data?.total ?? 0;
@@ -124,7 +124,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
   const shown = useMemo(() => {
     if (statusFilter === 'all') return rows;
-    // Status filters run over the current page only â€” the API filters on `q`,
+    // Status filters run over the current page only — the API filters on `q`,
     // not on verification status, so claiming a dataset-wide count here would
     // be a lie. The footer says "filtered to N on this page" for that reason.
     if (statusFilter === 'proven')
@@ -157,7 +157,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search recordsâ€¦"
+            placeholder="Search records…"
             aria-label="Search records"
             className="input-sm input w-44"
           />
@@ -255,12 +255,12 @@ function RecordsTable({ datasetId, schema, onPick }) {
 
             <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-rule px-3.5 py-2">
               <span className="text-[11px] text-muted">
-                {isStale ? 'refreshingâ€¦ Â· ' : ''}
-                showing {(page * PAGE + 1).toLocaleString()}â€“
+                {isStale ? 'refreshing… · ' : ''}
+                showing {(page * PAGE + 1).toLocaleString()}–
                 {(page * PAGE + rows.length).toLocaleString()} of{' '}
                 <span className="font-mono tnum text-ink-2">{total.toLocaleString()}</span>
                 {statusFilter !== 'all' ? (
-                  <span className="text-warn"> Â· filtered to {shown.length} on this page</span>
+                  <span className="text-warn"> · filtered to {shown.length} on this page</span>
                 ) : null}
               </span>
               <div className="flex items-center gap-1">
@@ -550,7 +550,7 @@ function SelectorLearner({ runId, neverExtracted }) {
             extracted.{' '}
             {domain
               ? `Proposed CSS is checked against a stored ${domain} page and only offered if it returns real text.`
-              : 'No stored page to learn from â€” run a collection first.'}
+              : 'No stored page to learn from — run a collection first.'}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -560,7 +560,7 @@ function SelectorLearner({ runId, neverExtracted }) {
             disabled={!page || busy}
             onClick={propose}
           >
-            {busy ? 'Workingâ€¦' : 'Propose selectors'}
+            {busy ? 'Working…' : 'Propose selectors'}
           </button>
         </div>
       </div>
@@ -577,7 +577,7 @@ function SelectorLearner({ runId, neverExtracted }) {
         <div className="space-y-2 rounded-lg border border-rule-2/60 p-3">
           <div className="text-xs text-muted">
             {Object.keys(draft.fields || {}).length} of {neverExtracted.length} verified
-            against {draft.page_url} Â· via {draft.provider}
+            against {draft.page_url} · via {draft.provider}
           </div>
           {Object.entries(draft.fields || {}).map(([name, spec]) => (
             <div key={name} className="border-b border-rule-2/40 py-1.5 last:border-0">
@@ -588,7 +588,7 @@ function SelectorLearner({ runId, neverExtracted }) {
               <code className="mt-1 block text-xs text-muted">{spec.selectors.join(' , ')}</code>
               <div className="mt-1 text-xs">
                 yields:{' '}
-                <span className="text-ink">{Object.values(spec.samples || {})[0] || 'â€”'}</span>
+                <span className="text-ink">{Object.values(spec.samples || {})[0] || '—'}</span>
               </div>
             </div>
           ))}
@@ -668,7 +668,7 @@ function CoveragePanel({ datasetId, runId }) {
         <div className="flex items-baseline justify-between">
           <h3 className="text-sm font-medium">Per-field coverage</h3>
           <span className="text-xs text-muted">
-            Present is not the same as proven â€” the darker slice is values carrying a verdict.
+            Present is not the same as proven — the darker slice is values carrying a verdict.
           </span>
         </div>
         {fields.map((f) => (
@@ -812,7 +812,7 @@ function ConflictsPanel({ datasetId }) {
       ) : (
         <p className="text-xs text-muted">
           {live.length} open. Each side quotes the page it came from. Keeping the
-          incumbent or adopting a rival both preserve evidence â€” there is no way
+          incumbent or adopting a rival both preserve evidence — there is no way
           to type in a value that was never extracted.
         </p>
       )}
@@ -834,7 +834,7 @@ function ConflictsPanel({ datasetId }) {
             </div>
             {done ? (
               <Notice tone="ok">
-                Resolved â€” {outcome}.
+                Resolved — {outcome}.
               </Notice>
             ) : null}
             <div className="rounded-md border border-warn/40 bg-warn/5 p-2">
@@ -842,7 +842,7 @@ function ConflictsPanel({ datasetId }) {
               <div className="truncate text-sm" title={String(c.incumbent.value ?? '')}>{truncate(String(c.incumbent.value ?? '-'), 220)}</div>
               {c.incumbent.quote ? (
                 <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
-                  â€œ{c.incumbent.quote}â€
+                  “{c.incumbent.quote}”
                 </div>
               ) : null}
               <div className="mt-2">
@@ -860,12 +860,12 @@ function ConflictsPanel({ datasetId }) {
               <div key={rv.index} className="rounded-md border border-rule-2/60 p-2">
                 <div className="text-xs uppercase tracking-wide text-muted">
                   rival {rv.index + 1}
-                  {rv.url ? ` Â· ${host(rv.url)}` : ''}
+                  {rv.url ? ` · ${host(rv.url)}` : ''}
                 </div>
                 <div className="truncate text-sm" title={String(rv.value ?? '')}>{truncate(String(rv.value ?? '-'), 220)}</div>
                 {rv.quote ? (
                   <div className="mt-1 border-l-2 border-rule-2 pl-2 text-xs text-muted">
-                    â€œ{rv.quote}â€
+                    “{rv.quote}”
                   </div>
                 ) : null}
                 <div className="mt-2">
@@ -1575,9 +1575,9 @@ function ExportPanel({ datasetId, schema }) {
               value={format}
               onChange={(e) => setFormat(e.target.value)}
               options={[
-                { value: 'csv', label: 'CSV â€” spreadsheet ready' },
-                { value: 'md', label: 'Markdown â€” human readable' },
-                { value: 'json', label: 'JSON â€” full provenance' },
+                { value: 'csv', label: 'CSV — spreadsheet ready' },
+                { value: 'md', label: 'Markdown — human readable' },
+                { value: 'json', label: 'JSON — full provenance' },
               ]}
             />
           </label>
@@ -1588,7 +1588,7 @@ function ExportPanel({ datasetId, schema }) {
                 ? 'JSON always carries every field and its full evidence chain.'
                 : fields.length
                 ? `${fields.length} of ${schema?.length || 0} fields`
-                : 'None selected â€” the server will use its default set.'}
+                : 'None selected — the server will use its default set.'}
             </p>
           </div>
         </div>
@@ -1624,7 +1624,7 @@ function ExportPanel({ datasetId, schema }) {
           <button type="button" onClick={go} disabled={busy} className="btn-accent">
             {busy ? (
               <>
-                <Spinner /> Exportingâ€¦
+                <Spinner /> Exporting…
               </>
             ) : (
               `Download ${format.toUpperCase()}`
@@ -1754,7 +1754,7 @@ export default function DatasetPage() {
           )}
           <Stat
             label="Schema"
-            value={data.schema?.length ? num(data.schema.length) : 'â€”'}
+            value={data.schema?.length ? num(data.schema.length) : '—'}
             sub={data.schema?.length ? 'fields' : 'not persisted'}
           />
         </div>
@@ -1826,4 +1826,4 @@ export default function DatasetPage() {
   );
 }
 
-const pctSafe = (n) => (Number.isFinite(n) ? `${Math.round(n * 100)}%` : 'â€”');
+const pctSafe = (n) => (Number.isFinite(n) ? `${Math.round(n * 100)}%` : '—');

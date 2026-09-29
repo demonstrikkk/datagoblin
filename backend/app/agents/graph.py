@@ -115,6 +115,127 @@ async def search_node(state: dict, deps: Any) -> dict:
             "iteration": int(state.get("iteration", 0)) + 1}
 
 
+#: Words that mark a URL as editorial rather than a source of records. A
+#: listicle can match a query perfectly and still hold no entities: the run that
+#: produced "top 10 stocks in india share market" spent five of twelve pages on
+#: `/blogs/top-10-products-india-imports-from-the-usa` and similar. These are
+#: demoted, never dropped — the page may still be worth opening, and only the
+#: page budget is being rationed.
+_EDITORIAL_SLUGS = (
+    "blog", "blogs", "news", "article", "articles", "post", "posts", "guide",
+    "guides", "how-to", "howto", "tips", "review", "reviews", "best", "top-",
+    "imports", "exports", "quiz", "wiki", "forum", "reddit", "quora",
+)
+
+#: What a URL is *about* versus which words it happens to contain. The entity
+#: is the discriminator: "top 10" and "india" match a product-imports listicle
+#: as readily as an exchange's equity page, but the word "stock" is only in one
+#: of them.
+_ENTITY_BONUS = 3.0
+_FIELD_BONUS = 1.0
+_GENERIC_STOP = frozenset({
+    "the", "a", "an", "of", "in", "for", "and", "or", "to", "on", "at", "by",
+    "with", "from", "as", "is", "are", "top", "best", "list", "find", "all",
+    "india", "share", "market",
+})
+
+#: What a plan's entity is also called on the pages that have the data.
+#:
+#: Bounded and explicit on purpose. The entity is the strongest signal
+#: available, and a live run showed exactly how weak it is without this: the
+#: plan said "stock" and the pages that could answer it said "live equity
+#: market" and "equities", so the entity term matched nothing at all and the
+#: ranking fell back on goal words — where "india" is all a listicle about
+#: imports and a financial data provider have in common.
+#:
+#: A synonym is scored below an exact hit, so a page naming the entity itself
+#: still beats one that only uses a synonym for it.
+_ENTITY_SYNONYMS: dict[str, set[str]] = {
+    "stock": {"equity", "equities", "ticker", "listed", "nse", "bse", "nasdaq",
+              "shares", "shareprice"},
+    "share": {"stock", "equity", "equities"},
+    "company": {"firm", "business", "startup", "corporation", "corp", "inc",
+                "ltd", "llc", "organisation", "organization", "venture"},
+    "person": {"founder", "cofounder", "ceo", "cto", "executive", "director",
+               "who", "team"},
+    "funding": {"investment", "investor", "investors", "round", "raised",
+                "capital", "venture", "series"},
+    "revenue": {"sales", "turnover", "income", "earnings"},
+    "employee": {"headcount", "staff", "workforce", "team", "people"},
+    "product": {"offering", "item", "sku"},
+    "job": {"role", "position", "vacancy", "hiring"},
+    "price": {"cost", "rate", "fee", "pricing"},
+}
+
+#: A synonym is weaker evidence than the word the plan actually used.
+_SYNONYM_BONUS = 1.5
+
+#: A plural of the plan's own word is almost as good as the word. A plan whose
+#: entity is "stock" and a page whose title is "Stocks" are describing the same
+#: thing, and treating them as unrelated left the entity contributing nothing to
+#: the pages most likely to hold the answer. Weighted below the literal form so
+#: a page that says "stock" still wins.
+_PLURAL_BONUS = 2.0
+
+
+def _morphological(terms: set[str]) -> set[str]:
+    """Plural and singular forms of the plan's own words, and nothing else.
+
+    Deliberately not a stemmer. "Market" and "marketing" are not variants of one
+    another, and a general stemmer would claim they are; a single plural rule
+    covers the case that actually occurs without inventing equivalences.
+    """
+    out: set[str] = set()
+    for t in terms:
+        if len(t) > 3 and t.endswith("s"):
+            out.add(t[:-1])
+        elif len(t) > 2:
+            out.add(t + "s")
+    return out
+
+
+def _relevance_terms(text: Any, *, drop_generic: bool = False) -> set[str]:
+    words = re.findall(r"[a-z][a-z0-9_]+", str(text or "").lower())
+    if drop_generic:
+        return {w for w in words if w not in _GENERIC_STOP and len(w) > 2}
+    return {w for w in words if len(w) > 2}
+
+
+def _plan_relevance(candidate: dict, state: dict) -> float:
+    """How well one search result matches the plan. Higher is better.
+
+    Read from the URL and title only, and on purpose: this runs before anything
+    is fetched, so it is a cheap prior over candidates, not a judgement about the
+    page's contents. The Jev-A screen still runs on every candidate that survives
+    the cap — this only decides which candidates get the chance to be judged.
+    """
+    entity = _relevance_terms(state.get("entity", ""), drop_generic=True)
+    fields: set[str] = set()
+    for f in (state.get("fields") or []):
+        fields |= _relevance_terms(f.get("name") if isinstance(f, dict) else f,
+                                   drop_generic=True)
+    queries = " ".join(str(q) for q in (state.get("queries") or []))
+    goal_terms = _relevance_terms(queries or state.get("goal", ""))
+
+    hay = f"{candidate.get('url','')} {candidate.get('title','')}".lower()
+    words = _relevance_terms(hay)
+
+    score = 0.0
+    exact_entity = entity & words
+    variants = _morphological(entity)
+    synonyms: set[str] = set()
+    for w in entity:
+        synonyms |= _ENTITY_SYNONYMS.get(w, set())
+    score += _ENTITY_BONUS * len(exact_entity)
+    score += _PLURAL_BONUS * len((variants - entity) & words)
+    score += _SYNONYM_BONUS * len((synonyms - entity - variants) & words)
+    score += _FIELD_BONUS * len(fields & words)
+    score += 0.5 * len(goal_terms & words)
+    if any(s in hay for s in _EDITORIAL_SLUGS):
+        score -= 2.5
+    return score
+
+
 async def screen_node(state: dict, deps: Any) -> dict:
     """Robots gate, then Jev-A screen on unscreened candidates; triage attached.
 
@@ -164,6 +285,21 @@ async def screen_node(state: dict, deps: Any) -> dict:
                  extra={"data": {"count": len(blocked), "domains": hosts,
                                  "urls": [u[:200] for u in blocked[:10]]}})
     fresh = crawlable
+    # Order by how well each candidate matches the plan BEFORE the cap is
+    # applied, because the cap is what decides which pages get opened.
+    #
+    # Search order is not relevance order. A live run for "find top 10 stocks in
+    # india share market" opened twelve pages and five of them were
+    # indiahandmade.com, desiclik.com, qalara.com, ishopindian.com and a
+    # "top-10-products-india-imports-from-the-usa" listicle — while the four
+    # pages that could actually have answered it (nseindia, morningstar,
+    # icicidirect, yahoo finance) competed with them for the same budget.
+    #
+    # The entity is weighted far above the goal because that is what separates
+    # the two. "top 10" and "india" match both; the listicle is about products
+    # and imports, and the word *stock* is simply absent from it. A scorer that
+    # weighted goal words equally would rank it as highly as nseindia.
+    fresh.sort(key=lambda r: -_plan_relevance(r, state))
     done = [r["url"] for r in fresh] + blocked
     accepted: list[dict] = []
     sem = asyncio.Semaphore(5)
