@@ -78,6 +78,32 @@ function Wait-Http([string]$Url, [int]$Seconds = 45) {
   return $false
 }
 
+function Test-LlmAuth([string]$Password, [int]$Port) {
+  <#
+    Can the API actually authenticate to the LLM server?
+
+    Wait-Http only proves something is listening, and opencode answers 401 to
+    everything when its password does not match the client's. So "the server is
+    up" was never the same claim as "extraction will work", and a run that
+    believed the first one spent three minutes and twelve successful fetches
+    before discovering it was false — then returned 0 records with the real
+    reason buried in a log file.
+
+    This asks the question the run will actually ask.
+  #>
+  if (-not $Password) { return $true }   # no password configured, none required
+  $pair = "opencode:$Password"
+  $bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)
+  $token = [System.Convert]::ToBase64String($bytes)
+  try {
+    $r = Invoke-WebRequest "http://127.0.0.1:$Port/session" -TimeoutSec 10 `
+         -UseBasicParsing -Headers @{ Authorization = "Basic $token" }
+    return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 300)
+  } catch {
+    return $false
+  }
+}
+
 if ($Stop) {
   foreach ($spec in @(@($ApiPort, "api"), @($WebPort, "frontend"), @([int]$LlmPort, "llm"))) {
     $pid_ = Get-Listener $spec[0]
@@ -100,8 +126,19 @@ $llm = Get-Listener ([int]$LlmPort)
 if ($llm) {
   # The single most confusing failure in this setup. Say who is holding it
   # rather than letting `opencode serve` print `ServeError` and exit.
-  Write-Host "  llm      : already listening on $LlmPort (pid $llm, $(Get-Name $llm)) - reusing it"
-  Write-Host "             to take it over, run: powershell -File scripts\dev.ps1 -Stop"
+  $pw = Read-EnvValue "OPENCODE_PASSWORD"
+  if (-not (Test-LlmAuth $pw ([int]$LlmPort))) {
+    # Reusing a server that is up but unreachable-by-auth is how the last
+    # failure happened: dev.ps1 reported "already listening - reusing it", every
+    # extraction 401'd, and nothing in the output said the two passwords differed.
+    Write-Host "  llm      : FAILED AUTH - something is already on $LlmPort but it" -ForegroundColor Red
+    Write-Host "             rejects the OPENCODE_PASSWORD in .env. That is a" -ForegroundColor Red
+    Write-Host "             different server, or one started with a different" -ForegroundColor Red
+    Write-Host "             password. Take it over first:" -ForegroundColor Red
+    Write-Host "               powershell -File scripts\dev.ps1 -Stop" -ForegroundColor Red
+    exit 1
+  }
+  Write-Host "  llm      : already listening on $LlmPort (pid $llm, $(Get-Name $llm)) - reusing it, auth OK"
 } else {
   $oc = (Get-Command opencode -ErrorAction SilentlyContinue)
   if (-not $oc) {
@@ -114,7 +151,21 @@ if ($llm) {
     -ArgumentList "/c", "opencode serve --port $LlmPort --hostname 127.0.0.1 > `"$LogDir\llm.log`" 2>&1" `
     -WindowStyle Hidden
   if (Wait-Http "http://127.0.0.1:$LlmPort" 30) {
-    Write-Host "  llm      : up on $LlmPort"
+    if (-not (Test-LlmAuth $pw ([int]$LlmPort))) {
+      # Refuse to go further. Starting the API and the frontend on top of an
+      # LLM server we cannot authenticate against produces a working-looking
+      # app whose every extraction fails.
+      Write-Host "  llm      : FAILED AUTH - the server is up but rejects the" -ForegroundColor Red
+      Write-Host "             password in .env (OPENCODE_PASSWORD)." -ForegroundColor Red
+      Write-Host "             Nothing else is started, because a run would fetch" -ForegroundColor Red
+      Write-Host "             every page and then extract nothing." -ForegroundColor Red
+      Write-Host "             Fix: powershell -File scripts\dev.ps1 -Stop, then start" -ForegroundColor Red
+      Write-Host "             opencode serve with OPENCODE_SERVER_PASSWORD set to that" -ForegroundColor Red
+      Write-Host "             same value (scripts\llm.ps1 does it for you)." -ForegroundColor Red
+      Get-Content "$LogDir\llm.log" -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { "             $_" }
+      exit 1
+    }
+    Write-Host "  llm      : up on $LlmPort, auth verified against .env"
   } else {
     Write-Host "  llm      : FAILED to start - see $LogDir\llm.log" -ForegroundColor Red
     Get-Content "$LogDir\llm.log" -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { "             $_" }

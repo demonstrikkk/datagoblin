@@ -4,14 +4,34 @@ Fail-fast: `require()` raises named errors for absent secrets at first use.
 Bounds are enforced here so hot paths never parse or trust env.
 No module outside core may call os.getenv directly.
 """
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: Absolute path to the repo's .env, found by walking up from this file.
+#:
+#: `env_file=".env"` is resolved against the *process working directory*, so the
+#: whole config — including the OpenCode password — silently became empty
+#: whenever the API was started from anywhere other than the repo root. Nothing
+#: reported it: `OPENCODE_PASSWORD` defaults to "", the client then omits its
+#: Authorization header, and the LLM server answers 401 to every extraction.
+#: That is the same symptom as a wrong password and the opposite fix, which is
+#: why it is worth removing the possibility rather than documenting the cwd.
+_ENV_FILE = next(
+    (p / ".env" for p in Path(__file__).resolve().parents
+     if (p / ".env").is_file()),
+    None,
+)
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE) if _ENV_FILE else ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # API
     API_HOST: str = "127.0.0.1"

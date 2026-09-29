@@ -294,10 +294,48 @@ async def available() -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(f"{_base()}/session", headers=_headers())
-        out["reachable"] = r.status_code < 500
         out["http_status"] = r.status_code
-        if not out["reachable"]:
-            out["error"] = f"HTTP {r.status_code}"
+        # 401/403 is not "reachable". It is the server up and refusing us, and
+        # calling it reachable is what let a run spend twelve fetches and three
+        # minutes before discovering that every extract would 401 — the health
+        # check had already reported green. A server that answers 401 to a
+        # session listing cannot serve a single extraction.
+        if r.status_code in (401, 403):
+            out["reachable"] = False
+            out["auth_failed"] = True
+            out["error"] = (
+                f"the server rejected this process's credentials (HTTP "
+                f"{r.status_code}). Its password does not match OPENCODE_PASSWORD "
+                f"in .env — restart it with scripts\\llm.ps1 so both read the same "
+                f"value.")
+        else:
+            out["reachable"] = r.status_code < 500
+            if not out["reachable"]:
+                out["error"] = f"HTTP {r.status_code}"
     except Exception as e:  # noqa: BLE001
         out["error"] = str(e)[:120]
     return out
+
+
+async def preflight() -> str | None:
+    """Can this process actually extract? Returns a reason, or None if it can.
+
+    Deliberately the same question the first extraction call would ask, asked
+    before the run spends anything. Run start-up calls it so an unusable provider
+    is a refusal in under a second rather than a completed run with zero
+    records three minutes later.
+
+    A provider that is switched OFF is not a fault and does not block. Disabling
+    it is a deliberate configuration, another provider may be serving the run,
+    and refusing every run on the strength of a setting the user chose would be
+    a much worse failure than the one this check exists to prevent.
+    """
+    state = await available()
+    if state.get("reachable"):
+        return None
+    if state.get("auth_failed"):
+        return state.get("error") or "the LLM server rejected this process's credentials"
+    if state.get("error") in ("disabled", "unconfigured"):
+        return None
+    return (f"the LLM provider at {state.get('base_url')} is not usable: "
+            f"{state.get('error') or 'unreachable'}")

@@ -87,6 +87,31 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     meter.plan(projection["total"])
     record_charge = ctx.get("record_charge")
 
+    # Pre-flight the LLM before anything is spent. Extraction is the only stage
+    # that needs the provider, and a provider that cannot authenticate is
+    # knowable in under a second. A live run fetched twelve pages successfully,
+    # spent three minutes, and then produced zero records because every extract
+    # call came back 401 — the one failure that could have been caught before the
+    # first request, discovered only after the whole budget was gone.
+    #
+    # Reported and refused rather than attempted-and-ignored: continuing would
+    # produce a completed run with 0 records whose stated reason is "the web had
+    # nothing", which is a different and much worse claim than the truth.
+    preflight = ctx.get("llm_preflight")
+    if callable(preflight):
+        try:
+            problem = await preflight()
+        except Exception as e:  # noqa: BLE001
+            problem = f"the pre-flight check itself failed: {str(e)[:160]}"
+        if problem:
+            await _emit(emit, {
+                "type": "run.failed", "run_id": run_id, "stage": RunStage.PLANNING,
+                "message": f"Not started: {problem}", "progress": 0,
+                "timestamp": _now(),
+                "data": {"preflight": True, "reason": problem}})
+            return {"status": "FAILED", "records": [], "error": problem,
+                    "no_yield_reason": problem}
+
     async def _bill(stage: str, units: int, seq: int = 0) -> None:
         entry = meter.spend(stage, units, seq)
         if entry is None or record_charge is None:

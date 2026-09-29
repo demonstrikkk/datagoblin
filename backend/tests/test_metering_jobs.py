@@ -202,6 +202,13 @@ def test_runner_budget_clamp_and_fail_fast():
 def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REQUIRE_KEYS_AT_STARTUP", "false")
+    # Offline, stated rather than arranged. See the same note in
+    # test_p1_contracts.py: `chdir` used to hide .env and silently disable the
+    # provider, which stopped being true once config resolves .env
+    # absolutely. setattr, not setenv: `settings` is a singleton built at
+    # import, so an env var set afterwards is never read.
+    from app.core.config import settings as _settings
+    monkeypatch.setattr(_settings, "OPENCODE_ENABLED", False)
     from fastapi.testclient import TestClient
     from app import main as main_mod
     with TestClient(main_mod.app) as c:

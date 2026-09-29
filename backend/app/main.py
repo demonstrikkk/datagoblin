@@ -360,10 +360,23 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
     def _record_charge(entry: dict) -> None:
         r.record_charge(run_id, entry)
 
+    async def _llm_preflight() -> str | None:
+        """Can the LLM actually serve this run? Checked before it starts.
+
+        Injected rather than called from the runner so the runner stays free of
+        provider knowledge, and so a run launched without a provider (a test, a
+        dry harness) simply skips the check instead of failing it.
+        """
+        from app.providers.llm import opencode as opencode_llm
+        try:
+            return await opencode_llm.preflight()
+        except Exception:  # noqa: BLE001 (never block a run on the check itself)
+            return None
+
     ctx = {"search": search_provider.search, "fetch": _fetch, "llm": _llm,
            "store": _store, "persist_source": _persist_source,
            "persist_page": _persist_page, "reuse": _reuse,
-           "record_charge": _record_charge,
+           "record_charge": _record_charge, "llm_preflight": _llm_preflight,
            "cancelled": lambda: RUNS.get(run_id, {}).get("status") == "CANCELLED"}
     TASKS[run_id] = asyncio.create_task(runner_svc.execute_run(run_id, plan, ctx, _emit))
     _evict_registries()

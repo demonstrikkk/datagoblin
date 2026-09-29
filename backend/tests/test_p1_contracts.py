@@ -166,6 +166,17 @@ def test_empty_signature_never_merges():
 def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REQUIRE_KEYS_AT_STARTUP", "false")
+    # Offline, stated rather than arranged. This fixture was getting an offline
+    # provider by accident: `chdir(tmp_path)` used to hide the repo's .env, so
+    # OPENCODE_ENABLED fell back to its default and no live model was ever
+    # reached. Config now resolves .env by absolute path - which is the point,
+    # because a CWD-relative env_file silently emptied the password and turned
+    # every extraction into a 401 - so the intent has to be explicit.
+    #
+    # setattr, not setenv: `settings` is a module-level singleton built at
+    # import, so an env var set afterwards is never read.
+    from app.core.config import settings as _settings
+    monkeypatch.setattr(_settings, "OPENCODE_ENABLED", False)
     with TestClient(main_mod.app) as c:
         yield c
 
