@@ -134,12 +134,14 @@ export default function NavRail({ onNavigate, onOpenSettings, onOpenPalette }) {
         aria-label="Datagoblin home"
         className="focusable mb-4 flex items-center gap-2 rounded-sm px-1 py-1 text-left"
       >
-        <span
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-accent font-display text-[15px] leading-none text-accent-ink"
+        <img
+          src="/mark-56.png"
+          alt=""
+          width={28}
+          height={28}
+          className="h-7 w-7 shrink-0 rounded-sm object-cover"
           aria-hidden="true"
-        >
-          ᚠ
-        </span>
+        />
         <span className="font-display text-[15px] leading-none text-ink">DataGoblin</span>
       </button>
 

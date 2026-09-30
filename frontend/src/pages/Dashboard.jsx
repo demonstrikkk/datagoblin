@@ -357,7 +357,12 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-rule">
-                {datasets.map((d) => (
+                {datasets.map((d) => {
+                  /* Zero records is a state of its own, decided from the
+                     declared count rather than the sampled one so a dataset
+                     whose records were read and found empty is not mislabelled. */
+                  const isEmpty = Number(d.declared_records ?? d.records ?? 0) === 0;
+                  return (
                   <tr
                     key={d.dataset_id}
                     onClick={() =>
@@ -377,6 +382,14 @@ export default function Dashboard() {
                         {d.sampled ? (
                           <Pill tone="info" title="Figures are computed from the first 2000 records.">
                             sampled
+                          </Pill>
+                        ) : null}
+                        {isEmpty ? (
+                          <Pill
+                            tone="muted"
+                            title="The run stored pages but extracted no records. Re-reading the stored pages can still fill it."
+                          >
+                            no records
                           </Pill>
                         ) : null}
                         {d.partial ? (
@@ -399,6 +412,28 @@ export default function Dashboard() {
                         <Pill tone="warn" title={d.reason || ''}>
                           unreadable
                         </Pill>
+                      </td>
+                    ) : isEmpty ? (
+                      /* A dataset that collected nothing is a different fact from
+                         * a dataset whose values failed to verify, and the row has
+                         * to say which it is. Both used to render as `0.0%` beside
+                         * an empty bar, so a run that fetched pages and extracted
+                         * nothing was indistinguishable from a run whose
+                         * verification failed — which is the worse of the two to
+                         * get wrong, because one is recoverable and the other
+                         * looks like a broken install.
+                       *
+                       * 45% of this workspace is in exactly that state, all of it
+                       * from before the extraction window was fixed, so the
+                       * honest reading is "nothing was extracted", not "nothing
+                       * verified". */
+                      <td colSpan={3} className="px-3.5 py-2.5">
+                        <span
+                          className="text-xs text-muted"
+                          title="This run stored pages but extracted no records. Re-reading those pages can still fill it."
+                        >
+                          nothing extracted
+                        </span>
                       </td>
                     ) : (
                       <>
@@ -436,7 +471,8 @@ export default function Dashboard() {
                       </>
                     )}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
