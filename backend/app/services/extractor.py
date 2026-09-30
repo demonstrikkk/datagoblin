@@ -216,7 +216,7 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
     "selectors:<domain>"); anything less falls through to the LLM path.
     """
     from app.services import selectors as selectors_svc
-    from app.services.reducer import page_evidence_text, reduce_html
+    from app.services.reducer import page_evidence_text, page_evidence_text_parts, reduce_html
     dom_source = page.get("html", "") or page.get("rendered_html", "")
     if dom_source or page.get("markdown"):
         # to_thread: parsing a 100 kB document takes tens of milliseconds, and
@@ -242,15 +242,52 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
     # The same text the evidence store persists, so every quote this page yields
     # resolves against the stored copy. Built by one function precisely so the
     # store and the extractor cannot drift apart again.
-    clean = await asyncio.to_thread(page_evidence_text, page)
+    clean, ev_stats = await asyncio.to_thread(page_evidence_text_parts, page)
     if llm is None:
         return [], "none"
     fields = plan.get("fields", [])
     tripwire = coverage_tripwire(fields, clean, plan.get("goal", ""))
     schema = {"type": "object"}
+
+    # What the model actually reads, and what it cost to decide that.
+    #
+    # `_MAX_CHUNKS * _CHUNK_CHARS` is a hard ceiling on the prefix of the page
+    # any model sees, and it used to be reached by the raw DOM text because
+    # `page_evidence_text` concatenated that first. The shortfall is now logged
+    # rather than absorbed, and it distinguishes the two kinds of loss:
+    #
+    #   clean_truncated  the reduced markdown was cut. That is real data loss -
+    #                    it is the part carrying tables - and it is the signal
+    #                    that the ceiling should be raised.
+    #   dom_truncated    the raw DOM fallback was cut. By construction fine: it
+    #                    is the lower-priority filler.
+    #
+    # Nothing is raised here. Until this is measured on real pages, a larger
+    # ceiling is a guess that costs model calls and hits rate limits on free
+    # providers to buy unknown signal.
     limit = settings.EXTRACT_MAX_CHARS
     chunks = ([clean[:limit]] if len(clean) <= limit
               else [c[:limit] for c in split_chunks(clean)][: _MAX_CHUNKS])
+    sent = sum(len(c) for c in chunks)
+    clean_md = int(ev_stats.get("clean_md_chars") or 0)
+    clean_in_window = min(clean_md, sent)
+    shortfall = {
+        "url": str(page.get("url") or "")[:200],
+        "total_chars": int(ev_stats.get("total_chars") or len(clean)),
+        "clean_md_chars": clean_md,
+        "dom_chars": int(ev_stats.get("dom_chars") or 0),
+        "sent_chars": sent,
+        "dropped_chars": max(0, int(ev_stats.get("total_chars") or len(clean)) - sent),
+        "clean_truncated": max(0, clean_md - clean_in_window),
+        "dom_truncated": max(0, int(ev_stats.get("dom_chars") or 0) - max(0, sent - clean_in_window)),
+        "chunks": len(chunks),
+    }
+    if shortfall["dropped_chars"]:
+        log.info("extract content truncated", extra={"data": shortfall})
+    elif shortfall["total_chars"] > limit:
+        # Defensive: the branches above should make this unreachable.
+        log.warning("extract window undercounted", extra={"data": shortfall})
+
     provider = "llm"
     batches: list[list[dict]] = []
 

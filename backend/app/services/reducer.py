@@ -144,11 +144,95 @@ def media_block(page: dict, max_items: int = 30) -> str:
 #: those pages carry covers only the first available of html/markdown, so two
 #: pages sharing a markdown body but differing in html would collide and one
 #: would be served the other's quotes. Sizing as well as hashing makes an
-#: accidental match negligible, and `max_chars` is applied after the cache so
-#: one entry serves every caller. Bounded so a long run cannot grow it without
-#: limit.
-_EVIDENCE_CACHE: dict[tuple, str] = {}
+#: Sizing as well as hashing makes an
+#: accidental match negligible, and `max_chars` is applied by the caller after
+#: the cache so one entry serves every caller. Bounded so a long run cannot grow
+#: it without limit.
+#: key -> (text, stats). `max_chars` is applied by the caller after the cache
+#: read, so one entry serves every caller and the stats stay whole.
+_EVIDENCE_CACHE: dict[tuple, tuple[str, dict]] = {}
 _EVIDENCE_CACHE_MAX = 256
+
+
+def page_evidence_text_parts(page: dict) -> tuple[str, dict]:
+    """The evidence text, plus a breakdown of what went into it.
+
+    Ordering is the whole point of this function returning a second value.
+
+    The extractor can only ever read a bounded prefix of this text, so whatever
+    is concatenated *first* is what the model actually sees. It used to be
+    `page_text(dom_source)` — the raw DOM with `script, style, nav, footer,
+    svg, noscript, iframe` stripped, but crucially **not** capped and **not**
+    `header`/`aside`/`form` — followed by the clean markdown. On a listing page
+    that means the first 24,000 characters handed to the model were
+    megabyte-scale nav-adjacent chrome, and the reduced markdown carrying the
+    actual table never arrived at all. The model then answered `NA` for every
+    field, which the validator recorded as an absent value.
+
+    The clean markdown goes first now. It is the highest signal per character on
+    the page, and `reduce_html` passes `include_tables=True`, so the tables the
+    schema usually describes are in it. The raw DOM follows as a fallback for
+    pages whose reduction lost something, then structured data, then media.
+
+    This reorders both the stored copy and the extractor's copy together, which
+    is safe: the store and the extractor call the same function, so a quote the
+    model cites still re-locates in the string the proof view reads. Nothing is
+    dropped here — `pages.markdown` stays the complete text so a human reading
+    the proof view sees the whole page. The budget is applied by the caller.
+
+    The returned `stats` reports each part's length so the extractor can log how
+    much of the *clean* text survived its own window, which is the number that
+    says whether the ceiling needs raising. That distinction matters: `clean`
+    being cut is a real loss, and `dom` being cut is by construction.
+    """
+    from app.services import selectors as selectors_svc  # local: avoids a cycle
+    dom_source = page.get("html", "") or page.get("rendered_html", "")
+    markdown = page.get("markdown") or ""
+    # media_block reads the page's own image/video lists, which vary with the
+    # page and not with its markup, so it belongs in the key too.
+    block = media_block(page)
+    key = (len(dom_source), hash(dom_source), len(markdown), hash(markdown),
+           hash(block))
+    cached = _EVIDENCE_CACHE.get(key)
+    if cached is not None:
+        return cached[0], cached[1]
+
+    # Clean markdown first. For a rendered page this is trafilatura output with
+    # tables; for a static one it is the same reducer applied to the raw HTML.
+    clean_md = markdown or (reduce_html(dom_source) if dom_source else "")
+    parts: list[str] = [clean_md] if clean_md else []
+
+    dom_text = ""
+    if dom_source:
+        try:
+            dom_text = selectors_svc.page_text(dom_source) or ""
+        except Exception:  # noqa: BLE001 (malformed markup is not a store failure)
+            dom_text = ""
+    if dom_text:
+        parts.append(dom_text)
+
+    if dom_source:
+        try:
+            structured = extract_structured(dom_source)
+            if structured.get("text"):
+                parts.append(str(structured["text"]))
+        except Exception:  # noqa: BLE001
+            pass
+    if block:
+        parts.append(block)
+
+    out = "\n".join(p for p in parts if p).strip()
+    stats = {
+        "clean_md_chars": len(clean_md),
+        "dom_chars": len(dom_text),
+        "total_chars": len(out),
+    }
+    if len(_EVIDENCE_CACHE) >= _EVIDENCE_CACHE_MAX:
+        # FIFO is fine: pages are processed in a bounded window, so the entry
+        # falling off the front is not the one about to be read again.
+        _EVIDENCE_CACHE.pop(next(iter(_EVIDENCE_CACHE)))
+    _EVIDENCE_CACHE[key] = (out, stats)
+    return out, stats
 
 
 def page_evidence_text(page: dict, max_chars: int = 0) -> str:
@@ -163,40 +247,10 @@ def page_evidence_text(page: dict, max_chars: int = 0) -> str:
     Rendered rungs return `markdown` and no `html`; static rungs return `html`
     and no `markdown`. Both are folded in, so the stored text is a superset of
     whatever the LLM was shown.
+
+    Ordering matters and is documented in `page_evidence_text_parts`.
     """
-    from app.services import selectors as selectors_svc  # local: avoids a cycle
-    dom_source = page.get("html", "") or page.get("rendered_html", "")
-    markdown = page.get("markdown") or ""
-    # media_block reads the page's own image/video lists, which vary with the
-    # page and not with its markup, so it belongs in the key too.
-    block = media_block(page)
-    key = (len(dom_source), hash(dom_source), len(markdown), hash(markdown),
-           hash(block))
-    cached = _EVIDENCE_CACHE.get(key)
-    if cached is not None:
-        return cached[:max_chars] if max_chars and len(cached) > max_chars else cached
-    parts: list[str] = []
-    if dom_source:
-        try:
-            parts.append(selectors_svc.page_text(dom_source))
-        except Exception:  # noqa: BLE001 (malformed markup is not a store failure)
-            pass
-    parts.append(markdown or (reduce_html(dom_source) if dom_source else ""))
-    if dom_source:
-        try:
-            structured = extract_structured(dom_source)
-            if structured.get("text"):
-                parts.append(str(structured["text"]))
-        except Exception:  # noqa: BLE001
-            pass
-    if block:
-        parts.append(block)
-    out = "\n".join(p for p in parts if p).strip()
-    if len(_EVIDENCE_CACHE) >= _EVIDENCE_CACHE_MAX:
-        # FIFO is fine: pages are processed in a bounded window, so the entry
-        # falling off the front is not the one about to be read again.
-        _EVIDENCE_CACHE.pop(next(iter(_EVIDENCE_CACHE)))
-    _EVIDENCE_CACHE[key] = out
+    out, _ = page_evidence_text_parts(page)
     return out[:max_chars] if max_chars and len(out) > max_chars else out
 
 

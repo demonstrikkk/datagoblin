@@ -19,6 +19,15 @@ from app.core.errors import AppError, provider_fatal, provider_transient
 from app.providers.llm import opencode as opencode_svc
 from app.providers.llm.classify import classify as _classify
 
+#: Ceiling on the whole prompt sent over the OpenCode transport.
+#:
+#: It is a safety limit, not a budget: the extractor's own per-page budget is
+#: `EXTRACT_MAX_CHARS` and it decides how much of a page is read. This sits above
+#: that so it never shapes the data, which is what it used to do — it wrapped the
+#: instruction and the prompt together, and since the page content is at the
+#: tail, the entire overflow fell on the content.
+_PROMPT_MAX_CHARS = 32_000
+
 
 def _interaction_text(dump: dict) -> str:
     """Output text, falling back to model_output step contents (same interaction,
@@ -126,8 +135,31 @@ async def opencode_structured(prompt: str, schema: dict,
     `model_mismatch` instead of being relabelled as the requested model.
     """
     from app.schemas.evidence import parse_llm_json
-    full_prompt = ("Reply with a single JSON object only. No prose, no backticks.\n"
-                   + (prompt or ""))[:12000]
+    # The cap is on the *instruction*, not the prompt.
+    #
+    # It used to wrap the concatenation, so the instruction plus the extractor's
+    # own preamble consumed the budget and the last ~1,500 characters of page
+    # content were cut — and the content sits at the tail of the prompt, so the
+    # truncation fell entirely on the data and never on the instruction. Measured
+    # with the real `build_prompt` and a 6-field plan: 1,479 characters of prefix,
+    # 10,521 of 12,000 content surviving.
+    #
+    # Two consequences, both quiet. The tail of every page is never read, and the
+    # loss is invisible: the call succeeds, the model returns records, and the
+    # fields that lived past the cut come back "NA" — indistinguishable from a
+    # page that did not carry them.
+    #
+    # The instruction is now truncated on its own, which is bounded and stable,
+    # and the prompt body passes through whole. The extractor's per-page budget
+    # is `EXTRACT_MAX_CHARS`; bounding the transport above it only matters for
+    # callers that pass something larger, so the remaining prompt is clipped
+    # rather than refused.
+    instruction = "Reply with a single JSON object only. No prose, no backticks.\n"
+    body = prompt or ""
+    room = max(0, _PROMPT_MAX_CHARS - len(instruction))
+    if len(body) > room:
+        body = body[:room]
+    full_prompt = instruction + body
     out = await opencode_svc.chat(model or settings.OPENCODE_MODEL, full_prompt)
     try:
         data = parse_llm_json(out["text"])
