@@ -533,19 +533,30 @@ class PostgresRepo:
         process; only the shape of the evidence does, and that lives at known
         paths inside each document.
 
-        So the counting happens where the documents already are. `jsonb_each`
-        over `row_json -> 'fields'` yields one row per (record, field), and two
-        grouped passes turn that into per-field counts and then per-dataset
-        totals — including `empty_fields` and `partial_fields`, which need the
-        per-field numbers and are therefore not expressible as a single sum.
+So the counting happens where the documents already are. `jsonb_each`
+        over `row_json` yields one row per (record, field), and two grouped passes
+        turn that into per-field counts and then per-dataset totals — including
+        `empty_fields` and `partial_fields`, which need the per-field numbers and
+        are therefore not expressible as a single sum.
 
-        Two shapes have to be handled or the query errors rather than
-        under-reports:
+        **`row_json` is the field map itself, not a record wrapping one.** Its top
+        level is `{"company_name": {...}, "country": {...}}`. `get_records`
+        presents it as `{"record_id": ..., "fields": row_json}`, so the `fields`
+        key appears in every Python fixture and in every record the API returns,
+        and reaching for `row_json -> 'fields'` looks correct. It is not: that
+        path is NULL for all 723 stored rows, `jsonb_each` returns nothing, and
+        every field silently falls through to the declared-at-zero branch — which
+        reported every dataset as empty while looking entirely healthy. Unit tests
+        could not catch it, because the fake store delegated to
+        `coverage.field_coverage` and never executed this SQL at all. Verified
+        against the live database before being trusted.
 
-        * A field whose value is a plain scalar, stored before provenance
-          existed. It is a value with no verdict, so it counts as `unverified`.
-        * A `fields` member that is JSON `null`, which `-> 'value'` cannot reach.
-          Treated as absent, matching `coverage._cell_value`.
+        Two cell shapes have to be handled or the counts under-report:
+
+        * A value stored as JSON `null` — `value ->> 'value'` is NULL, so the cell
+          is absent and must not be counted as an unverified value.
+        * A field whose value is a bare scalar, stored before provenance existed.
+          It is a value with no verdict, so it counts as `unverified`.
 
         Schema fields that appear in no record are added from `datasets.schema_json`
         with `present = 0`, because "declared and never extracted" is the gap the
@@ -578,12 +589,15 @@ class PostgresRepo:
                      e.value AS cell,
                      -- A scalar predates provenance: a value with no verdict.
                      jsonb_typeof(e.value) <> 'object' AS scalar,
+                     -- A stored JSON null is an absent value, not an
+                     -- unverified one. `->>'value'` yields NULL for both a null
+                     -- and a missing key, which is what we want here.
                      NULLIF(e.value->>'value', '') IS NULL
                        AND jsonb_typeof(e.value) = 'object' AS empty
                 FROM dataset_records r,
                      LATERAL jsonb_each(
-                       CASE WHEN jsonb_typeof(r.row_json -> 'fields') = 'object'
-                            THEN r.row_json -> 'fields' ELSE '{}'::jsonb END) AS e
+                       CASE WHEN jsonb_typeof(r.row_json) = 'object'
+                            THEN r.row_json ELSE '{}'::jsonb END) AS e
             ),
             per_field AS (
               SELECT dataset_id, field,
@@ -591,9 +605,19 @@ class PostgresRepo:
                      count(*) FILTER (WHERE NOT scalar
                                         AND lower(COALESCE(cell->>'verification_status',''))
                                             = 'verified') AS verified,
-                     count(*) FILTER (WHERE scalar OR lower(
-                                        COALESCE(cell->>'verification_status',''))
-                                        IN ('unverified','not_proven')) AS unverified,
+                     /* Present, and not proven and not disputed: unverified.
+                      Stated as a negation rather than a list of statuses, because
+                      `coverage._cell_value` falls back to "unverified" for any
+                      status it does not recognise and the live data relies on
+                      that. `judgment_unavailable` alone is 992 of the 1,811
+                      verified-plus-other cells here — "we had no judge to ask" —
+                      and a literal IN ('unverified','not_proven') reported zero.
+                      A new status stays in the right bucket without a code
+                      change, which is the whole point of matching the fallback
+                      rather than restating it. */
+                     count(*) FILTER (WHERE NOT scalar
+                                        AND lower(COALESCE(cell->>'verification_status',''))
+                                            NOT IN ('verified','conflicting')) AS unverified,
                      count(*) FILTER (WHERE lower(
                                         COALESCE(cell->>'verification_status',''))
                                         = 'conflicting') AS conflicting

@@ -23,6 +23,9 @@ approach, and therefore the ones where they can genuinely disagree:
 """
 from __future__ import annotations
 
+import inspect
+import re
+
 from app.services import coverage as coverage_svc
 from app.services import dashboard as dashboard_svc
 
@@ -239,3 +242,101 @@ def test_a_reaped_run_does_not_remove_the_dataset():
     out = dashboard_svc._compute(store, 25)
     assert len(out["datasets"]) == 1
     assert out["datasets"][0]["partial"] is False
+
+
+# --- the SQL itself ---------------------------------------------------------
+# `test_dashboard_sql_live.py` runs the real query, but it skips without a
+# database and the suite deliberately never loads `.env` — so it would not have
+# caught the original defect in normal use.
+#
+# That defect was a single wrong JSON path: `row_json -> 'fields'` instead of
+# `row_json`. The query was valid, returned rows, and reported every dataset as
+# empty while looking entirely healthy. Nothing about executing it detects that;
+# only reading the path does. So the path is asserted here, hermetically, and it
+# costs nothing to keep.
+
+def test_the_aggregate_reads_the_stored_shape_and_not_an_imagined_one():
+    """`row_json` is the field map itself.
+
+    `get_records` presents it as `{"record_id": ..., "fields": row_json}`, so the
+    `fields` key appears in every fixture and every API response and reaching for
+    `row_json -> 'fields'` looks right. It is not: the stored top level is
+    `{"company_name": {...}, "country": {...}}`, that path is NULL for every row,
+    and the query silently reports everything as absent.
+
+    Asserted against the SQL as executed, not the method source — the docstring
+    names the wrong path deliberately, to explain this very bug, and a substring
+    check over the source would trip on the explanation.
+    """
+    sql = _executed_sql()
+
+    assert "-> 'fields'" not in sql, (
+        "coverage_aggregates reads row_json->'fields', but row_json IS the field "
+        "map, so this makes jsonb_each yield nothing and every dataset reads empty")
+
+    assert "jsonb_each(" in sql
+    assert re.search(r"jsonb_each\(\s*CASE WHEN jsonb_typeof\(r\.row_json\)", sql), \
+        "expected jsonb_each over r.row_json itself"
+
+
+def test_unverified_is_a_negation_so_a_new_status_still_lands_somewhere():
+    """`judgment_unavailable` is 992 cells here and a literal list reported zero.
+
+    `coverage._cell_value` falls back to "unverified" for any status it does not
+    recognise. Restating that as an IN-list means a new status is dropped on the
+    floor, and the failure is invisible: cells that should be counted simply are
+    not.
+    """
+    sql = _executed_sql()
+    assert re.search(r"NOT IN \('verified','conflicting'\)", sql), (
+        "unverified is not expressed as a negation of the other two verdicts, so "
+        "an unrecognised status would be counted as neither verified, conflicting "
+        "nor unverified")
+
+
+def test_a_stored_json_null_is_absent_not_unverified():
+    """A null value claims the source did not carry it, which is not what happened."""
+    sql = _executed_sql()
+    assert "NULLIF(e.value->>'value', '')" in sql, \
+        "a stored JSON null must be treated as absent"
+    assert "WHERE NOT empty" in sql, \
+        "empty cells must be filtered out before the verdict counts"
+
+
+def test_a_declared_field_with_no_record_still_appears():
+    """"Declared and never extracted" is the gap the coverage view exists to show."""
+    sql = _executed_sql()
+    assert "jsonb_array_elements" in sql and "NOT EXISTS" in sql, (
+        "schema fields absent from every record must be added at zero, or they "
+        "vanish from an aggregate that only looks at records")
+
+
+def test_the_query_reads_each_dataset_once():
+    """One call for the page. A loop here is the thing it replaced."""
+    src = inspect.getsource(dashboard_svc._compute)
+    assert src.count("coverage_aggregates") == 1
+    assert "aggregator([" in src, "the aggregate must be called once with the page"
+
+
+# --- helpers -----------------------------------------------------------------
+
+def _executed_sql() -> str:
+    """The SQL text handed to the cursor, captured without a database.
+
+    The real method is invoked with `_rows` replaced. `_rows` is the single choke
+    point every Postgres read goes through, so this sees exactly what would have
+    been sent — and needs no server, which matters because the suite deliberately
+    never loads `.env` and so never has a `DATABASE_URL` to connect with.
+    """
+    from app.repositories.postgres_repo import PostgresRepo
+
+    captured: dict = {}
+
+    class _Stub:
+        def _rows(self, op, sql, params=()):
+            captured["sql"] = sql
+            return []
+
+    PostgresRepo.coverage_aggregates(_Stub(), ["00000000-0000-0000-0000-000000000001"])
+    assert "sql" in captured, "the method issued no query"
+    return captured["sql"]
