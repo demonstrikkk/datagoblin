@@ -82,13 +82,30 @@ def normalize_key(s: object) -> str:
 def reference_known(reference_id: str, references: str) -> bool:
     """A claimed <n> citation must exist in the page's References map.
 
-    Empty reference_id is allowed (static/uncited sources); a non-empty one
-    that appears nowhere in the references block fails closed.
+    An empty `reference_id` is allowed (uncited sources), and so is a non-empty
+    one on a page that carries no References block at all.
+
+    That second case is the one that matters. `references` is populated in
+    exactly one place — the Crawl4AI rung of the fetcher, which is the only
+    renderer that emits a `## References` map. The plain `http` and `jina`
+    rungs never set it, so `page.get("references", "")` is `""` for every page
+    they fetch. Failing closed on a *missing* map therefore nulled any value the
+    model tagged with a `<n>` marker, on a page where no such marker could
+    possibly have been checked — and a plain-text table has no citation spans at
+    all, so the marker the model emitted was invented to begin with.
+
+    In one live dataset that destroyed 53 of 78 `financial_year` cells, all of
+    them from `http`-fetched URLs, while the identical page fetched by Crawl4AI
+    produced none. The value was extracted, the quote was verbatim, and the cell
+    was blank because a gate was checking a document that was not there.
+
+    So the gate is only meaningful when the page actually carries the apparatus.
+    With a References block present, an unknown marker is still rejected.
     """
     ref = (reference_id or "").strip()
-    if not ref:
+    if not ref or not (references or "").strip():
         return True
-    return ref in (references or "")
+    return ref in references
 
 
 class JudgeBudget:
@@ -131,9 +148,20 @@ async def verify_field(value: object, quote: str, source_text: str,
     because the judge is the only step that can be unavailable and the only one
     that costs a round trip. Statuses:
 
-      unverified           the claim is not supported by a quotable page
+      unverified           kept, but nothing supports it — either no quote was
+                           supplied, or a quote was supplied and is not on the
+                           page, or the judge said NOT_SUPPORTED. Note the
+                           first and second of those return the *value*: an
+                           unsupported claim is not an absent one, and
+                           nulling it reported certainty the system does not
+                           have.
       judgment_unavailable the quote IS in the page, but nothing judged it
       verified             judged, or deduced from the quote itself
+
+    `required` is accepted for call-site symmetry with the schema and is not
+    read here. Dropping a record for a missing required field is the runner's
+    decision, because it is a decision about the whole record rather than about
+    one cell.
     """
     if is_placeholder(value):
         # `—`, `”`, `N/A` and friends mean "not here". Storing one produces a
@@ -145,12 +173,35 @@ async def verify_field(value: object, quote: str, source_text: str,
         return None, "unverified"
     if not type_ok(value, ftype):
         return None, "unverified"
+
+    # A value with no quote is a different failure from a quote that is not on
+    # the page, and they used to be fused into one condition that nulled both.
+    #
+    # `wrap_record` looks the quote up by exact field-name match, so a model
+    # that returns a value but omits its evidence item lands here with an empty
+    # quote — and the value was discarded with no judge, no fallback and no
+    # status distinguishing it from a claim contradicted by the source. In one
+    # live dataset that was 117 cells across `valuation` and `financial_year`,
+    # every one of them an extraction that was correct and a prompt-following
+    # failure rather than an absence.
+    #
+    # Kept as `unverified` rather than nulled, which is what already happens
+    # when the judge is unreachable below: the quote genuinely is not there, so
+    # the value is not proven, but "not proven" is not "absent" and the UI can
+    # already say so. Nulling it was the system reporting certainty it did not
+    # have — the empty cell claimed the source did not carry the value, when the
+    # truth was that the model did not cite it.
+    if not quote:
+        return value, "unverified"
+
     # The normalised page is passed in when the caller has one. `_norm` runs a
     # whitespace regex plus lowercasing over the WHOLE page, and this is per
     # field, so on a 50 kB page with ten fields the same page was normalised ten
     # times before the judge was ever consulted.
-    if not quote or _norm(quote) not in (norm_source if norm_source is not None
-                                         else _norm(source_text)):
+    if _norm(quote) not in (norm_source if norm_source is not None
+                            else _norm(source_text)):
+        # A quote that was supplied and cannot be found is a real failure: the
+        # value is either hallucinated or attributed to the wrong sentence.
         return None, "unverified"
     if not reference_known(reference_id, references):
         return None, "unverified"
