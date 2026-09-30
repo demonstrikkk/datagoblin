@@ -329,6 +329,20 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
                 st.update(status="FAILED", error=ev.get("message", ""))
             elif ev["type"] == "run.cancelled":
                 st.update(status="CANCELLED")
+        elif ev["type"] not in ("run.completed", "run.partial", "run.failed",
+                                "run.cancelled"):
+            # A run's *status* tracked only its terminal state, so a run that was
+            # ten minutes into reading pages still reported PLANNING - the status
+            # it was born with. Nothing was wrong with the pipeline; the run was
+            # simply never described while it worked.
+            #
+            # `current_stage` and `progress` were updated on every event, so the
+            # information existed and was on the same line of code. Two fields
+            # describing the same run disagreed, and the one the UI's headline
+            # read was the stale one. Status now follows the stage.
+            stage = str(ev.get("stage") or "")
+            if stage and stage != st.get("status"):
+                st.update(status=stage)
 
     async def _fetch(url: str, method: str) -> dict:
         return await _fetch_method(url, method)
