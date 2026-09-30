@@ -4,6 +4,7 @@ import { api, downloadBlob } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
 import FieldsView from '../components/FieldsView.jsx';
+import GapQueue from '../components/GapQueue.jsx';
 import SectorPanel from '../components/SectorPanel.jsx';
 import ReviewQueue from '../components/ReviewQueue.jsx';
 import { CellStatus, asField, evidenceDepth } from '../components/evidence.jsx';
@@ -755,6 +756,8 @@ function CoveragePanel({ datasetId, runId }) {
           </div>
         ))}
       </div>
+
+      <GapQueue datasetId={datasetId} />
 
       <BackfillPanel datasetId={datasetId} />
 

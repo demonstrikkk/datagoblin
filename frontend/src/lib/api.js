@@ -220,6 +220,17 @@ export const api = {
       ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
     }),
 
+  // --- two-phase gap filling ----------------------------------------------
+  // `gaps` is a read. `fillGap` is a real search-and-fetch over the network, so
+  // it gets the long timeout — and the UI always calls it with `apply: false`
+  // first, because the dry run performs the search and the extraction and only
+  // withholds the write, which is the only way to see the cost before paying it.
+  gaps: (id, o) => request(`/datasets/${encodeURIComponent(id)}/gaps`, o),
+  fillGap: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/gaps/fill`, {
+      ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
+    }),
+
   // --- learned yield, refresh, columns, dashboard ---------------------------
   // `yield` is a read of the quotes every verified cell already carries, so it
   // is cheap and never a source of its own claims. Refresh re-fetches over the

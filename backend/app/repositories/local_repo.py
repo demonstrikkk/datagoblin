@@ -1,4 +1,4 @@
-﻿"""LOCAL DEV adapter â€” file-backed JSON persistence. EXPLICITLY NOT production.
+"""LOCAL DEV adapter — file-backed JSON persistence. EXPLICITLY NOT production.
 
 Used only when Supabase keys are absent (local dev / CI without secrets).
 Every record carries {"_adapter": "local-dev"} so it can never be mistaken
@@ -261,7 +261,7 @@ class LocalRepo:
         return found
 
     def get_dataset_schema(self, dataset_id: str) -> list | None:
-        """Just the declared schema â€” no record copy. See PostgresRepo."""
+        """Just the declared schema — no record copy. See PostgresRepo."""
         for d in self._scan("datasets"):
             if d.get("id") == dataset_id:
                 return d.get("schema", []) or []
@@ -272,7 +272,7 @@ class LocalRepo:
 
         This adapter has no database to aggregate in, so it reads the records and
         counts them locally. That is slow for the same reason the Postgres version
-        is fast â€” the records have to be in the process â€” but the *numbers* are
+        is fast — the records have to be in the process — but the *numbers* are
         identical, which is the property the two adapters have to share: the
         dashboard must not show different figures depending on which one is live.
 
@@ -358,6 +358,54 @@ class LocalRepo:
                                   "records": ds.get("records", []),
                                   "counts": ds.get("counts", {})})
         return True
+
+    # -- gaps -----------------------------------------------------------------
+    # Append-only JSONL has no upsert, so the (dataset_id, field) unique index
+    # that 007_dataset_gaps.sql declares in Postgres is reproduced here by
+    # scanning for the last row per key. Same observable behaviour: repeated
+    # writes converge on one row whose `attempts` is the real count, rather than
+    # accumulating a line per press of the button.
+
+    def upsert_gap(self, dataset_id: str, field: str, gap: dict) -> dict:
+        row = {
+            "id": str(gap.get("id") or uuid.uuid4()),
+            "dataset_id": dataset_id,
+            "field": field,
+            "category": str(gap.get("category") or "depth_gap"),
+            "missing": int(gap.get("missing") or 0),
+            "unverified": int(gap.get("unverified") or 0),
+            "conflicting": int(gap.get("conflicting") or 0),
+            "state": str(gap.get("state") or "open"),
+            "phase": int(gap.get("phase") or 0),
+            "attempts": int(gap.get("attempts") or 0),
+            "reason": str(gap.get("reason") or ""),
+            "stats": dict(gap.get("stats") or {}),
+            "last_error": str(gap.get("last_error") or ""),
+            "resolved_at": gap.get("resolved_at") or "",
+        }
+        self._append("dataset_gaps", row)
+        return row
+
+    def list_gaps(self, dataset_id: str, *, state: str | None = None) -> list[dict]:
+        latest: dict[str, dict] = {}
+        for r in self._scan("dataset_gaps"):
+            if r.get("dataset_id") != dataset_id:
+                continue
+            latest[str(r.get("field") or "")] = r
+        rows = list(latest.values())
+        if state:
+            rows = [r for r in rows if r.get("state") == state]
+        rows.sort(key=lambda r: (-(int(r.get("missing") or 0)
+                                  + int(r.get("unverified") or 0)
+                                  + int(r.get("conflicting") or 0)),
+                                str(r.get("field") or "")))
+        return rows
+
+    def get_gap(self, dataset_id: str, field: str) -> dict | None:
+        for r in reversed(self._scan("dataset_gaps")):
+            if r.get("dataset_id") == dataset_id and r.get("field") == field:
+                return r
+        return None
 
     def get_sources(self, dataset_id: str) -> dict:
         ds = self.get_dataset(dataset_id)

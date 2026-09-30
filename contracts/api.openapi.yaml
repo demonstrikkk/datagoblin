@@ -337,9 +337,85 @@ paths:
         Per field, how many records carry a value and how that value earned its
         keep (verified / unverified / conflicting / absent). A field declared but
         never extracted appears, because that gap is the point of the view.
+
+        Also carries `gaps` and `gap_summary`: the same fields classified by which
+        remedy could close them (`schema_gap`, `depth_gap`, `evidence_gap`) and
+        annotated with how far each has actually been attempted
+        (`phase` 0 none, 1 stored pages re-read, 2 web search and fetch) and its
+        state (`open`, `resolved`, `exhausted`, `refused`). `phase` advances only
+        from a completed attempt, so a gap nobody has looked at never reports
+        having been searched. `gaps_tracked` says whether the adapter can persist
+        that history at all; false means the counts are real and the history is
+        derived, which is a degradation and not a failure.
       parameters: [{$ref: "#/components/parameters/did"}]
       responses:
-        "200": {description: "{records, fields[]}"}
+        "200": {description: "{records, fields[], backlog, gaps[], gap_summary, gaps_tracked}"}
+
+  /api/datasets/{did}/gaps:
+    get:
+      tags: [datasets]
+      summary: |
+        Every recorded gap for a dataset, and what may be attempted next. Reads
+        only; nothing here searches or writes.
+
+        `next_phase` is the field to act on. A gap at phase 0 is not ready to be
+        searched, because re-reading the pages the run already stored has not been
+        tried and it costs no external requests. `attemptable` is that decision as
+        a boolean, and `blocked_reason` carries the sentence for when it is false —
+        a refusal that explains nothing reads as a silent no-op.
+
+        `summary.attemptable` is deliberately not `summary.gaps`: a dataset with
+        forty exhausted gaps has forty gaps and no queue, and reporting the former
+        as the latter would say the opposite of the truth.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      responses:
+        "200": {description: "{dataset_id, gaps[], summary, tracked}"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/datasets/{did}/gaps/fill:
+    post:
+      tags: [datasets]
+      summary: |
+        Attempt one phase on one gap and report what it cost.
+
+        `apply: false` is the default and is a real dry run: the search, the fetch
+        and the extraction all execute and only the write is withheld, so the
+        reported cost is measured rather than estimated.
+
+        Phase 1 re-reads pages the run already stored and costs no external
+        requests. Phase 2 searches the web for each record's own identity, and is
+        refused unless phase 1 has already been attempted. `evidence_gap` is
+        refused at either phase: a value with no verdict is not fixed by fetching
+        more, and the remedy is the judge or a person.
+
+        The write rule is unchanged from a backfill: exact identity match, empty
+        cells only, and every written value carries its own quote and verdict. A
+        search that fails leaves the gap `open` with the error recorded — a
+        provider failure is not evidence that the sources lack the field.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [field]
+              properties:
+                field: {type: string}
+                phase: {type: integer, enum: [1, 2], default: 2}
+                apply: {type: boolean, default: false}
+                search_budget:
+                  type: integer
+                  minimum: 1
+                  maximum: 12
+                  description: |
+                    Searches allowed in this pass. A value above the maximum is
+                    refused with 422 rather than silently clamped, because a
+                    clamped budget is indistinguishable from one that was honoured.
+      responses:
+        "200": {description: "{phase, report, gap, stats}"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Validation"}
 
   /api/datasets/{did}/conflicts:
     get:

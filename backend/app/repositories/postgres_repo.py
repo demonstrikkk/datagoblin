@@ -1,4 +1,4 @@
-﻿"""Postgres repository â€” the real persistence substrate, over psycopg 3.
+"""Postgres repository — the real persistence substrate, over psycopg 3.
 
 Why psycopg and not the REST adapter: `DATABASE_URL` already carried working
 credentials and the migrations are already Postgres DDL, but nothing in
@@ -9,7 +9,7 @@ new secret and no second schema dialect.
 Why this matters for correctness, not just tidiness:
 
   * `update_run` exists. The previous adapters had no way to advance a run's
-    status, so status was written exactly twice â€” at creation and at finalize.
+    status, so status was written exactly twice — at creation and at finalize.
     A run that died on the runtime budget therefore read `DISCOVERING`
     forever, indistinguishable from a live one.
   * `upsert_page` stores the page. Pages used to be fetched, reduced in RAM,
@@ -97,7 +97,7 @@ class PostgresRepo:
 
         Every operation used to open its own connection. A run does ~200+
         separate repository writes, and against a remote server each of those
-        pays a full TLS handshake â€” connection setup, not query execution, was
+        pays a full TLS handshake — connection setup, not query execution, was
         the dominant cost of persisting a run. The pool keeps a small number of
         warm connections instead.
 
@@ -133,7 +133,7 @@ class PostgresRepo:
                                 # with `DuplicatePreparedStatement: prepared
                                 # statement "_pg3_0" already exists`. That
                                 # surfaced as intermittent 503s reading pages,
-                                # and it is not a race â€” it recurs on any pool
+                                # and it is not a race — it recurs on any pool
                                 # that serves more than one caller.
                                 # prepare_threshold=None turns the cache off.
                                 # The cost is a re-parse per execution; the
@@ -276,7 +276,7 @@ class PostgresRepo:
         """The stored page for `url` from any run, newest first.
 
         `get_pages` is deliberately run-scoped and omits raw_html, so neither
-        could answer "have we already fetched this exact URL?" across runs â€”
+        could answer "have we already fetched this exact URL?" across runs —
         which is the question reuse asks.
 
         Newest first: if a page was re-fetched at some point, the freshest copy
@@ -438,7 +438,7 @@ class PostgresRepo:
         `field_coverage(recs, row.get("schema") or [])` needs it. Without the
         schema the coverage matrix can only see fields that happen to appear in
         at least one record, so a field the plan asked for and no page carried
-        is invisible here while `/coverage` â€” which does get the schema â€” lists
+        is invisible here while `/coverage` — which does get the schema — lists
         it as never extracted. The dashboard then under-reports its own "never
         filled" column and disagrees with the dataset page, which is the one
         thing its own docstring says cannot happen.
@@ -497,7 +497,7 @@ class PostgresRepo:
             cur.execute("SET LOCAL statement_timeout = '15s'")
             # No params unless there are some. Passing an empty tuple still
             # switches psycopg into placeholder interpolation, and it treats
-            # every `%` in the statement as one â€” so a perfectly ordinary
+            # every `%` in the statement as one — so a perfectly ordinary
             # `ILIKE '%acme%'` failed with "only '%s', '%b', '%t' are allowed
             # as placeholders". The model's SQL carries no parameters, and a
             # literal `%` in a search pattern has to survive as a literal.
@@ -510,7 +510,7 @@ class PostgresRepo:
         return self._run("run_readonly_sql", _fn) or []
 
     def get_dataset_schema(self, dataset_id: str) -> list | None:
-        """Just the declared schema â€” no record load.
+        """Just the declared schema — no record load.
 
         The coverage and conflict views need the schema (a field can be declared
         and never extracted, which is the whole point of showing it) but not the
@@ -524,7 +524,7 @@ class PostgresRepo:
         return (rows[0].get("schema_json") or []) if rows else None
 
     def coverage_aggregates(self, dataset_ids: list[str]) -> dict:
-        """Per dataset and per field, the verdict counts â€” computed in the database.
+        """Per dataset and per field, the verdict counts — computed in the database.
 
         The dashboard used to answer this by shipping up to `RECORD_SAMPLE`
         `row_json` blobs per dataset and counting them in Python. That is 25
@@ -536,7 +536,7 @@ class PostgresRepo:
         So the counting happens where the documents already are. `jsonb_each`
         over `row_json -> 'fields'` yields one row per (record, field), and two
         grouped passes turn that into per-field counts and then per-dataset
-        totals â€” including `empty_fields` and `partial_fields`, which need the
+        totals — including `empty_fields` and `partial_fields`, which need the
         per-field numbers and are therefore not expressible as a single sum.
 
         Two shapes have to be handled or the query errors rather than
@@ -738,6 +738,85 @@ class PostgresRepo:
                 "sources_failed": row.get("sources_failed", 0),
                 "sources": srcs}
 
+    # -- gaps -----------------------------------------------------------------
+    _GAP_COLS = ("id, dataset_id, field, category, missing, unverified, "
+                 "conflicting, state, phase, attempts, reason, stats, "
+                 "last_error, created_at, updated_at, resolved_at")
+
+    def upsert_gap(self, dataset_id: str, field: str, gap: dict) -> dict:
+        """Write one gap, keyed on (dataset_id, field).
+
+        An upsert rather than an insert, because the row is a running record of
+        attempts and an insert would leave the earlier attempts behind as a second
+        row. The unique index makes the key authoritative, so two concurrent gap
+        passes converge on one row instead of racing to create two.
+
+        `reason` is written even while the gap is open. The absence of a value is
+        a finding in its own right and is the thing a person needs to decide
+        whether to spend a search on it; storing it only on a terminal state
+        would make the queue unexplainable while it is still a queue.
+        """
+        gap_id = str(gap.get("id") or uuid.uuid4())
+
+        def _fn(cur):
+            cur.execute(
+                f"""INSERT INTO dataset_gaps
+                        (id,dataset_id,field,category,missing,unverified,conflicting,
+                         state,phase,attempts,reason,stats,last_error,updated_at,
+                         resolved_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,now(),%s)
+                    ON CONFLICT (dataset_id, field) DO UPDATE SET
+                        category=EXCLUDED.category,
+                        missing=EXCLUDED.missing,
+                        unverified=EXCLUDED.unverified,
+                        conflicting=EXCLUDED.conflicting,
+                        state=EXCLUDED.state,
+                        phase=EXCLUDED.phase,
+                        attempts=EXCLUDED.attempts,
+                        reason=EXCLUDED.reason,
+                        stats=EXCLUDED.stats,
+                        last_error=EXCLUDED.last_error,
+                        updated_at=now(),
+                        resolved_at=EXCLUDED.resolved_at
+                    RETURNING {self._GAP_COLS}""",
+                (gap_id, dataset_id, field,
+                 str(gap.get("category") or "depth_gap"),
+                 int(gap.get("missing") or 0), int(gap.get("unverified") or 0),
+                 int(gap.get("conflicting") or 0), str(gap.get("state") or "open"),
+                 int(gap.get("phase") or 0), int(gap.get("attempts") or 0),
+                 str(gap.get("reason") or ""), _jsonb(gap.get("stats") or {}),
+                 str(gap.get("last_error") or ""),
+                 gap.get("resolved_at") or None))
+            row = cur.fetchone()
+            return {k: _plain(v) for k, v in dict(row).items()} if row else {}
+
+        return self._run("upsert_gap", _fn) or {}
+
+    def list_gaps(self, dataset_id: str, *, state: str | None = None) -> list[dict]:
+        """The persisted gaps for a dataset, biggest outstanding first.
+
+        Ordered by the same measure the derived view uses, so the persisted queue
+        and the computed one agree on what matters most — two lists ordered
+        differently would make it impossible to tell whether they describe the
+        same work.
+        """
+        sql = f"SELECT {self._GAP_COLS} FROM dataset_gaps WHERE dataset_id=%s"
+        params: list = [dataset_id]
+        if state:
+            sql += " AND state=%s"
+            params.append(state)
+        sql += " ORDER BY (missing + unverified + conflicting) DESC, field ASC"
+        return self._rows("list_gaps", sql, tuple(params))
+
+    def get_gap(self, dataset_id: str, field: str) -> dict | None:
+        """One gap, or None. A miss is a real answer, not an error."""
+        rows = self._rows(
+            "get_gap",
+            f"SELECT {self._GAP_COLS} FROM dataset_gaps "
+            "WHERE dataset_id=%s AND field=%s",
+            (dataset_id, field))
+        return rows[0] if rows else None
+
     # -- evidence -------------------------------------------------------------
     def get_pages(self, run_id: str, limit: int = 200) -> list[dict]:
         """Stored evidence, newest first. Content is truncated for transport."""
@@ -791,7 +870,7 @@ class PostgresRepo:
 
         `raw_html` is deliberately excluded. Measured on this instance, one
         page with its raw_html took 2.7s and the same page without it took
-        0.13s â€” the HTML is the whole cost and backfill does not need it. The
+        0.13s — the HTML is the whole cost and backfill does not need it. The
         `markdown` column *is* the stored evidence text (the crawler writes
         `page_evidence_text(page)` into it), so handing that to the extractor
         reproduces the same string the offsets were computed against. Losing the

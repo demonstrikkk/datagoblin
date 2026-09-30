@@ -35,6 +35,8 @@ from app.services import refresh as refresh_svc
 from app.services import yieldmap as yieldmap_svc
 from app.services import crawler as crawler_svc
 from app.services import coverage as coverage_svc
+from app.services import gapfill as gapfill_svc
+from app.services import gaps as gaps_svc
 from app.services import exporter as exporter_svc
 from app.services import impersonation as impersonation_svc
 from app.services import jobs as jobs_svc
@@ -663,6 +665,120 @@ async def backfill_run(did: str, body: dict, cid: str = Depends(correlation_id))
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
+@app.get("/api/datasets/{did}/gaps", dependencies=[Depends(require_api_key)])
+async def list_dataset_gaps(did: str, cid: str = Depends(correlation_id)) -> dict:
+    """Every recorded gap, and what may be attempted next. Reads only.
+
+    The derived counts come from the coverage matrix; the attempt history comes
+    from `dataset_gaps`. `attemptable` on each row is the number a person wants —
+    "can this still be worked on" — as distinct from "does this gap exist", which
+    stays true for a field we have already proved the sources do not carry.
+
+    `next_phase` is the whole point of the endpoint: a gap at phase 0 is not
+    ready to be searched, because re-reading the stored pages has not been tried
+    and it costs no external requests. Reporting `next_phase: 1` is what stops
+    the obvious UI from spending a search on a question the run already answered.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    rows = (await asyncio.to_thread(r.get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
+    matrix = coverage_svc.field_coverage(
+        rows, await asyncio.to_thread(r.get_dataset_schema, did))
+    can_track = gaps_svc.tracked(r)
+    try:
+        gap_rows = await asyncio.to_thread(gaps_svc.sync, r, did, matrix) \
+            if can_track else gaps_svc.derive(matrix)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("gap sync failed for dataset %s: %s", did, exc)
+        can_track = False
+        gap_rows = gaps_svc.derive(matrix)
+
+    for row in gap_rows:
+        nxt = gaps_svc.next_phase(row) if can_track else None
+        row["next_phase"] = nxt
+        row["attemptable"] = bool(nxt)
+        allowed, why = (gaps_svc.can_attempt(row, phase=nxt) if nxt else (False, ""))
+        row["blocked_reason"] = "" if allowed else (why or "nothing left to try")
+
+    return {"data": {"dataset_id": did, "gaps": gap_rows,
+                     "summary": gaps_svc.summary(gap_rows), "tracked": can_track},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/gaps/fill", dependencies=[Depends(require_api_key)])
+async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Attempt one phase on one gap. `apply: false` is the default.
+
+    The ladder is enforced in `gapfill`, not here: a request for phase 2 on a gap
+    that has never been through phase 1 is refused with the reason, and nothing is
+    searched. `apply: false` still searches, fetches and extracts for real and
+    withholds only the write, so the cost on the response is measured rather than
+    estimated.
+
+    Phase 2 is the first thing in the system that spends money on the open web
+    without a full run behind it, so the request body may not raise the search
+    budget: `search_budget` is clamped to `MAX_SEARCHES_PER_PASS` and a larger
+    value is an error rather than a silent clamp, because a silently ignored
+    budget is indistinguishable from one that was honoured.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    field = str(body.get("field") or "").strip()
+    if not field:
+        raise validation("field is required: name one recorded gap to attempt")
+    if gaps_svc.tracked(r) is False:
+        raise validation(
+            "this workspace cannot record gap attempts, so there is nothing to "
+            "attempt against. The derived coverage view still works; run the "
+            "migration for 007_dataset_gaps to enable this")
+
+    phase = body.get("phase")
+    phase = gaps_svc.PHASE_SEARCH if phase is None else int(phase)
+    if phase not in (gaps_svc.PHASE_STORED, gaps_svc.PHASE_SEARCH):
+        raise validation(f"phase must be {gaps_svc.PHASE_STORED} or "
+                         f"{gaps_svc.PHASE_SEARCH}, not {phase}")
+
+    apply_flag = bool(body.get("apply"))
+    budget = int(body.get("search_budget") or gapfill_svc.MAX_SEARCHES_PER_PASS)
+    if not 1 <= budget <= gapfill_svc.MAX_SEARCHES_PER_PASS:
+        raise validation(f"search_budget must be between 1 and "
+                         f"{gapfill_svc.MAX_SEARCHES_PER_PASS}; this request is "
+                         f"refused rather than clamped, so a budget you did not "
+                         f"get is never reported as one you did")
+
+    async def _llm(prompt: str, schema: dict) -> dict:
+        return await llm_provider.structured_generate(prompt, schema)
+
+    run_id = str((await asyncio.to_thread(r.get_dataset_row, did)) or {}).get("run_id", "")
+
+    async def _persist_page(page: dict) -> str:
+        """Store the fetched body so its quote can be checked later.
+
+        A value written from a page nobody kept carries a quote that points at
+        text that does not exist, which is the specific failure the evidence
+        store was added to stop.
+        """
+        if not run_id:
+            return ""
+        return await asyncio.to_thread(r.upsert_page, run_id, page)
+
+    try:
+        out = await gapfill_svc.run(
+            r, did, field, phase=phase, llm=_llm,
+            search_fn=search_provider.search, fetch_fn=_fetch_method,
+            persist_page=_persist_page, search_budget=budget, apply=apply_flag)
+    except gapfill_svc.GapFillRefused as exc:
+        raise validation(str(exc))
+
+    if apply_flag and int(out.get("report", {}).get("written") or 0):
+        dashboard_svc.invalidate()
+        if gaps_svc.tracked(r):
+            await asyncio.to_thread(r.upsert_gap, did, field, out["gap"])
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
 @app.get("/api/datasets/{did}/profile", dependencies=[Depends(require_api_key)])
 async def dataset_profile(did: str,
                           limit: int = Query(default=profile_svc.MAX_RECORDS,
@@ -1085,6 +1201,14 @@ async def dataset_coverage(did: str, cid: str = Depends(correlation_id)) -> dict
     Derived purely by reading stored records. A declared field that no page ever
     carried is reported as absent, never defaulted — a coverage number that
     filled its own gaps would be worse than no number at all.
+
+    `gaps` adds the attempt history from 007: the same fields, classified by which
+    remedy could close them, and annotated with how far each has actually been
+    tried. `backlog` stays because it is the un-annotated derived list the existing
+    view already renders; `gaps` is the version that can tell "never attempted"
+    from "tried and the sources do not answer it". `tracked` says whether this
+    adapter can persist that history at all, so a read that silently degrades to
+    derived-only does not look identical to one that remembers.
     """
     schema = await asyncio.to_thread(repo().get_dataset_schema, did)
     if schema is None:
@@ -1093,6 +1217,23 @@ async def dataset_coverage(did: str, cid: str = Depends(correlation_id)) -> dict
     matrix = coverage_svc.field_coverage(rows, schema)
     conflicts = coverage_svc.collect_conflicts(rows)
     matrix["backlog"] = coverage_svc.build_backlog(matrix, conflicts)
+
+    store = repo()
+    can_track = gaps_svc.tracked(store)
+    try:
+        gap_rows = await asyncio.to_thread(gaps_svc.sync, store, did, matrix) \
+            if can_track else gaps_svc.derive(matrix)
+    except Exception as exc:  # noqa: BLE001
+        # The derived answer is already computed and correct; losing the history
+        # is a degradation, not a failure, and reporting it as a 500 would hide a
+        # working coverage view behind a feature that is only additive.
+        log.warning("gap sync failed for dataset %s: %s", did, exc)
+        can_track = False
+        gap_rows = gaps_svc.derive(matrix)
+
+    matrix["gaps"] = gap_rows
+    matrix["gap_summary"] = gaps_svc.summary(gap_rows)
+    matrix["gaps_tracked"] = can_track
     return {"data": matrix, "error": None, "meta": {"correlation_id": cid}}
 
 
