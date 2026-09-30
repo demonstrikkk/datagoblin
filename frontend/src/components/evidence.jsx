@@ -223,6 +223,11 @@ export function EvidenceQuote({ value, quote, className = '' }) {
   return (
     <div className={className}>
       <blockquote className="font-display text-[15px] leading-[1.45] text-ink">
+        {/* The quote is always delimited, matched or not. The marks identify the
+            value *within* an already-quoted sentence; dropping the quotation
+            marks when the value is found would make the proven case look less
+            like a citation than the unproven one. */}
+        <span aria-hidden="true">“</span>
         {matched ? (
           <>
             {hay.slice(0, at)}
@@ -230,12 +235,9 @@ export function EvidenceQuote({ value, quote, className = '' }) {
             {hay.slice(at + needle.length)}
           </>
         ) : (
-          <>
-            <span aria-hidden="true">“</span>
-            {hay}
-            <span aria-hidden="true">”</span>
-          </>
+          hay
         )}
+        <span aria-hidden="true">”</span>
       </blockquote>
       <p className="mt-1.5 text-[10.5px] text-muted">
         {matched ? (

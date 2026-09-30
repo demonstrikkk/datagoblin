@@ -4,6 +4,8 @@ import { api, downloadBlob } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
 import FieldsView from '../components/FieldsView.jsx';
+import ReviewQueue from '../components/ReviewQueue.jsx';
+import { CellStatus, asField, evidenceDepth } from '../components/evidence.jsx';
 import {
   CopyButton,
   Dot,
@@ -21,12 +23,10 @@ import {
   Toggle,
 } from '../components/ui.jsx';
 import {
-  REC_VERIFY,
   bytes,
   host,
   num,
   numericShare,
-  toneClass,
   topCategories,
   truncate,
   when,
@@ -36,12 +36,22 @@ const PAGE = 50;
 
 /* ---------------------------------------------------------------- records */
 
-function Cell({ prov }) {
-  const pf = prov && typeof prov === 'object' ? prov : null;
-  const raw = pf ? pf.value : prov;
-  const status = pf?.verification_status;
-  const m = status ? REC_VERIFY[status] : null;
-
+/**
+ * One cell in the ledger.
+ *
+ * A cell is a button, because a cell is a claim and the product's whole purpose
+ * is to let a reader interrogate a claim. Clicking the cell opens the evidence
+ * rail on that one field; clicking the row opens the record. Two targets, two
+ * questions — "why is this value like that" and "what is on this record" — and
+ * the cell wins the click when it is under the pointer.
+ *
+ * A cell with nothing behind it still renders, but is not a button. Offering to
+ * open an evidence drawer that will report no evidence is worse than not
+ * offering, because it teaches the reader that the affordance is unreliable.
+ */
+function Cell({ name, prov, onOpen }) {
+  const pf = asField(prov);
+  const raw = pf.value;
   const text =
     raw === null || raw === undefined || raw === ''
       ? '—'
@@ -51,24 +61,54 @@ function Cell({ prov }) {
         : JSON.stringify(raw)
       : String(raw);
 
-  return (
-    <span className="flex min-w-0 items-start gap-1.5">
-      <span
-        className={`mt-[3px] shrink-0 ${m ? toneClass(m.tone).split(' ')[0] : 'text-rule-2'}`}
-        title={m?.hint || 'No judge assessment for this field'}
-        aria-hidden="true"
-      >
-        {m ? m.glyph : '·'}
-      </span>
-      <span className="sr-only">{m ? m.label : 'unjudged'}: </span>
+  const openable = evidenceDepth(pf.source) > 0;
+  const body = (
+    <>
+      <CellStatus status={pf.status} />
+      <span className="sr-only">{name}: </span>
       <span className="truncate" title={text}>
         {truncate(text, 120)}
       </span>
-    </span>
+    </>
+  );
+
+  if (!openable) {
+    return (
+      <span className="flex min-w-0 items-start gap-1.5 text-muted">
+        <CellStatus status={pf.status} />
+        <span className="sr-only">{name}: </span>
+        <span className="truncate" title={text}>
+          {truncate(text, 120)}
+        </span>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        // The row is also clickable and this button is inside it.
+        e.stopPropagation();
+        onOpen();
+      }}
+      className="focusable group/cell -mx-1 flex min-w-0 max-w-full items-start gap-1.5 rounded-xs px-1 text-left transition-colors duration-150 ease-swift hover:bg-accent/10"
+      title={`${name} — show the evidence behind this value`}
+    >
+      {body}
+      {/* The rail affordance. Faint until the row is under the pointer, so a
+          dense table is not a field of arrows. */}
+      <span
+        aria-hidden="true"
+        className="mt-px shrink-0 text-[9px] text-accent opacity-0 transition-opacity duration-150 group-hover/cell:opacity-100 group-focus-visible/cell:opacity-100"
+      >
+        ⇥
+      </span>
+    </button>
   );
 }
 
-function RecordsTable({ datasetId, schema, onPick }) {
+function RecordsTable({ datasetId, schema, onPick, onCell }) {
   const [page, setPage] = useState(0);
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -222,11 +262,19 @@ function RecordsTable({ datasetId, schema, onPick }) {
         ) : (
           <>
             <div className="scroll-y overflow-x-auto">
+              {/* The ledger. Thin rules, generous rows, and no card shadow — a
+                  research table is ruled paper, not a set of stacked panels.
+                  Row height is deliberately loose so a claim and the glyph that
+                  qualifies it are readable without zooming. */}
               <table className="w-full min-w-max border-collapse text-left">
-                <thead>
-                  <tr className="border-b border-rule">
+                <thead className="sticky top-0 z-10 bg-paper-2/95 backdrop-blur">
+                  <tr className="border-b border-rule-2">
                     {columns.map((c) => (
-                      <th key={c} className="eyebrow whitespace-nowrap px-3.5 py-2 font-semibold">
+                      <th
+                        key={c}
+                        className="eyebrow whitespace-nowrap px-3.5 py-2.5 font-semibold"
+                        scope="col"
+                      >
                         {c}
                       </th>
                     ))}
@@ -237,15 +285,19 @@ function RecordsTable({ datasetId, schema, onPick }) {
                     <tr
                       key={i}
                       onClick={() => onPick(r, page * PAGE + rows.indexOf(r) + 1)}
-                      className="row cursor-pointer text-[12px] text-ink-2"
+                      className="row cursor-pointer text-[12px] text-ink-2 hover:text-ink"
                       style={{
                         animation: `rise-in .3s var(--e-swift) both`,
                         animationDelay: `${Math.min(i, 14) * 14}ms`,
                       }}
                     >
                       {columns.map((c) => (
-                        <td key={c} className="max-w-[280px] px-3.5 py-2 align-top">
-                          <Cell prov={r?.fields?.[c]} />
+                        <td key={c} className="max-w-[280px] px-3.5 py-2.5 align-top leading-snug">
+                          <Cell
+                            name={c}
+                            prov={r?.fields?.[c]}
+                            onOpen={() => onCell(r, c, page * PAGE + rows.indexOf(r) + 1)}
+                          />
                         </td>
                       ))}
                     </tr>
@@ -1795,6 +1847,7 @@ export default function DatasetPage() {
         options={[
           { value: 'fields', label: 'Fields' },
           { value: 'records', label: 'Records' },
+          { value: 'review', label: 'Review' },
           { value: 'coverage', label: 'Gaps' },
           { value: 'conflicts', label: 'Conflicts' },
           { value: 'sources', label: 'Sources' },
@@ -1820,6 +1873,27 @@ export default function DatasetPage() {
               json: record,
             })
           }
+          onCell={(record, field, index) =>
+            inspect({
+              kind: 'record',
+              record,
+              // The rail opens on this field, with the stored page already
+              // resolved when offsets allow it — the reader clicked a value
+              // because they want the sentence behind it, not a summary of it.
+              focusField: field,
+              title: `${field}`,
+              sub: `Record ${index + 1} · ${data.name}`,
+              json: record.fields?.[field],
+            })
+          }
+        />
+      ) : null}
+
+      {tab === 'review' ? (
+        <ReviewQueue
+          datasetId={id}
+          schema={data.schema}
+          onOpenConflicts={() => setTab('conflicts')}
         />
       ) : null}
 

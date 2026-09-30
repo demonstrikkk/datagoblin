@@ -116,7 +116,10 @@ function FieldRow({ name, prov }) {
               aria-expanded={showPage}
               className="btn-outline btn-xs mt-3"
             >
-              {showPage ? 'Hide the stored page' : 'Show the stored page'}
+              {/* Wording is load-bearing: proof.py locates this control by its
+                  label, and "show this quote in the stored page" says what will
+                  actually happen, which "show the stored page" does not. */}
+              {showPage ? 'Hide the stored page' : 'Show this quote in the stored page'}
             </button>
           ) : null}
 
@@ -139,7 +142,7 @@ function FieldRow({ name, prov }) {
   );
 }
 
-function RecordView({ record }) {
+function RecordView({ record, focusField }) {
   if (!record) return <Empty title="No record selected" />;
 
   // `RecordRow` is `{ fields: { name: ProvenanceField } }`. Older/persisted rows
@@ -160,8 +163,29 @@ function RecordView({ record }) {
   // avoid.
   const notProven = fields.length - proven;
 
+  // A cell was clicked, so the rail opens on that one field. The field list
+  // stays below it, because "why is this cell like that" is a narrower question
+  // than "what is on this record" and the reader should not have to re-find the
+  // row they just clicked.
+  const focused =
+    focusField && fields.some(([k]) => k === focusField)
+      ? fields.find(([k]) => k === focusField)
+      : null;
+
   return (
     <>
+      {focused ? (
+        <div className="border-b border-rule bg-warm/25 px-4 py-3.5">
+          <p className="eyebrow">The cell you selected</p>
+          <ProvenanceRail
+            name={focused[0]}
+            prov={focused[1]}
+            showPage={canProve(asField(focused[1]).source)}
+            className="mt-2.5"
+          />
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-3 divide-x divide-rule border-b border-rule">
         <div className="px-4 py-2.5">
           <p className="eyebrow">Fields</p>
@@ -414,7 +438,7 @@ export default function Inspector({ onClose }) {
   if (!item) return null;
 
   let body = null;
-  if (item.kind === 'record') body = <RecordView record={item.record} />;
+  if (item.kind === 'record') body = <RecordView record={item.record} focusField={item.focusField} />;
   else if (item.kind === 'source') body = <SourceView source={item.source} />;
   else if (item.kind === 'event') body = <EventView event={item.event} />;
   else if (item.kind === 'diagnostics') body = <DiagnosticsView health={item.health} loading={item.loading} />;
