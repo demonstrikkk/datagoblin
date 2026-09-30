@@ -100,9 +100,30 @@ def _stem_variants(word: str) -> set[str]:
     return variants
 
 
+async def _tolerant_jev_call(state: str, questions: dict) -> dict | None:
+    """`_jev_call`, but a throttled judge is absence rather than an exception.
+
+    `_jev_call` raises `JevRateLimited` so that a caller *can* know it happened.
+    Three call sites never caught it, and every one of them sits on the run path:
+    a throttled judge therefore propagated out of a decision that was supposed to
+    be advisory and failed the entire run - which is how a run that had already
+    compiled its plan and started screening sources died with a judge rate-limit
+    and produced nothing.
+
+    Returning `None` is not a new behaviour: every one of these call sites
+    already treats `None` as "the judge could not answer" and falls through to a
+    conservative default. A throttle just joins that path instead of ending the
+    run.
+    """
+    try:
+        return await _jev_call(state, questions)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def source_screening(url: str, title: str, snippet: str, entity: str) -> dict:
     """A. YES/NO/UNCERTAIN — NO skips fetch+extract (biggest saver)."""
-    ans = await _jev_call(
+    ans = await _tolerant_jev_call(
         f"Entity: {entity}\nURL: {url}\nTitle: {title}\nSnippet: {snippet[:1500]}",
         {"relevant": {"type": "choice", "instructions": "Is the source likely relevant?",
                       "criteria": {"YES": "about the entity", "NO": "unrelated",
@@ -277,7 +298,7 @@ async def conflict_triage(field: str, value_a: str, value_b: str,
         return {"decision": "A", "provider": "deterministic"}
     if not na or not nb:
         return {"decision": "INSUFFICIENT", "provider": "deterministic"}
-    ans = await _jev_call(
+    ans = await _tolerant_jev_call(
         f"Field: {field}\nA: {value_a} <= {quote_a[:800]}\nB: {value_b} <= {quote_b[:800]}",
         {"which": {"type": "choice", "instructions": "Which value is better supported?",
                    "criteria": {"A": "A better", "B": "B better",
@@ -336,7 +357,7 @@ async def research_continuation(valid: int, requested: int,
     if evidence_summary:
         state_bits.append("Evidence so far: " + evidence_summary[:1200])
 
-    ans = await _jev_call(
+    ans = await _tolerant_jev_call(
         "\n".join(state_bits),
         {"continuation": {
             "type": "choice",
