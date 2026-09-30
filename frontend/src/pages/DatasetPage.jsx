@@ -4,6 +4,7 @@ import { api, downloadBlob } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
 import FieldsView from '../components/FieldsView.jsx';
+import SectorPanel from '../components/SectorPanel.jsx';
 import ReviewQueue from '../components/ReviewQueue.jsx';
 import { CellStatus, asField, evidenceDepth } from '../components/evidence.jsx';
 import {
@@ -181,7 +182,7 @@ function RecordsTable({ datasetId, schema, onPick, onCell }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+<div className="flex flex-wrap items-center justify-between gap-2">
         <Segmented
           size="xs"
           label="Record status filter"
@@ -1703,6 +1704,14 @@ export default function DatasetPage() {
   const [tab, setTab] = useState('records');
 
   const { data, status, error, refetch } = useResource((o) => api.dataset(id, o), [id]);
+  /*
+   * The field profiler is read here rather than inside the Fields tab, because
+   * the domain reading is a property of the *dataset* and not of a tab: it was
+   * buried under Fields, and the page opens on Records, so opening a dataset
+   * never showed it and the feature read as broken. One fetch, passed down, so
+   * the two views cannot show different numbers for the same fields.
+   */
+  const profileRes = useResource((o) => api.profile(id, o), [id]);
 
   if (status === 'loading' && !data) return <Loading rows={7} label="Loading dataset" />;
 
@@ -1841,6 +1850,13 @@ export default function DatasetPage() {
         )}
       </header>
 
+      <SectorPanel
+        profile={profileRes.data}
+        status={profileRes.status}
+        error={profileRes.error}
+        onRetry={profileRes.refetch}
+      />
+
       <Segmented
         label="Dataset section"
         value={tab}
@@ -1858,7 +1874,7 @@ export default function DatasetPage() {
       />
 
       {tab === 'fields' ? (
-        <FieldsView datasetId={id} />
+        <FieldsView datasetId={id} profile={profileRes.data} />
       ) : null}
 
       {tab === 'records' ? (

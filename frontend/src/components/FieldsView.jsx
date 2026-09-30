@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
-import SectorPanel from './SectorPanel.jsx';
 import {
   Empty,
   ErrorNote,
@@ -40,11 +39,24 @@ import { num, truncate, when } from '../lib/format.js';
  * the country field the schema actually has; a drawn map would be a picture of
  * a world this run never visited.
  */
-export default function FieldsView({ datasetId, records = 0 }) {
-  const { data, status, error, refetch, isStale } = useResource(
-    (o) => api.profile(datasetId, o),
-    [datasetId]
-  );
+export default function FieldsView({ datasetId, records = 0, profile = null }) {
+  /*
+   * The profile is usually passed in, because the dataset page shows the domain
+   * panel above the tab bar and needs it there too. Fetching it here as well
+   * would be two identical requests for the same payload — the profiler reads
+   * every field of up to 2,000 records, so it is not a cheap duplicate — and two
+   * copies that could disagree if one were stale.
+   *
+   * Left able to fetch for itself so the component still works on its own.
+   */
+  const own = useResource((o) => api.profile(datasetId, o), [datasetId], {
+    enabled: !profile,
+  });
+  const data = profile ?? own.data;
+  const status = profile ? 'ready' : own.status;
+  const error = profile ? null : own.error;
+  const isStale = own.isStale;
+  const refetch = own.refetch;
   const { inspect } = useInspector();
   const [kind, setKind] = useState('all');
   const [place, setPlace] = useState(null);
@@ -114,17 +126,6 @@ export default function FieldsView({ datasetId, records = 0 }) {
           </button>
         </div>
       </header>
-
-      {/*
-        The domain reading, above the generic field list and below the header.
-
-        It is a header for the field grid rather than a replacement: the grid
-        still lists every declared field, because a domain reading is a
-        convenience and must never hide a field the schema asked for. When the
-        classifier declines it says why instead of disappearing, so the absence is
-        legible rather than looking like a panel that failed to load.
-      */}
-      <SectorPanel profile={data} />
 
       {data.place && data.place.values?.length > 1 ? (
         <PlacePanel place={data.place} active={place} onPick={setPlace} />

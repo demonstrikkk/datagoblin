@@ -40,7 +40,39 @@ function receipt(sector) {
   return `read from ${shown}${more}`;
 }
 
-export default function SectorPanel({ profile }) {
+export default function SectorPanel({ profile, status, error, onRetry }) {
+  /*
+   * The panel sits above the dataset's tab bar, so it has to survive a profile
+   * request that is still in flight or that failed. Rendering `null` for a
+   * pending request would make the panel flicker in and out on every open; a
+   * silent retry button would hide a real failure. So: say which of the two it
+   * is.
+   */
+  if (error) {
+    return (
+      <section className="surface p-3.5">
+        <h2 className="eyebrow">Domain</h2>
+        <p className="mt-1.5 text-[12.5px] text-ink-2">
+          The field profile could not be read, so no domain was assigned.
+        </p>
+        {onRetry ? (
+          <button type="button" onClick={onRetry} className="btn-outline btn-xs mt-2">
+            Retry profile
+          </button>
+        ) : null}
+      </section>
+    );
+  }
+
+  if (!profile && status === 'loading') {
+    return (
+      <section className="surface p-3.5">
+        <h2 className="eyebrow">Domain</h2>
+        <p className="mt-1.5 text-[12.5px] text-muted">Reading every field to place this dataset…</p>
+      </section>
+    );
+  }
+
   const sector = profile?.sector || null;
   if (!sector) {
     return null;

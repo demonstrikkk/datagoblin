@@ -1,0 +1,1364 @@
+{
+    "datasets":  [
+                     {
+                         "label":  "Identify top 5 Indian AI startups",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Name of the startup",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "description",
+                                            "type":  "string",
+                                            "description":  "Brief description of the startup",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Official website URL",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_amount",
+                                            "type":  "number",
+                                            "description":  "Total funding raised in USD",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founders",
+                                            "type":  "array",
+                                            "description":  "List of founders",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "year_founded",
+                                            "type":  "number",
+                                            "description":  "Year the startup was founded",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "headquarters",
+                                            "type":  "string",
+                                            "description":  "Headquarters location",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "revenue",
+                                            "type":  "number",
+                                            "description":  "Annual revenue in USD",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_email",
+                                            "type":  "string",
+                                            "description":  "Primary contact email",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Find AI startups in London",
+                         "fields":  [
+                                        {
+                                            "name":  "startup_name",
+                                            "type":  "string",
+                                            "description":  "Name of the AI startup",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "founders",
+                                            "type":  "string",
+                                            "description":  "Names of the founders of the startup",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_funding",
+                                            "type":  "string",
+                                            "description":  "Details about the latest funding round",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "active_engineering_roles",
+                                            "type":  "string",
+                                            "description":  "Information on active engineering roles",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Find 15 AI startups in London with founders, latest funding, and active engineering roles.",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Company name",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "founder",
+                                            "type":  "string",
+                                            "description":  "Founder name(s)",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_stage",
+                                            "type":  "string",
+                                            "description":  "Funding stage / amount",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "location",
+                                            "type":  "string",
+                                            "description":  "Location",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "open_roles",
+                                            "type":  "array",
+                                            "description":  "Open roles / titles",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Find 15 AI startups in London with founders, latest funding, and active engineering roles.",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Company name",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "founder",
+                                            "type":  "string",
+                                            "description":  "Founder name(s)",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_stage",
+                                            "type":  "string",
+                                            "description":  "Funding stage / amount",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "location",
+                                            "type":  "string",
+                                            "description":  "Location",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "open_roles",
+                                            "type":  "array",
+                                            "description":  "Open roles / titles",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Identify the top 10 stocks of the Indian share market as of 29-09-2026, capturing identifying details plus market and pr",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the listed company",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "symbol",
+                                            "type":  "string",
+                                            "description":  "Exchange ticker symbol identifying the stock",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "exchange",
+                                            "type":  "string",
+                                            "description":  "Listing exchange, e.g. NSE or BSE",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "market_cap",
+                                            "type":  "number",
+                                            "description":  "Market capitalisation in INR",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "rank",
+                                            "type":  "number",
+                                            "description":  "Position in the top 10 ranking, 1 = highest",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "last_price",
+                                            "type":  "number",
+                                            "description":  "Latest traded price in INR on 2026-09-29",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "change_percent",
+                                            "type":  "number",
+                                            "description":  "Percentage price change for the session",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "sector",
+                                            "type":  "string",
+                                            "description":  "Sector classification",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "industry",
+                                            "type":  "string",
+                                            "description":  "Industry classification",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "pe_ratio",
+                                            "type":  "number",
+                                            "description":  "Trailing price to earnings ratio",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Official corporate website",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "isin",
+                                            "type":  "string",
+                                            "description":  "ISIN code of the security",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "listing_date",
+                                            "type":  "date",
+                                            "description":  "First listing date on the exchange",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "as_of_date",
+                                            "type":  "date",
+                                            "description":  "Date of the market data snapshot",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "find top 10 stocks in india share market as of today 29-09-2026",
+                         "fields":  [
+                                        {
+                                            "name":  "item_name",
+                                            "type":  "string",
+                                            "description":  "Item name",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "location",
+                                            "type":  "string",
+                                            "description":  "Location",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Discover companies operating in the collaboration industry (collaboration software, team collaboration platforms, UCaaS,",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the company or collaboration vendor.",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "City of the company\u0027s headquarters or primary listed office.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "country",
+                                            "type":  "string",
+                                            "description":  "Country of the headquarters city.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "headquarters",
+                                            "type":  "string",
+                                            "description":  "Full headquarters location as stated on the page, e.g. San Francisco, California, United States.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "product_name",
+                                            "type":  "string",
+                                            "description":  "Name of the company\u0027s collaboration product or flagship platform.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Company or product website URL.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "industry_segment",
+                                            "type":  "string",
+                                            "description":  "Collaboration sub-segment such as UCaaS, project management, messaging, video conferencing, workflow automation.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founded_year",
+                                            "type":  "number",
+                                            "description":  "Year the company was founded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "employee_count",
+                                            "type":  "number",
+                                            "description":  "Approximate number of employees.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "revenue_usd",
+                                            "type":  "number",
+                                            "description":  "Annual revenue in USD when published.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_stage",
+                                            "type":  "string",
+                                            "description":  "Latest funding stage such as seed, Series A, public.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "is_public",
+                                            "type":  "boolean",
+                                            "description":  "Whether the company is publicly traded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "ticker_symbol",
+                                            "type":  "string",
+                                            "description":  "Stock ticker symbol if publicly traded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "pricing_model",
+                                            "type":  "string",
+                                            "description":  "Pricing model, e.g. freemium, per-seat subscription, usage-based.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "source_url",
+                                            "type":  "url",
+                                            "description":  "URL of the page where this record was found.",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Discover companies operating in the collaboration industry (collaboration software, team collaboration platforms, UCaaS,",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the company or product vendor in the collaboration industry.",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "City of the company\u0027s headquarters or primary listed office.",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "product_name",
+                                            "type":  "string",
+                                            "description":  "Name of the company\u0027s collaboration product, platform, or flagship offering.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Company or product website URL.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "country",
+                                            "type":  "string",
+                                            "description":  "Country of the headquarters city.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "industry_segment",
+                                            "type":  "string",
+                                            "description":  "Collaboration sub-segment, e.g. UCaaS, project management, messaging, video conferencing, workflow automation.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founded_year",
+                                            "type":  "number",
+                                            "description":  "Year the company was founded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "employee_count",
+                                            "type":  "number",
+                                            "description":  "Approximate number of employees.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_stage",
+                                            "type":  "string",
+                                            "description":  "Latest funding stage such as seed, Series A, public.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "is_public",
+                                            "type":  "boolean",
+                                            "description":  "Whether the company is publicly traded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "ticker_symbol",
+                                            "type":  "string",
+                                            "description":  "Stock ticker if publicly traded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "pricing_model",
+                                            "type":  "string",
+                                            "description":  "Pricing model, e.g. freemium, subscription, per-seat, usage-based.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "source_url",
+                                            "type":  "url",
+                                            "description":  "URL of the page where this record was found.",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Enumerate up to 50 companies from Y Combinator\u0027s 2026 batches (W26, S26, F26) and extract the fullest available profile ",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official company name as listed in the YC directory.",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "yc_slug",
+                                            "type":  "string",
+                                            "description":  "Y Combinator profile slug, e.g. acme-ai, used as canonical profile key.",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "yc_profile_url",
+                                            "type":  "url",
+                                            "description":  "Direct link to the company\u0027s ycombinator.com/companies profile page.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "batch_season",
+                                            "type":  "string",
+                                            "description":  "Batch season code: W26, S26, or F26.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "batch_type",
+                                            "type":  "string",
+                                            "description":  "Standard, Regular, or other YC program track for the batch.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "batch_number",
+                                            "type":  "number",
+                                            "description":  "Sequential YC batch number (e.g. 135 for a 2026 batch).",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "one_liner",
+                                            "type":  "string",
+                                            "description":  "Short company tagline or elevator pitch from the YC profile.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "description",
+                                            "type":  "string",
+                                            "description":  "Longer description of what the company builds and for whom.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website_url",
+                                            "type":  "url",
+                                            "description":  "Company\u0027s own product or marketing website.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "industry",
+                                            "type":  "string",
+                                            "description":  "Primary industry category (e.g. AI, Fintech, Health Tech).",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "sub_industries",
+                                            "type":  "array",
+                                            "description":  "Additional YC industry or sub-category tags.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "tags",
+                                            "type":  "array",
+                                            "description":  "All topic tags listed on the YC profile.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founder_names",
+                                            "type":  "array",
+                                            "description":  "Names of the company\u0027s founders as listed by YC.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founder_count",
+                                            "type":  "number",
+                                            "description":  "Number of founders on the founding team.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founder_links",
+                                            "type":  "array",
+                                            "description":  "LinkedIn or personal site URLs for founders, when discoverable.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "team_size",
+                                            "type":  "number",
+                                            "description":  "Current headcount of employees.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "Primary city of operation.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "state_region",
+                                            "type":  "string",
+                                            "description":  "State, province, or region of the primary location.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "country",
+                                            "type":  "string",
+                                            "description":  "Country of the primary location.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "is_remote_friendly",
+                                            "type":  "boolean",
+                                            "description":  "Whether the company advertises remote or hybrid work.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founded_year",
+                                            "type":  "number",
+                                            "description":  "Year the company was founded.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "status",
+                                            "type":  "string",
+                                            "description":  "Company operating status: Active, Inactive, or Acquired.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "total_funding_usd",
+                                            "type":  "number",
+                                            "description":  "Total disclosed funding raised in USD.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_round_type",
+                                            "type":  "string",
+                                            "description":  "Most recent funding round type (Seed, Series A, etc.).",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_round_date",
+                                            "type":  "date",
+                                            "description":  "Date of the most recent funding round.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "valuation_usd",
+                                            "type":  "number",
+                                            "description":  "Reported valuation, if publicly disclosed.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "other_investors",
+                                            "type":  "array",
+                                            "description":  "Named co-investors and funds in the company\u0027s rounds.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "is_hiring",
+                                            "type":  "boolean",
+                                            "description":  "Whether the company has open roles posted.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "open_roles_count",
+                                            "type":  "number",
+                                            "description":  "Number of currently open positions.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "customer_count",
+                                            "type":  "number",
+                                            "description":  "Reported number of customers or users.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "linkedin_url",
+                                            "type":  "url",
+                                            "description":  "Company LinkedIn page.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "twitter_url",
+                                            "type":  "url",
+                                            "description":  "Company X/Twitter profile.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "other_links",
+                                            "type":  "array",
+                                            "description":  "Other official links such as GitHub, careers page, or press.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "product_photos",
+                                            "type":  "array",
+                                            "description":  "Image URLs of the product or landing page if available.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "source_urls",
+                                            "type":  "array",
+                                            "description":  "All URLs used to verify and enrich this record.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "last_verified_date",
+                                            "type":  "date",
+                                            "description":  "Date the record was last confirmed against a live source.",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Find 3 Series A climate software companies in Berlin",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official company name",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Company homepage",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_round",
+                                            "type":  "string",
+                                            "description":  "Funding round (e.g. Series A)",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "industry",
+                                            "type":  "string",
+                                            "description":  "Primary industry focus (e.g. climate software)",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "Headquarters city",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Find 15 AI startups headquartered in London, with founder names, their latest funding round details, and currently open ",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the AI startup company.",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website_url",
+                                            "type":  "url",
+                                            "description":  "Company\u0027s own website URL.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "hq_location",
+                                            "type":  "string",
+                                            "description":  "Confirmed headquarters or primary office location; should indicate London.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founders",
+                                            "type":  "array",
+                                            "description":  "Names of founders and co-founders, with titles where known.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founder_titles",
+                                            "type":  "array",
+                                            "description":  "Role/title of each founder (e.g. CEO, CTO, Co-founder).",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_funding_round_type",
+                                            "type":  "string",
+                                            "description":  "Stage of the most recent funding round (e.g. Seed, Series A, Series B).",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_funding_amount",
+                                            "type":  "number",
+                                            "description":  "Amount raised in the most recent round, in GBP or stated currency.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_funding_date",
+                                            "type":  "date",
+                                            "description":  "Announcement date of the most recent funding round.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "latest_funding_investors",
+                                            "type":  "array",
+                                            "description":  "Lead and participating investors in the most recent round.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "total_funding_raised",
+                                            "type":  "number",
+                                            "description":  "Cumulative total funding raised to date.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "ai_focus_area",
+                                            "type":  "string",
+                                            "description":  "Primary AI product area or technical focus of the company.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "open_engineering_roles_count",
+                                            "type":  "number",
+                                            "description":  "Count of currently open engineering/technical job postings.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "open_engineering_roles",
+                                            "type":  "array",
+                                            "description":  "Titles of currently open engineering roles (e.g. ML Engineer, Founding Backend Engineer).",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "careers_page_url",
+                                            "type":  "url",
+                                            "description":  "URL of the company\u0027s careers or jobs page where engineering roles are listed.",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "source_url",
+                                            "type":  "url",
+                                            "description":  "URL of the page where the record\u0027s details were found.",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Identify active NGOs operating in Delhi, India that currently implement programs focused on women empowerment and/or gen",
+                         "fields":  [
+                                        {
+                                            "name":  "ngo_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the NGO or organization as stated on its own website or authoritative listings",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website_url",
+                                            "type":  "url",
+                                            "description":  "Official website URL of the organization",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "City or district of primary operation within Delhi NCR",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "focus_areas",
+                                            "type":  "array",
+                                            "description":  "Program themes, including gender equality, women\u0027s empowerment, women\u0027s rights, skill training, livelihood, education, health, safety, and legal aid",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "women_empowerment_programs",
+                                            "type":  "string",
+                                            "description":  "Description of current programs specifically advancing women\u0027s empowerment or gender equality",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "year_established",
+                                            "type":  "number",
+                                            "description":  "Year the organization was founded or registered",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "legal_status",
+                                            "type":  "string",
+                                            "description":  "Registration status such as NGO, trust, society, section 8 company, or charitable foundation",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "registration_id",
+                                            "type":  "string",
+                                            "description":  "FCRA, NGO Darpan, or Registrar of Societies registration identifier if published",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_phone",
+                                            "type":  "string",
+                                            "description":  "Published office or helpline telephone number",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_email",
+                                            "type":  "string",
+                                            "description":  "Published contact email address",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "address",
+                                            "type":  "string",
+                                            "description":  "Delhi office address or working area mentioned in the source",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "beneficiaries_reached",
+                                            "type":  "number",
+                                            "description":  "Number of women or girls served in the most recent reported year",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "staff_count",
+                                            "type":  "number",
+                                            "description":  "Approximate number of full-time staff or volunteers",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "annual_budget_inr",
+                                            "type":  "number",
+                                            "description":  "Latest disclosed annual budget in Indian rupees",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_partners",
+                                            "type":  "array",
+                                            "description":  "Named institutional funders or government bodies supporting the programs",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "programs_active_status",
+                                            "type":  "boolean",
+                                            "description":  "True when the source shows current or ongoing operations and active programs rather than archived or closed activity",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "last_activity_date",
+                                            "type":  "date",
+                                            "description":  "Most recent verifiable activity, report, or news publication date",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "source_url",
+                                            "type":  "url",
+                                            "description":  "URL of the page used to verify the organization\u0027s active Delhi operations and gender programs",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "notes",
+                                            "type":  "string",
+                                            "description":  "Additional context on Delhi presence, program scope, or verification caveats",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Identify active NGOs in Delhi, India currently working on women empowerment and/or gender equality programs",
+                         "fields":  [
+                                        {
+                                            "name":  "organization_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the NGO organization",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Official website URL of the NGO",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "City or district where the NGO is based",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "address",
+                                            "type":  "string",
+                                            "description":  "Registered or operating address in Delhi",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "focus_area",
+                                            "type":  "string",
+                                            "description":  "Primary mission areas including women empowerment and/or gender equality",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "programs",
+                                            "type":  "array",
+                                            "description":  "Names or descriptions of current women empowerment or gender equality programs",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "year_established",
+                                            "type":  "number",
+                                            "description":  "Year the organization was founded",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "registration_number",
+                                            "type":  "string",
+                                            "description":  "FCRA, NGO Darpan, or Charity Commissioner registration identifier",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_email",
+                                            "type":  "string",
+                                            "description":  "Official contact email address",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_phone",
+                                            "type":  "string",
+                                            "description":  "Official contact phone number",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "beneficiaries_reached",
+                                            "type":  "number",
+                                            "description":  "Reported number of women or girls benefited",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "staff_count",
+                                            "type":  "number",
+                                            "description":  "Number of employees or volunteers reported",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "funding_sources",
+                                            "type":  "array",
+                                            "description":  "Government, corporate, donor, or CSR funding sources disclosed",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Identify active NGOs in Delhi, India currently working on women empowerment and/or gender equality programs",
+                         "fields":  [
+                                        {
+                                            "name":  "ngo_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the NGO organization",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website_url",
+                                            "type":  "url",
+                                            "description":  "Official website URL of the NGO",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "City or locality in Delhi where the NGO operates",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "focus_areas",
+                                            "type":  "array",
+                                            "description":  "Program areas related to women empowerment, e.g. education, livelihoods, health, legal aid, safety, political participation",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "programs_description",
+                                            "type":  "string",
+                                            "description":  "Short description of current women empowerment or gender equality programs",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "year_founded",
+                                            "type":  "number",
+                                            "description":  "Year the organization was founded",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "registration_id",
+                                            "type":  "string",
+                                            "description":  "Registration or legal entity identifier such as NGO Darpan, FCRA, or Darpan registration number",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_email",
+                                            "type":  "string",
+                                            "description":  "Public contact email address",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_phone",
+                                            "type":  "string",
+                                            "description":  "Public contact phone number",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "operating_status",
+                                            "type":  "string",
+                                            "description":  "Operational status indicating the NGO is active, e.g. active, operational",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "Find 5 active NGOs in Delhi, India working on women\u0027s empowerment",
+                         "fields":  [
+                                        {
+                                            "name":  "ngo_name",
+                                            "type":  "string",
+                                            "description":  "Name of the NGO organization",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website_url",
+                                            "type":  "url",
+                                            "description":  "Official website of the NGO",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "city",
+                                            "type":  "string",
+                                            "description":  "City or locality in Delhi where the NGO operates",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "focus_area",
+                                            "type":  "string",
+                                            "description":  "Women\u0027s empowerment programs or focus areas",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_phone",
+                                            "type":  "string",
+                                            "description":  "Official contact phone number",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "contact_email",
+                                            "type":  "string",
+                                            "description":  "Official contact email address",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "registration_number",
+                                            "type":  "string",
+                                            "description":  "Registration or darpan/FCRA identifier if listed",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "year_established",
+                                            "type":  "number",
+                                            "description":  "Year the organization was founded",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "active_status",
+                                            "type":  "boolean",
+                                            "description":  "Whether the NGO is currently operational",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "List AI companies headquartered in Europe that publicly publish annual revenue figures",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official name of the AI company headquartered in Europe",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website_url",
+                                            "type":  "url",
+                                            "description":  "Company\u0027s official website",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "headquarters_country",
+                                            "type":  "string",
+                                            "description":  "Country of company headquarters in Europe",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "annual_revenue_eur",
+                                            "type":  "number",
+                                            "description":  "Published annual revenue in euros, converted if reported in another currency",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "revenue_currency",
+                                            "type":  "string",
+                                            "description":  "Currency the revenue figure was originally reported in",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "fiscal_year",
+                                            "type":  "number",
+                                            "description":  "Fiscal year the revenue figure applies to",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "ai_focus_area",
+                                            "type":  "string",
+                                            "description":  "Primary AI product or research area of the company",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "revenue_source_url",
+                                            "type":  "url",
+                                            "description":  "URL of the filing, report, or article publishing the revenue figure",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "source_type",
+                                            "type":  "string",
+                                            "description":  "Type of source: filings registry, company report, or press coverage",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "employee_count",
+                                            "type":  "number",
+                                            "description":  "Reported number of employees",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "founded_year",
+                                            "type":  "number",
+                                            "description":  "Year the company was founded",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "is_public_company",
+                                            "type":  "boolean",
+                                            "description":  "Whether the company is publicly listed and files periodic revenue reports",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "ticker_or_registration_id",
+                                            "type":  "string",
+                                            "description":  "Stock ticker or company registration number",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "last_verified_date",
+                                            "type":  "date",
+                                            "description":  "Date the revenue figure was last confirmed against its source",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "List AI companies in Europe that publish annual revenue figures",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Name of the AI company",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "country",
+                                            "type":  "string",
+                                            "description":  "European country where the company is headquartered",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Official company website URL",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "annual_revenue",
+                                            "type":  "number",
+                                            "description":  "Most recent published annual revenue figure",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "revenue_year",
+                                            "type":  "number",
+                                            "description":  "Year of the published annual revenue figure",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "List AI companies in Europe that publish annual revenue figures",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Name of the AI company",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "country",
+                                            "type":  "string",
+                                            "description":  "European country where the company is headquartered",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Company official website URL",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "annual_revenue",
+                                            "type":  "string",
+                                            "description":  "Published annual revenue figure including currency",
+                                            "required":  false
+                                        },
+                                        {
+                                            "name":  "revenue_year",
+                                            "type":  "number",
+                                            "description":  "Year the annual revenue figure corresponds to",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "List AI companies in Europe that publish annual revenue figures",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official brand or legal name of the AI company",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "headquarters_country",
+                                            "type":  "string",
+                                            "description":  "European country where the company is headquartered",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Official company website URL",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "annual_revenue",
+                                            "type":  "string",
+                                            "description":  "Latest published annual revenue figure including currency and scale",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "revenue_fiscal_year",
+                                            "type":  "number",
+                                            "description":  "Fiscal year corresponding to the published revenue figure",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "revenue_source_url",
+                                            "type":  "url",
+                                            "description":  "URL of source publishing the annual revenue figure",
+                                            "required":  false
+                                        }
+                                    ]
+                     },
+                     {
+                         "label":  "List AI companies in Europe that publish annual revenue figures",
+                         "fields":  [
+                                        {
+                                            "name":  "company_name",
+                                            "type":  "string",
+                                            "description":  "Official brand or legal name of the AI company",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "headquarters_country",
+                                            "type":  "string",
+                                            "description":  "European country where the company is headquartered",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "website",
+                                            "type":  "url",
+                                            "description":  "Official company website URL",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "annual_revenue",
+                                            "type":  "string",
+                                            "description":  "Latest published annual revenue figure including currency and scale",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "revenue_fiscal_year",
+                                            "type":  "number",
+                                            "description":  "Fiscal year corresponding to the published revenue figure",
+                                            "required":  true
+                                        },
+                                        {
+                                            "name":  "revenue_source_url",
+                                            "type":  "url",
+                                            "description":  "URL of source publishing the annual revenue figure",
+                                            "required":  false
+                                        }
+                                    ]
+                     }
+                 ]
+}
