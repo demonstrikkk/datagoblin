@@ -284,7 +284,7 @@ not "evidence supports this".
 
 ## 6. Data model
 
-Six migrations. Tables that exist and are written:
+Seven migrations. Tables that exist and are written:
 
 | Table | Purpose | Notes |
 |---|---|---|
@@ -295,6 +295,7 @@ Six migrations. Tables that exist and are written:
 | `pages` | stored evidence | `markdown` = the evidence text; `raw_html` snapshot |
 | `datasets`, `dataset_records` | output | records in `row_json` |
 | `exports` | export ledger | `(id, dataset_id, format, byte_size)` — **no payload column** |
+| `dataset_gaps` | what has been *tried* per missing field | migration 007 — **not yet applied to any live database** |
 
 `pages` has a unique index on `(run_id, url)`, so re-fetching updates the evidence
 rather than forking it. `dataset_records` has **no** unique index and no
@@ -306,6 +307,100 @@ infer `type`, but the actual messages are `Extracted N from …`, `Merged N
 duplicates`, `Record dropped at …`. Almost every historical event ends up with
 `type: ''` — honestly unidentified, which the migration's own comment accepts as
 the safe outcome.
+
+**Migration 007 exists and is unapplied.** `dataset_gaps` records which phase a
+missing field has been attempted through. Until it is applied, `/coverage` and
+`/gaps` still answer correctly — they degrade to derived-only and say so via
+`gaps_tracked: false` — and the panel renders an explicit notice rather than
+offering a button that cannot record what it did.
+
+---
+
+## 6a. Two-phase gap filling
+
+The gap the old Coverage view could report but never close. A field no stored page
+carries needs one of two different remedies, and the old single `routable` flag
+conflated them:
+
+| Category | Means | What closes it |
+|---|---|---|
+| `schema_gap` | no record carries the field | re-reading stored pages; possibly nothing does |
+| `depth_gap` | some records carry it, some do not | a second pass that fetches pages for the missing entities |
+| `evidence_gap` | a value exists with no verdict, or sources disagree | the judge or a person — **not** fetching |
+
+The ladder is strict and enforced in `gaps.can_attempt`:
+
+```
+phase 0  never attempted
+phase 1  re-read pages this run already stored   (no external requests)
+phase 2  targeted web search, fetch, extract      (costs money)
+```
+
+`phase` advances **only from a completed attempt**. A gap that was proposed but
+never run stays at 0; a phase-2 search that found nothing reaches 2 and becomes
+`exhausted`. This is the invariant the table exists for: the UI must not be able
+to show "we searched the web" for a field that was only re-read.
+
+`exhausted` is a **finding, not a failure**, and it is terminal. `refused` is kept
+separate because nothing was tried — collapsing the two would report a conclusion
+from an attempt that never happened. A provider error advances the phase but
+leaves the gap `open`: a network failure is not evidence that the sources lack
+the field.
+
+`gapfill.run` inherits every safety rule from `backfill` and relaxes none: exact
+identity match through `deduper._sig`, empty cells only, every written value
+through the same `validator.wrap_record`, and fetched pages persisted before
+extraction so a quote points at text that still exists. Searches are sequential
+(search APIs rate-limit and a burst of twelve parallel queries is the shape most
+likely to return 429 for the whole batch) and bounded at 12 per pass, refused with
+422 rather than silently clamped.
+
+An `evidence_gap` is **refused outright** at either phase. Fetching cannot add a
+verdict, so a search here would spend money to produce a second unproven value for
+a field whose problem is that the first was never judged.
+
+---
+
+## 6b. Dashboard cost
+
+Measured 23s cold for 25 datasets. Two independent causes, addressed separately.
+
+**Single-flight.** The 300s TTL only helps *after* the first request finishes, and
+the dashboard is the landing page — so the first thing anyone does with a cold
+cache is open it three ways at once, meaning three identical 20–30s computes
+against the same database. `_single_flight` collapses concurrent computes per
+`(limit, use_cache)` key and reports `shared` so a slow page can be diagnosed as a
+stampede rather than guessed at.
+
+Implemented with `threading`, **not** asyncio, and the reason is load-bearing: the
+compute is synchronous and the route runs it through `asyncio.to_thread`. An
+asyncio-based single-flight would have to move the compute onto the event loop in
+order to await a shared future, stalling every other request in the process — a
+slower way of causing a stampede than preventing one. An async version was written
+first and reverted for exactly this reason.
+
+**Aggregation in the database.** Coverage was computed by shipping up to
+`RECORD_SAMPLE` `row_json` blobs per dataset and counting them in Python: 25 round
+trips carrying megabytes of JSON to produce a dozen integers each.
+`PostgresRepo.coverage_aggregates` does it in one query via `jsonb_each` over
+`row_json -> 'fields'`, grouping per field then per dataset — `empty_fields` and
+`partial_fields` need the per-field numbers and are not expressible as one sum.
+
+Two consequences stated plainly:
+
+* **Coverage is now read over every record, not a 2,000-row sample.** That
+  changes the numbers, and it is the better number: a sample silently understated
+  coverage on any larger dataset with no way to tell from the payload. `sampled`
+  is now false because nothing is sampled.
+* **Both adapters must agree exactly.** `LocalRepo.coverage_aggregates` delegates
+  to `coverage.field_coverage`, the same shared implementation, so a coverage
+  figure cannot depend on which adapter is live.
+  `test_dashboard_aggregate.py` pins the agreement across the cases where the two
+  approaches genuinely differ: pre-provenance bare scalars, `not_proven` folding,
+  declared-but-never-extracted fields, and zero-record datasets.
+
+`get_run` is read once per *distinct run* rather than once per dataset, since
+datasets share runs and partiality is a property of the run.
 
 ---
 
@@ -473,6 +568,81 @@ breaks the promise that a disputed value can be seen and judged.
 | Link candidates offered vs queued | 300 → 48 | same, now after relevance ranking |
 | Stored pages that were nav/legal/root furniture | 28 of 151 (19%) | — |
 | E2E race conditions | 3 fixed sleeps reading empty shells | content/stability waits |
+
+---
+
+## 8a. Sector reading, rebuilt against real schemas
+
+The domain classifier returned `sector: null, method: none` for a live dataset,
+and the panel that showed the result was unreachable: it lived inside the **Fields**
+tab while the dataset page opens on **Records**. Two separate defects, one of them
+not a classifier problem at all.
+
+The vocabulary had no `venture` or `nonprofit` entry, so the most common kind of
+request in this workspace — AI startups — had no way to classify. Rebuilt against a
+**frozen corpus of all 20 live datasets** (`tests/fixtures/schema_corpus.json`,
+197 field entries) rather than against imagined schemas.
+
+Two precision rules that the corpus forced, each fixing a real misread:
+
+* **A description may only confirm what the field *name* already suggested.** The
+  Delhi NGO datasets carry `focus_areas` — "Program themes, including gender
+  equality, women's empowerment, skill training, livelihood, **education**, health,
+  safety, and legal aid" — and that one line matched `education` and `healthcare`
+  at 0.5 each, on a dataset about charities. Programme themes are the subject of
+  the records, not the kind of dataset they are. The rule is "the name is the
+  schema, the description is commentary". It costs nothing where it matters:
+  `symbol` / "Exchange ticker symbol identifying the stock" still reaches 1.5.
+* **Description matching is by prefix, not equality**, because the planner writes
+  descriptions about the *value*: "List of founders" has to answer to `founder`,
+  "Approximate number of employees" to `employee`. Without it, three of the
+  corpus's own decisive fields scored nothing.
+
+Result on the corpus: startup datasets 2.5–13.5, Indian stocks 8.5, Delhi NGOs
+2.0–5.5. Collaboration-vendor datasets are refused as **ambiguous** (the fields
+point at three domains and the gap is real). EU annual-revenue filings and a stub
+dataset are refused. A five-field Series-A dataset is refused as **below-floor**,
+which is the correct outcome rather than a disappointing one — rendering Venture
+panels would put a funding chart in front of a dataset with no funding fields.
+
+Coverage is stated as three tiers rather than one vague claim, because the honest
+answer was three different ones:
+
+| Tier | Meaning |
+|---|---|
+| `ATTESTED` | a real dataset is about this — `venture`, `markets`, `nonprofit` |
+| `SUPPORTED` | the vocabulary fires on real fields, but no dataset's *subject* is it — `workforce` scores on `open_roles`/`is_hiring`/`team_size` across the startup datasets, and the venture reading is always stronger, which is correct |
+| `UNATTESTED` | present so those domains need no code change first, matched by nothing in the corpus — `realestate`, `healthcare`, `education`, `energy` |
+
+A test asserts the tiers partition the vocabulary and that every `ATTESTED` entry
+actually wins somewhere, so the documentation cannot drift from the data again.
+
+---
+
+## 8b. Two docstrings that were false
+
+Found by writing tests against behaviour rather than reading claims. Both had been
+believed for some time.
+
+**`validator.type_ok` claimed "type coercion lives in normalize".** It does not.
+`normalizer.normalize_value` is driven by the field *name* and records a
+`normalized` sub-object; nothing anywhere coerced a value to its declared type. The
+comment has been corrected, and the *absence* of coercion is now asserted on
+purpose: a field declared `number` whose extracted value is `"1,200"` is stored as
+the string `"1,200"`, because the page said "1,200" and rewriting it to 1200
+asserts a precision the source did not — and the same logic would turn `"2.4B"` into
+2400000000. The type gate is a **veto** that rejects prose, not a transform.
+
+**An async single-flight was written and reverted.** Making `dashboard.summarise`
+async to `await` a shared future moved a 20–30s synchronous compute onto the event
+loop, which would have stalled every request in the process. Thread-based
+single-flight keeps the work off the loop.
+
+Also worth recording: **`npm run build` passed while the dataset page was broken**,
+with `ReferenceError: profileRes is not defined`, because a `SectorPanel` had been
+inserted at the first `<Segmented>` in the file — inside the records table — rather
+than in `DatasetPage`. The bundler does not scope-check a free identifier. A green
+build is not verification.
 
 ---
 
