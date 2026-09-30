@@ -32,9 +32,18 @@ def type_ok(value: object, ftype: str) -> bool:
     """Does the value actually match the field's declared type?
 
     `required` and `type` used to be discarded on the grounds that "type
-    coercion lives in normalize" - but normalize only *transforms* a value and
-    never reports failure, so a string where a number was declared sailed
-    through as verified. This is the check that was missing.
+    coercion lives in normalize" - but normalize is driven by the field *name*,
+    not its declared type, and it records a `normalized` sub-object rather than
+    replacing the value. Nothing anywhere coerced a value to its declared type,
+    so a string where a number was declared sailed through as verified. This is
+    the check that was missing.
+
+    Note that passing this check does not change the stored value: a field
+    declared `number` whose extracted value is "1,200" is stored as the string
+    "1,200", because the source said "1,200" and rewriting it to 1200 would
+    assert a precision the page did not. The type gate is a *veto* — it rejects
+    prose where a number was declared — and not a transform. Callers that need a
+    number read `value` through their own parser.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return True  # emptiness is `required`'s business, not the type's

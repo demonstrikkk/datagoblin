@@ -107,8 +107,14 @@ def test_store_and_extractor_get_byte_identical_text() -> None:
     """
     page = {"html": f"<html><body>{FILLER}</body></html>", "markdown": CLEAN_MD,
             "page_id": "p1", "content_hash": "h1"}
-    stored = asyncio.run(R.page_evidence_text(page))
-    seen, _ = asyncio.run(R.page_evidence_text_parts(page))
+    # Both are plain functions. The callers push them onto a thread themselves
+    # (`asyncio.to_thread` in the backfill and gap-fill paths) because the DOM
+    # parse is blocking, so wrapping them in `asyncio.run` here was wrong twice
+    # over: it asserted a coroutine contract the functions do not have, and it
+    # would have hidden a real regression where someone made one async without
+    # updating its thread-offload call sites.
+    stored = R.page_evidence_text(page)
+    seen, _ = R.page_evidence_text_parts(page)
     assert stored == seen
 
 

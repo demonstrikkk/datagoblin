@@ -156,8 +156,42 @@ def test_type_mismatch_is_still_rejected() -> None:
     assert status == "unverified"
 
 
-def test_number_with_a_locatable_quote_survives() -> None:
-    """Guards against the type gate being caught by a well-meaning change."""
+def test_a_number_declared_field_keeps_the_value_the_source_gave_it() -> None:
+    """The type gate is a veto, not a transform.
+
+    "250" is accepted for a field declared `number` and stored as the string
+    "250". That is deliberate: the page said "250", and rewriting it to an int
+    would assert a precision the source did not give us — and the same logic
+    would turn "1,200" into 1200 and "2.4B" into 2400000000, inventing digits.
+    `type_ok` exists to reject prose where a number was declared, and callers
+    that need a number parse it themselves.
+
+    This test guards the *absence* of coercion on purpose. An earlier version of
+    it asserted `value == 250`, which is the behaviour this system should not
+    have: it would have failed today, and passing it would have meant adding a
+    lossy transform to an evidence-first pipeline.
+    """
     value, status = grade("250", "Founded 250 BC", ftype="number")
-    assert value == 250
+    assert value == "250"
     assert status == "verified"
+
+
+def test_prose_is_still_rejected_for_a_number_field() -> None:
+    """The veto is the part of `type_ok` that does real work."""
+    value, status = grade("about two hundred and fifty", "text", ftype="number")
+    assert value is None
+    assert status == "unverified"
+
+
+def test_magnitude_suffixed_numbers_are_not_prose() -> None:
+    """A scraped "$2.4B" is a number, and rejecting it would drop real records.
+
+    The page has to actually contain each value: a quote that is not on the page
+    is nulled by the quote gate before the type gate is ever consulted, which is
+    the correct order and the reason this test builds its own page.
+    """
+    for raw in ("$2.4B", "1,200", "45%", "~30"):
+        page = f"the report gives {raw} for the quarter."
+        value, status = grade(raw, f"gives {raw} for", page=page, ftype="number")
+        assert value == raw, raw
+        assert status == "verified", raw
