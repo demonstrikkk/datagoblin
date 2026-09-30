@@ -203,10 +203,20 @@ class LocalRepo:
         return self._scan("runs")[-max(1, limit):]
 
     def list_datasets(self, limit: int = 50) -> list[dict]:
+        """Newest datasets. Mirrors PostgresRepo: `run_id` and `schema` included.
+
+        `schema` is what lets the dashboard's coverage matrix report a field
+        that no record ever carried. Without it, `field_coverage` can only see
+        field names that appear in the records themselves, and a never-extracted
+        field is simply absent rather than reported as a gap.
+        """
         out = []
         for d in self._scan("datasets")[-max(1, limit):]:
-            out.append({"id": d["id"], "name": d.get("name", ""),
-                        "record_count": len(d.get("records", [])), "created_at": d.get("_ts", "")})
+           out.append({"id": d["id"], "run_id": d.get("run_id", ""),
+                       "name": d.get("name", ""),
+                       "schema": d.get("schema") or [],
+                       "record_count": len(d.get("records", [])),
+                       "created_at": d.get("_ts", "")})
         return out
 
     def get_dataset(self, dataset_id: str) -> dict | None:

@@ -432,10 +432,28 @@ class PostgresRepo:
                           (max(1, min(int(limit), 100)),))
 
     def list_datasets(self, limit: int = 50) -> list[dict]:
-        return self._rows("list_datasets",
-                          """SELECT id,run_id,name,record_count,created_at
+        """Newest datasets.
+
+        `schema_json` is selected and mapped to `schema` because
+        `field_coverage(recs, row.get("schema") or [])` needs it. Without the
+        schema the coverage matrix can only see fields that happen to appear in
+        at least one record, so a field the plan asked for and no page carried
+        is invisible here while `/coverage` — which does get the schema — lists
+        it as never extracted. The dashboard then under-reports its own "never
+        filled" column and disagrees with the dataset page, which is the one
+        thing its own docstring says cannot happen.
+
+        `partial` comes along for the same reason: the dataset page reads it
+        from the run, and the dashboard renders a pill for it that could never
+        light up because nothing supplied the field.
+        """
+        rows = self._rows("list_datasets",
+                          """SELECT id,run_id,name,schema_json,record_count,created_at
                              FROM datasets ORDER BY created_at DESC LIMIT %s""",
                           (max(1, min(int(limit), 100)),))
+        for r in rows:
+           r["schema"] = r.pop("schema_json", None) or []
+        return rows
 
     def get_dataset_row(self, dataset_id: str) -> dict | None:
         """The dataset's own columns, with no records attached.

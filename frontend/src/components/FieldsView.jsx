@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
+import SectorPanel from './SectorPanel.jsx';
 import {
   Empty,
   ErrorNote,
@@ -113,6 +114,17 @@ export default function FieldsView({ datasetId, records = 0 }) {
           </button>
         </div>
       </header>
+
+      {/*
+        The domain reading, above the generic field list and below the header.
+
+        It is a header for the field grid rather than a replacement: the grid
+        still lists every declared field, because a domain reading is a
+        convenience and must never hide a field the schema asked for. When the
+        classifier declines it says why instead of disappearing, so the absence is
+        legible rather than looking like a panel that failed to load.
+      */}
+      <SectorPanel profile={data} />
 
       {data.place && data.place.values?.length > 1 ? (
         <PlacePanel place={data.place} active={place} onPick={setPlace} />

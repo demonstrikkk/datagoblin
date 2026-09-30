@@ -207,10 +207,20 @@ paths:
       responses:
         "200":
           description: |
-            `{totals, datasets[], top_hosts[], truncated, limit}`. `totals.proven_pct`
-            is verified cells over all cells; unverified is reported beside it
-            rather than folded in, because a dataset where every value has a
-            quote and no verdict looks complete and is not.
+               `{totals, datasets[], top_hosts[], truncated, limit}`. `totals.proven_pct`
+               is verified cells over all cells; unverified is reported beside it
+               rather than folded in, because a dataset where every value has a
+               quote and no verdict looks complete and is not.
+
+               Each `datasets[]` row carries `created_at` and `partial` alongside
+               its coverage block. `partial` is read from the run behind the
+               dataset, so a run that stored a dataset before it finished is
+               visible here as well as on the dataset page.
+
+               Each row also carries a `sector` reading with the same shape the
+               per-dataset `/profile` returns, including `sector: null` when the
+               schema does not indicate a domain. The client is expected to count
+               those separately rather than grouping them as "other".
 
   /api/datasets/{did}:
     get:
@@ -289,9 +299,21 @@ paths:
       responses:
         "200":
           description: |
-            `{records, records_read, sampled, fields[], place, totals}`. `sampled`
-            is true when the shape was drawn from fewer records than the dataset
-            holds, and is reported rather than presented as complete.
+               `{records, records_read, sampled, fields[], place, sector, totals}`.
+               `sampled` is true when the shape was drawn from fewer records than
+               the dataset holds, and is reported rather than presented as complete.
+
+               `sector` is a reading, not a label. It is
+               `{sector, confidence, method, matched_fields[], considered[], floor}`,
+               where `sector` is one of `stocks, healthcare, education, realestate,
+               energy, hr` **or `null`**. `null` is the expected result whenever
+               the schema does not clearly indicate a domain, and the client is
+               expected to fall back to a domain-agnostic view rather than
+               guessing. `method` is `schema`, `schema+shape`, `ambiguous`,
+               `below-floor` or `none`, and `matched_fields[]` carries
+               `{field, signal, score}` so the reading can be checked. No model
+               call is made: the domain is read from `schema[].name`/`.description`
+               and adjudicated with the value shapes already computed above.
         "404": {$ref: "#/components/responses/NotFound"}
 
   /api/datasets/{did}/yield:

@@ -362,6 +362,17 @@ as though a judgement was unavailable when it was never attempted.
 A real, tested endpoint (24 tests) that the dashboard and Coverage view depend
 on. Every other registered route is documented; this one is not.
 
+> **Superseded.** The route *is* in the contract, at
+> `contracts/api.openapi.yaml:264`, with a full response description — this claim
+> was written before the contract was checked and is wrong. What was genuinely
+> missing, and is fixed, is the `sector` reading described in §12, plus
+> `GET /api/sources`.
+
+### D7 — the validator destroyed values the extractor had filled correctly.
+
+The subject of §12. Two gates, both fixed. Recorded here because the class is
+the dangerous one: a silent data loss that reports itself as an absence.
+
 ### Also true, lower severity
 - `_explain_zero_yield` probes `page.get("text")` for near-empty pages, but the
   crawler never sets a `text` key, so that branch can only fire for rendered pages.
@@ -369,7 +380,12 @@ on. Every other registered route is documented; this one is not.
   `/api/selectors/save` all write immediately, contradicting the contract's
   "no route applies a change without an explicit `apply` flag".
 - `GET /api/health` reports the *configured* adapter name; it issues no query, so
-  it cannot report reachability, as the contract claims.
+  it cannot report reachability, as the contract claims. This is how a total DNS
+  failure to the database presented as a healthy API returning 503 on everything
+  else.
+- `verify_field` accepts `required` and never reads it. Dropping a record for a
+  missing required field is the runner's decision, not this function's, so the
+  parameter is dead rather than wrong.
 
 ---
 
@@ -554,21 +570,133 @@ unreachable in this configuration.
 
 ---
 
+## 12. Why columns came back empty, and what the UI now knows about a dataset
+
+Two pieces of work, one causal chain. Both are described from measured evidence
+rather than from inspection alone.
+
+### 12.1 The data was extracted, then thrown away
+
+The report was that several columns are always empty even though the values were
+visible on the fetched page. They were. On a live dataset (123 records, three
+fields):
+
+| field | present | null | nulls that carried a quote | nulls carrying a `reference_id` |
+|---|---|---|---|---|
+| `company_name` | 121 | 2 | 0 | 0 |
+| `valuation` | 50 | 73 | 1 | 0 |
+| `financial_year` | 25 | 98 | **53** | **53** |
+
+**The citation gate failed closed against a document that was not there.**
+`reference_known` (`validator.py`) returned `ref in (references or "")`, and
+`references` is populated in exactly one place — `fetcher.py`, inside the
+Crawl4AI branch. `extractor.py` reads `page.get("references", "")`, so for every
+page fetched by the `http` or `jina` rungs it is `""`. Any value the model tagged
+with a `<n>` marker was then nulled on a page where no citation apparatus could
+have been checked. A plain-text table has no `⟨n⟩` spans, so the marker was
+invented in the first place. All 53 failures came from one `http`-fetched URL;
+the identical page fetched by Crawl4AI produced none. The gate now returns true
+when the page carries no References block, and still rejects an unknown marker
+when one does.
+
+**A missing quote and an unfound quote were one condition.** `wrap_record` looks
+the quote up by exact field-name match, so a model that returned a value but
+omitted its evidence item arrived with an empty quote — and was nulled alongside
+the genuine "this quote is not on the page" case, which is a real failure worth
+preserving. That is the other 117 cells. The two are now separate: no quote
+returns `(value, "unverified")`, mirroring what already happened when the judge
+was unreachable; a quote that does not locate still returns `None`.
+
+Both are the failure mode this document exists to prevent. A null cell claims the
+source did not carry the value, when the truth was that the gate could not check
+it and the model did not cite it.
+
+**And the model was never shown the data.** `page_evidence_text` is shared by the
+store and the extractor, and the extractor can only read a bounded prefix of it,
+so concatenation order decided what the model saw. It was uncapped raw DOM text
+first — with `header`, `aside` and `form` not stripped — then the clean markdown,
+then truncation to `_MAX_CHUNKS * _CHUNK_CHARS` (24,000). On a listing page the
+whole window was nav-adjacent chrome and the reduced markdown, which is the only
+part built with `include_tables=True`, never arrived. The model answered `NA` for
+every field, which the validator recorded as absence. The clean markdown is first
+now; nothing is dropped, because the store and the extractor call the same
+function and a quote must still re-locate in the string the proof view reads.
+
+The shortfall is now logged rather than absorbed — `clean_truncated` separately
+from `dom_truncated` — because the two mean opposite things and only the first is
+data loss. **The ceiling has deliberately not been raised.** Until the telemetry
+shows how often the clean text is actually cut, a larger budget is a guess that
+buys model calls and rate-limit exposure for unknown signal.
+
+The same class of bug hid in the transport: the OpenCode prompt was clipped to
+12,000 characters by wrapping the instruction and the prompt together, and since
+the page content sits at the tail, the entire overflow fell on the content —
+about 1,500 characters of every page, silently. The cap is now on the
+instruction.
+
+**Not fixed, deliberately:** `type_ok` still nulls an `array` or `date` field
+whose value does not parse into that type, which is a sixth cause of the same
+symptom and a much smaller one. Storage and dedupe are not implicated: records
+are one `row_json` per row and there is no column ceiling.
+
+**Already-lost cells are not recovered.** The 170 destroyed values are stored as
+`null`. Only a re-run returns them.
+
+### 12.2 What kind of dataset is this
+
+`/api/datasets/{id}/profile` now returns a `sector` reading alongside the field
+shapes it already had, and the dashboard aggregate carries one per dataset so the
+workspace can be grouped.
+
+It is a **receipt, not a label**: `{sector, confidence, method, matched_fields[],
+considered[], floor}`, where `matched_fields[]` is `{field, signal, score}`. The UI
+shows the fields that argued for the reading, so a panel headed "Markets" can be
+checked rather than believed.
+
+**No model call.** The dashboard aggregate is cached for 300s and measured at 9ms
+warm, and the remaining real judgements run on providers that rate-limit. A round
+trip per dataset per cold load, to produce a label the schema already states, is
+the wrong trade. The domain is read from `schema[].name` and `.description` —
+which are already returned by `/api/datasets/{did}` — and adjudicated with value
+shapes the profiler computes anyway. A `symbol` column of 120 short distinct
+values is a ticker; a `company_name` column with the same cardinality is not.
+
+**`null` is the expected answer.** Below the confidence floor, or on a tie two
+sectors both fit, the result is `None` and the UI renders its sector-agnostic
+view and says why. This is the profiler's own rule — it refuses to chart a field
+with one distinct value — applied one level up. A wrong sector is worse than no
+sector, because it selects the panels, and the wrong panels look authoritative.
+`valuation` and `sector` are deliberately *not* strong finance signals: a
+"companies with their valuations" dataset is not a stock table.
+
+The panels compose the existing `Histogram`, `Timeline`, `Treemap` and `RankBars`,
+which already return `null` rather than draw a shape the data cannot support, and
+each pairs its chart with a value column because `Treemap` draws no in-tile labels.
+
+**Deferred:** `plan.entity` is the best label already in the system and is not
+reachable from any dataset endpoint. Surfacing it needs a `runs.plan` join, and
+is not a UI change.
+
+---
+
 ## 11. How to verify any of this yourself
 
 ```powershell
 # tests — note the interpreter; the venv has psycopg_pool, the system python may not
 & "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\python.exe" -m pytest backend/tests -q
-#   → 762 passed
+#   → 841 passed
 
 cd frontend
 npm run build          # preview serves dist/, so rebuild after any src change
-npm run test:charts
+npm test               # charts, design tokens, source encoding
 npm run e2e            # 9 suites, sequential, ~15 min
 
 # the reuse defect, in one line
 python -c "import ast;t=ast.parse(open('backend/app/main.py',encoding='utf-8').read());print([n.lineno for n in t.body if isinstance(n,(ast.Import,ast.ImportFrom)) and any(getattr(a,'asname','')=='politeness_svc' for a in n.names)])"
 #   → []  (no module-level binding; main.py:1261 is function-local)
+
+# what the extraction window actually dropped, on the next run
+Select-String -Path outputs/logs/api.out.log -Pattern "extract content truncated"
 ```
 
 Working directory: `C:\Users\asus\Downloads\datagoblin`.

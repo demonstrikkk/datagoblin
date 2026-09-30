@@ -12,7 +12,17 @@ import {
   StackedBar,
 } from '../components/ui.jsx';
 import { VoiceEmpty } from '../components/evidence.jsx';
-import { num, toneVar, when } from '../lib/format.js';
+import { num, toneVar, truncate, when } from '../lib/format.js';
+
+/** Display names for the domains the classifier can return. */
+const SECTOR_LABEL = {
+  stocks: 'Markets',
+  healthcare: 'Clinical',
+  education: 'Education',
+  realestate: 'Property',
+  energy: 'Energy',
+  hr: 'Workforce',
+};
 
 /**
  * The provenance story.
@@ -49,6 +59,46 @@ export default function Dashboard() {
     };
     return rows.sort(by[sort] || by.proven);
   }, [data, sort]);
+
+  /**
+   * Group the workspace by detected domain.
+   *
+   * A dataset the backend declined to classify is counted in `unclassified` and
+   * left out of the grouping, rather than being folded into "other" — a bucket
+   * called "other" that is really "we did not know" is the same absence reported
+   * as a category.
+   */
+  const { sectors, unclassified } = useMemo(() => {
+    const groups = new Map();
+    let unknown = 0;
+    for (const d of data?.datasets || []) {
+      const key = d?.sector?.sector;
+      if (!key) {
+        unknown += 1;
+        continue;
+      }
+      const cov = d.coverage || {};
+      const g = groups.get(key) || {
+        key,
+        label: SECTOR_LABEL[key] || key,
+        n: 0,
+        records: 0,
+        cells: 0,
+        verified: 0,
+        datasets: [],
+      };
+      g.n += 1;
+      g.records += Number(d.records) || 0;
+      g.cells += Number(cov.cells) || 0;
+      g.verified += Number(cov.verified) || 0;
+      g.datasets.push(d);
+      groups.set(key, g);
+    }
+    return {
+      sectors: [...groups.values()].sort((a, b) => b.n - a.n || b.records - a.records),
+      unclassified: unknown,
+    };
+  }, [data]);
 
   if (status === 'loading' && !data) return <Loading label="Reading stored evidence" rows={4} />;
   if (error && !data) return <ErrorNote error={error} onRetry={refetch} />;
@@ -180,6 +230,83 @@ export default function Dashboard() {
           <Link to="/sources" className="link text-[12px]">
             Browse every stored source
           </Link>
+        </section>
+      ) : null}
+
+      {/*
+        Domains, when the workspace has enough datasets to have a shape.
+
+        This is a roll-up of the per-dataset classifier, so it inherits its
+        refusal: a dataset the backend declined to classify is not guessed at
+        here either. It appears only when at least two datasets carry a reading —
+        one dataset is a case, not a distribution, and a one-row "domain
+        breakdown" says nothing.
+      */}
+      {sectors.length >= 2 ? (
+        <section>
+          <header className="mb-2">
+            <h2 className="eyebrow">Domains</h2>
+            <p className="mt-0.5 text-[11.5px] text-muted">
+              {unclassified > 0
+                ? `${num(sectors.reduce((a, s) => a + s.n, 0))} of ${num(datasets.length)} datasets were classified; ${num(unclassified)} were not, and are not guessed at here`
+                : 'What these datasets are, read from their field schemas'}
+            </p>
+          </header>
+          <div className="surface overflow-hidden">
+            <table className="w-full border-collapse text-left">
+              <thead>
+                <tr className="border-b border-rule-2">
+                  <th className="eyebrow px-3.5 py-2.5 font-semibold" scope="col">Domain</th>
+                  <th className="eyebrow px-3.5 py-2.5 text-right font-semibold" scope="col">Datasets</th>
+                  <th className="eyebrow px-3.5 py-2.5 text-right font-semibold" scope="col">Records</th>
+                  <th className="eyebrow px-3.5 py-2.5 font-semibold" scope="col">Proven</th>
+                  <th className="eyebrow px-3.5 py-2.5 font-semibold" scope="col">Datasets</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-rule">
+                {sectors.map((s) => (
+                  <tr key={s.key} className="text-[12px]">
+                    <td className="px-3.5 py-2 font-medium text-ink">{s.label}</td>
+                    <td className="px-3.5 py-2 text-right font-mono tnum text-ink-2">
+                      {num(s.n)}
+                    </td>
+                    <td className="px-3.5 py-2 text-right font-mono tnum text-ink-2">
+                      {num(s.records)}
+                    </td>
+                    <td className="px-3.5 py-2" style={{ minWidth: 140 }}>
+                      <StackedBar
+                        height={6}
+                        total={Math.max(1, s.cells)}
+                        rows={[
+                          { key: 'verified', n: s.verified, tone: 'ok', label: 'Proven' },
+                          { key: 'unverified', n: Math.max(0, s.cells - s.verified), tone: 'muted', label: 'Unproven' },
+                        ].filter((r) => r.n > 0)}
+                      />
+                    </td>
+                    <td className="max-w-[380px] px-3.5 py-2">
+                      <span className="flex flex-wrap gap-1">
+                        {s.datasets.slice(0, 3).map((d) => (
+                          <Link
+                            key={d.dataset_id}
+                            to={`/library/${d.dataset_id}`}
+                            className="max-w-[120px] truncate rounded-xs border border-rule bg-warm/60 px-1.5 py-0.5 text-[10.5px] text-ink-2 transition-colors hover:border-ink hover:text-ink"
+                            title={d.name || d.dataset_id}
+                          >
+                            {truncate(d.name || d.dataset_id.slice(0, 8), 24)}
+                          </Link>
+                        ))}
+                        {s.datasets.length > 3 ? (
+                          <span className="px-1 py-0.5 text-[10.5px] text-muted">
+                            +{num(s.datasets.length - 3)} more
+                          </span>
+                        ) : null}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       ) : null}
 

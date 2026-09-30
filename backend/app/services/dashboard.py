@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 
 from app.services import coverage as coverage_svc
+from app.services import sector as sector_svc
 from app.services import yieldmap as yieldmap_svc
 
 #: Datasets read for the aggregate. Matches the library's own page size, so the
@@ -119,6 +120,21 @@ def _compute(store, limit: int) -> dict:
         records = (store.get_records(did, "", RECORD_SAMPLE, 0) or {})
         recs = list(records.get("records") or [])
         sampled = bool(records.get("total", len(recs)) or 0) > len(recs)
+
+        # Whether the run behind this dataset finished. The dataset page reads it
+        # from the run, and the dashboard renders a "partial catch" pill for it —
+        # a pill that could never light up, because nothing here supplied the
+        # field. One primary-key read per dataset, inside a 300s-cached
+        # aggregate, and wrapped because a run that has been reaped is not a
+        # reason to drop the dataset that is still on disk. Computed before the
+        # coverage matrix so an unreadable dataset still reports it.
+        partial = False
+        try:
+            run = store.get_run(str(row.get("run_id") or "")) or {}
+            partial = bool(run.get("partial")) or str(run.get("status") or "") == "PARTIAL"
+        except Exception:  # noqa: BLE001
+            partial = False
+
         try:
             matrix = coverage_svc.field_coverage(recs, row.get("schema") or [])
         except Exception:  # noqa: BLE001
@@ -127,6 +143,10 @@ def _compute(store, limit: int) -> dict:
             unread += 1
             totals["records"] += int(row.get("record_count") or 0)
             datasets.append({"dataset_id": did, "name": row.get("name", ""),
+                             "run_id": str(row.get("run_id") or ""),
+            "sector": None,  # unreadable records carry no reading
+            "created_at": row.get("created_at") or "",
+                             "partial": partial,
                              "records": int(row.get("record_count") or 0),
                              "coverage": None, "sampled": sampled,
                              "reason": "its records could not be read"})
@@ -167,6 +187,8 @@ def _compute(store, limit: int) -> dict:
             "dataset_id": did,
             "name": row.get("name", ""),
             "run_id": str(row.get("run_id") or ""),
+            "created_at": row.get("created_at") or "",
+            "partial": partial,
             "records": len(recs),
             "declared_records": int(row.get("record_count") or 0),
             "sampled": sampled,
@@ -179,6 +201,14 @@ def _compute(store, limit: int) -> dict:
             "empty_fields": v["empty_fields"],
             "partial_fields": v["partial_fields"],
             "coverage": v,
+            # What kind of dataset this is, with the receipt. Read from the
+            # schema and adjudicated with the records the aggregate has already
+            # read, so it costs one dict per field rather than a second pass over
+            # the store — this page is cached for 300s and measured at 9ms warm,
+            # and it must not become the slow one. `sector` is None when the
+            # evidence is thin, and the roll-up counts that rather than guessing.
+            "sector": sector_svc.sector_for_records(
+                row.get("schema") or [], recs, goal=str(row.get("name") or "")),
         })
 
     # The number worth putting at the top, and the one that is easiest to make

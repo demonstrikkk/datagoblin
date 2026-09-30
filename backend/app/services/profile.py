@@ -32,6 +32,7 @@ from statistics import median
 from typing import Any
 
 from app.services import coverage as coverage_svc
+from app.services import sector as sector_svc
 
 #: Records read for shape. Coverage is exact over all records; shape is a
 #: sample, and the caller is told which, because a distribution drawn from the
@@ -344,6 +345,17 @@ def profile(store, dataset_id: str, fields: list | None = None,
         "sampled": sampled,
         "fields": out_fields,
         "place": _place_panel(place, values.get(place["field"], []) if place else []),
+        # What kind of dataset this is, with the receipt. Read from the schema
+        # and adjudicated with the value shapes just computed, so it costs
+        # nothing beyond this function. `sector` is None when the evidence is
+        # thin, and the UI renders its sector-agnostic view in that case — a
+        # wrong sector would select the wrong panels, and the wrong panels look
+        # authoritative.
+        "sector": sector_svc.sector(
+            schema,
+            profile={"fields": out_fields},
+            goal=str(row.get("name") or ""),
+        ),
         "totals": {
             "fields": len(out_fields),
             "never_extracted": sum(1 for f in out_fields if f["never_extracted"]),
