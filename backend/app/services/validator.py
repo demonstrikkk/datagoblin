@@ -282,6 +282,9 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
                                    f.get("type", "string"), ref_id, references,
                                    budget=budget, norm_source=norm_source)
         start, end = locate_quote(quote, source_text) if st == "verified" else (None, None)
+        # How the value was read, not just whether it was checked. Absent on a
+        # raw extraction, so it defaults to `llm` — which is what it was, since
+        # every cell that predates this went through the model.
         wrapped[name] = {"value": v, "verification_status": st,
                          # page_id makes the claim re-checkable: the offsets
                          # above address stored text rather than a string that
@@ -291,7 +294,27 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
                                     "reference_id": ref_id,
                                     "page_id": page_id or ev.get("page_id", ""),
                                     "content_hash": ev.get("content_hash", ""),
-                                    "start": start, "end": end}}
+                                    "start": start, "end": end},
+                         **_receipt_for(raw, name, st)}
     # Shape-drift guard: every wrapped row must satisfy the RecordRow contract.
     # Return the inner fields dict (callers expect {name: provenance-field}).
     return RecordRow.model_validate({"fields": wrapped}).model_dump()["fields"]
+
+
+def _receipt_for(raw: dict, field: str, status: str) -> dict:
+    """The `read_method` receipt for one cell, taken from how it was extracted.
+
+    A cell that came through the deterministic ladder already carries its route
+    and its own confidence, and those are preserved verbatim — the ladder stamped
+    them before the gate ran, and the gate must not restate them. Only a cell the
+    model produced gets the receipt derived here, where "verified" is the gate's
+    own word and so the confidence is derived from it.
+    """
+    from app.services import confidence as conf_svc
+
+    cell = ((raw.get("fields") or {}).get(field))
+    if isinstance(cell, dict) and cell.get("read_method"):
+        return {k: cell[k] for k in ("read_method", "method_label", "method_hint",
+                                     "confidence", "certainty", "certainty_label",
+                                     "certainty_hint") if k in cell}
+    return conf_svc.receipt("llm", verified=(status == "verified"))
