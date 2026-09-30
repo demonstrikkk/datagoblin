@@ -53,6 +53,8 @@ export default function GapQueue({ datasetId, onChanged }) {
   const { data, status, error, refetch } = useResource((o) => api.gaps(datasetId, o), [datasetId]);
   const [busy, setBusy] = useState(null);
   const [proposal, setProposal] = useState(null);
+  const [verdict, setVerdict] = useState(null);
+  const [rejudging, setRejudging] = useState(null);
   const [failure, setFailure] = useState('');
 
   const attempt = useCallback(
@@ -76,6 +78,29 @@ export default function GapQueue({ datasetId, onChanged }) {
         setFailure(String(err?.message || err));
       } finally {
         setBusy(null);
+      }
+    },
+    [datasetId, refetch, onChanged]
+  );
+
+  const rejudge = useCallback(
+    async (gap, apply) => {
+      setRejudging(apply ? null : gap.field);
+      setFailure('');
+      try {
+        const out = await api.rejudge(datasetId, {
+          field: gap.field,
+          apply,
+        });
+        setVerdict({ field: gap.field, apply, ...out });
+        if (apply) {
+          refetch();
+          onChanged?.();
+        }
+      } catch (err) {
+        setFailure(String(err?.message || err));
+      } finally {
+        setRejudging(null);
       }
     },
     [datasetId, refetch, onChanged]
@@ -151,8 +176,10 @@ export default function GapQueue({ datasetId, onChanged }) {
               key={g.field}
               gap={g}
               busy={busy}
+              rejudging={rejudging}
               onDryRun={() => attempt(g, false)}
               onApply={() => attempt(g, true)}
+              onRejudge={(apply) => rejudge(g, apply)}
             />
           ))}
         </div>
@@ -187,6 +214,38 @@ export default function GapQueue({ datasetId, onChanged }) {
         </Notice>
       ) : null}
 
+      {verdict ? (
+        <Notice tone={verdict.apply ? 'ok' : 'info'}>
+          <div className="space-y-1.5">
+            <p className="font-medium">
+              {verdict.field}: {num(verdict.settled_free ?? 0)} settled by the page
+              text alone, {num(verdict.judge_calls ?? 0)} judged by the model.
+            </p>
+            <p className="text-[11.5px] leading-relaxed text-muted">
+              {num(verdict.verified_now ?? 0)} cell(s) would count as verified.{' '}
+              {verdict.disagreements
+                ? `${num(verdict.disagreements)} disagree with their own quote — the value is kept and the disagreement recorded, because nothing was ever wrong with storing it.`
+                : 'None disagreed.'}{' '}
+              {verdict.still_unjudged
+                ? `${num(verdict.still_unjudged)} stayed unjudged at this budget.`
+                : ''}
+            </p>
+            {!verdict.apply && verdict.verified_now ? (
+              <button
+                type="button"
+                className="btn-outline btn-xs"
+                onClick={() => rejudge({ field: verdict.field }, true)}
+              >
+                Write {num(verdict.verified_now)} verdict(s)
+              </button>
+            ) : null}
+            <button type="button" className="btn-ghost btn-xs" onClick={() => setVerdict(null)}>
+              Dismiss
+            </button>
+          </div>
+        </Notice>
+      ) : null}
+
       {settled.length ? (
         <div className="space-y-2">
           <p className="text-xs text-muted">
@@ -211,7 +270,7 @@ export default function GapQueue({ datasetId, onChanged }) {
   );
 }
 
-function GapRow({ gap, busy, onDryRun, onApply }) {
+function GapRow({ gap, busy, rejudging, onDryRun, onApply, onRejudge }) {
   const cat = CATEGORY[gap.category] || { label: gap.category, tone: 'muted', blurb: '' };
   const drying = busy === `${gap.field}:dry`;
   const applying = busy === `${gap.field}:apply`;
@@ -237,11 +296,27 @@ function GapRow({ gap, busy, onDryRun, onApply }) {
       </p>
 
       {gap.category === 'evidence_gap' ? (
-        <p className="mt-2 text-[11.5px] text-muted">
-          No action here. Use Review to judge the unproven values, or Conflicts to decide the
-          disputed ones. Fetching more would add another unproven value to a field whose
-          problem is that the first was never judged.
-        </p>
+        <div className="mt-2.5 space-y-2">
+          <p className="text-[11.5px] text-muted">
+            Nothing is missing, so searching would add nothing. These cells already
+            carry a value and a quote — they were never judged, usually because the
+            run hit its judging budget mid-dataset. Judging them uses the pages this
+            run already stored, so it costs no new fetching.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="btn-outline btn-xs"
+              disabled={Boolean(busy) || !gap.attemptable}
+              onClick={() => rejudge(gap, false)}
+            >
+              {rejudging === gap.field ? 'Judging…' : 'Judge these cells'}
+            </button>
+            {!gap.attemptable ? (
+              <span className="text-[11px] text-muted">{gap.blocked_reason}</span>
+            ) : null}
+          </div>
+        </div>
       ) : (
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
           <button

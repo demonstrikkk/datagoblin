@@ -37,6 +37,7 @@ from app.services import crawler as crawler_svc
 from app.services import coverage as coverage_svc
 from app.services import gapfill as gapfill_svc
 from app.services import gaps as gaps_svc
+from app.services import rejudge as rejudge_svc
 from app.services import exporter as exporter_svc
 from app.services import impersonation as impersonation_svc
 from app.services import jobs as jobs_svc
@@ -776,6 +777,56 @@ async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_
         dashboard_svc.invalidate()
         if gaps_svc.tracked(r):
             await asyncio.to_thread(r.upsert_gap, did, field, out["gap"])
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/rejudge", dependencies=[Depends(require_api_key)])
+async def rejudge_dataset(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
+    """Judge the cells that carry a value and a quote but no verdict. Writes nothing
+    unless `apply`.
+
+    These are cells the extractor got right and the judge never checked, usually
+    because the per-run budget ran out mid-dataset. Their pages are still stored,
+    so this costs judge calls and nothing else — no crawl, no fetch, no
+    extraction.
+
+    Measured over the live database's 992 such cells: 733 are settled by
+    `jev.deterministic_verdict` before any provider call, and 259 genuinely need
+    a judgement. So the real cost of closing the gap is 259 calls, not 992.
+
+    **No value is ever changed or removed.** A judgement upgrades a cell's status
+    to `verified`, or demotes it to `unverified` and records the disagreement, or
+    leaves it exactly as it was. `verify_field` nulls a NOT_SUPPORTED value,
+    which is correct at extraction time because the cell was never in the
+    dataset; re-judging a stored cell on a second opinion would make this path
+    more destructive than the gap it closes.
+
+    `apply: false` performs every judgement for real and withholds only the write,
+    so the reported counts are measured. A cell the judge is uncertain about stays
+    `judgment_unavailable` — "we could not tell" is not an improvement on itself.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    apply_flag = bool(body.get("apply"))
+    field = str(body.get("field") or "").strip() or None
+    budget = int(body.get("judge_budget")
+                 if body.get("judge_budget") is not None
+                 else rejudge_svc.JUDGE_CALLS_PER_PASS)
+    if not 0 <= budget <= rejudge_svc.JUDGE_CALLS_PER_PASS:
+        raise validation(
+            f"judge_budget must be between 0 and {rejudge_svc.JUDGE_CALLS_PER_PASS}; "
+            f"this request is refused rather than clamped, so a budget you did not "
+            f"get is never reported as one you did")
+
+    try:
+        out = await rejudge_svc.run(r, did, apply=apply_flag, field=field,
+                                    judge_budget=budget)
+    except rejudge_svc.RejudgeRefused as exc:
+        raise validation(str(exc))
+
+    if apply_flag and out.get("written"):
+        dashboard_svc.invalidate()
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 

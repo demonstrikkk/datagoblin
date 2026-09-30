@@ -231,6 +231,15 @@ export const api = {
       ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
     }),
 
+  // --- re-judging the cells that were extracted right and never checked -----
+  // Most of these are settled by a substring check and cost nothing; a minority
+  // spend a judge call. Still a network round trip per cell for the ones that
+  // do, so it gets the long timeout and the same dry-run-then-apply shape.
+  rejudge: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/rejudge`, {
+      ...o, method: 'POST', body, timeout: o?.timeout ?? 900_000,
+    }),
+
   // --- learned yield, refresh, columns, dashboard ---------------------------
   // `yield` is a read of the quotes every verified cell already carries, so it
   // is cheap and never a source of its own claims. Refresh re-fetches over the

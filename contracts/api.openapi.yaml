@@ -271,6 +271,69 @@ paths:
       responses:
         "200": {description: "{sources_attempted, sources_successful, sources_failed, sources[]}"}
 
+  /api/datasets/{did}/rejudge:
+    post:
+      tags: [datasets]
+      summary: |
+        Judge the cells that carry a value and a quote but no verdict.
+
+        These are cells the extractor got right and the judge never checked,
+        usually because `RUN_MAX_JUDGE_CALLS` ran out mid-dataset — a live run
+        extracted 728 records against a 400-call cap. Their pages are still
+        stored, so this costs judge calls and nothing else: no crawl, no fetch,
+        no extraction.
+
+        Most of them cost nothing. `jev.deterministic_verdict` runs before any
+        provider call; measured over the live database's 992 such cells, 733 are
+        settled by it and 259 genuinely need a judgement. `settled_free` and
+        `judge_calls` are reported separately so the two are never conflated
+        into one number.
+
+        **No value is ever changed or removed.** SUPPORTED upgrades the status to
+        `verified`; NOT_SUPPORTED demotes it to `unverified` and records
+        `rejudged: not_supported`; anything else leaves the cell untouched.
+        `verify_field` nulls a NOT_SUPPORTED value, which is right at extraction
+        time because the cell was never in the dataset — re-judging a stored
+        cell on a second opinion would make this path more destructive than the
+        gap it closes.
+
+        A cell the judge is uncertain about stays `judgment_unavailable`.
+        "We could not tell" is not an improvement on itself, and reporting it as
+        progress is how a dataset comes to look checked when it is not.
+      parameters: [{$ref: "#/components/parameters/did"}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                apply:
+                  type: boolean
+                  default: false
+                  description: |
+                    When false every judgement still runs and only the write is
+                    withheld, so the reported counts are measured rather than
+                    estimated.
+                field: {type: string, description: rejudge one field only}
+                judge_budget:
+                  type: integer
+                  minimum: 0
+                  maximum: 600
+                  description: |
+                    Judge calls allowed in this pass. Applied only to cells that
+                    need a model — a value inside its own quote is settled by
+                    arithmetic and is never refused by the cap. A value above the
+                    maximum is refused with 422 rather than clamped.
+      responses:
+        "200":
+          description: |
+            {unjudged_found, evidence_available, evidence_missing, settled_free,
+             judge_calls, judge_calls_allowed, verified_now, disagreements,
+             still_unjudged, written, disagreement_examples[], note}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Validation"}
+
   /api/datasets/{did}/profile:
     get:
       tags: [datasets]
