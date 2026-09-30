@@ -153,6 +153,7 @@ def labelled_pairs(markdown: str, wanted: list[dict]) -> dict[str, tuple[str, st
     out: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
     started = False
+    headings = 0
 
     for raw_line in (markdown or "").split("\n"):
         line = raw_line.strip()
@@ -164,8 +165,16 @@ def labelled_pairs(markdown: str, wanted: list[dict]) -> dict[str, tuple[str, st
             if started:
                 break  # the first record is complete; a second one is another row
             started = True
+            headings += 1
             title = _clean_value(head.group(2))
-            if title and len(title) <= 90:
+            # A heading is only a name on a *listing* page, where each heading
+            # introduces another entity. On a single-record page the first heading
+            # is the page's own subject line — a job posting's is the role title,
+            # so inferring `company_name` from it wrote
+            # "Senior Machine Learning Engineer" where Roku belonged. Counting the
+            # headings first is what tells the two apart, and the cost of being
+            # wrong here is a corrupted identity that dedupe then keys on.
+            if title and len(title) <= 90 and headings >= 2:
                 for spec in by_spec:
                     name = str(spec.get("name") or "")
                     if name in seen:

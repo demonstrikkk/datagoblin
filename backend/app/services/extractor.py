@@ -459,6 +459,45 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
             return [], "error"
     if not records:
         return [], provider  # tripwire-cold: genuine absence; skip page
+    if filled:
+        # The ladder's fields have to be put back onto the model's records.
+        #
+        # Without this the model is asked only about the fields the cheaper rungs
+        # could not answer, so its records come back carrying *just those* — and
+        # the fields the rungs did answer, including the identity ones, vanish.
+        # The deduper then keys on `company_name`, finds nothing to key on, and
+        # drops every record: a live job run produced zero rows from eleven
+        # fetched pages while the pages plainly stated the company.
+        #
+        # The model's answer never overwrites a rung's. First-writer-wins holds
+        # across the rung boundary as well as within it.
+        #
+        # The shapes differ, which is why this is a conversion and not a dict
+        # update: the model emits `fields: {name: scalar}` plus a separate
+        # `evidence` list, while a rung carries `{value, quote, read_method}` per
+        # field. Writing a rung's dict into `fields` where a scalar is expected
+        # would hand `verify_field` a dict as the value.
+        for r in records:
+            got = r.get("fields") or {}
+            evidence = list(r.get("evidence") or [])
+            known = {str(e.get("field")) for e in evidence if isinstance(e, dict)}
+            for name, item in filled.items():
+                if name not in got or got.get(name) in (None, ""):
+                    got[name] = item.get("value")
+                if name not in known:
+                    evidence.append({
+                        "field": name,
+                        "quote": str(item.get("quote") or ""),
+                        "reference_id": "",
+                        "content_hash": page.get("content_hash", ""),
+                        "page_id": page.get("page_id", ""),
+                        # Carried through so the cell can be stamped with the
+                        # route that filled it rather than assumed to be the
+                        # model's.
+                        "read_method": item.get("read_method", "labelled"),
+                    })
+            r["fields"] = got
+            r["evidence"] = evidence
     for r in records:
         r["source_text"] = clean
         r["source_title"] = page.get("title", "")
@@ -467,7 +506,7 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
         r["content_hash"] = page.get("content_hash", "")
         # The model only ever saw the fields the cheaper rungs could not answer,
         # so this is the ladder's manifest: what it avoided, and what it paid for.
-        r["ladder"] = {"fields_filled": 0, "model_avoided": len(filled),
-                       "pending_from_rungs": sorted(filled)}
+        r["ladder"] = {"fields_filled": len(filled), "model_avoided": len(filled),
+                       "filled_from_rungs": sorted(filled)}
     return records, provider
 

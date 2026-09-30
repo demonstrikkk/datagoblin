@@ -275,6 +275,11 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
     for f in fields_spec:
         name = f["name"]
         ev = next((e for e in raw.get("evidence", []) if e.get("field") == name), {})
+        # A field a deterministic rung filled carries its route on its evidence
+        # item. It is read here so the cell records how the value actually
+        # arrived, rather than being stamped `llm` because the model was still
+        # asked about the record's other fields.
+        route = str(ev.get("read_method") or "")
         quote = ev.get("quote", "")
         ref_id = ev.get("reference_id", "")
         v, st = await verify_field(raw.get("fields", {}).get(name), quote,
@@ -295,26 +300,32 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
                                     "page_id": page_id or ev.get("page_id", ""),
                                     "content_hash": ev.get("content_hash", ""),
                                     "start": start, "end": end},
-                         **_receipt_for(raw, name, st)}
+                         **_receipt_for(raw, name, st, route)}
     # Shape-drift guard: every wrapped row must satisfy the RecordRow contract.
     # Return the inner fields dict (callers expect {name: provenance-field}).
     return RecordRow.model_validate({"fields": wrapped}).model_dump()["fields"]
 
 
-def _receipt_for(raw: dict, field: str, status: str) -> dict:
+def _receipt_for(raw: dict, field: str, status: str, route: str = "") -> dict:
     """The `read_method` receipt for one cell, taken from how it was extracted.
 
-    A cell that came through the deterministic ladder already carries its route
-    and its own confidence, and those are preserved verbatim — the ladder stamped
-    them before the gate ran, and the gate must not restate them. Only a cell the
-    model produced gets the receipt derived here, where "verified" is the gate's
-    own word and so the confidence is derived from it.
+    A field a deterministic rung filled carries its route on the evidence item,
+    and that route is authoritative: it is how the value actually got here. Only
+    a field the model produced falls back to `llm`, which is correct because
+    every cell that predates this went through the model.
+
+    The route changes where a value came from and never whether it was checked. A
+    structured or labelled route is verified by construction — its quote is the
+    line the page printed — and everything else carries its quote to the same gate
+    the model's output always went through.
     """
     from app.services import confidence as conf_svc
 
-    cell = ((raw.get("fields") or {}).get(field))
+    cell = (raw.get("fields") or {}).get(field)
     if isinstance(cell, dict) and cell.get("read_method"):
         return {k: cell[k] for k in ("read_method", "method_label", "method_hint",
                                      "confidence", "certainty", "certainty_label",
                                      "certainty_hint") if k in cell}
-    return conf_svc.receipt("llm", verified=(status == "verified"))
+    method = conf_svc.normalise_method(route) if route else "llm"
+    verified = status == "verified" or method in {"api", "json_ld", "labelled"}
+    return conf_svc.receipt(method, verified=verified)
