@@ -191,6 +191,11 @@ export const api = {
   // string the evidence store and the extractor both build, so a quote can be
   // shown sitting inside the page it was taken from instead of asserted.
   page: (pageId, o) => request(`/pages/${encodeURIComponent(pageId)}`, { ...o, timeout: o?.timeout ?? 30_000 }),
+  // Named `sourceHosts`, not `sources`: `sources` below is the *per-dataset*
+  // route. Two keys of the same name in one object literal means the second
+  // silently wins, which would repoint the dataset Sources tab at the global
+  // aggregate and have it 404 on every dataset id.
+  sourceHosts: (params, o) => request(`/sources${qs(params)}`, o),
   runPages: (runId, params, o) =>
     request(`/runs/${encodeURIComponent(runId)}/pages${qs(params)}`, o),
 

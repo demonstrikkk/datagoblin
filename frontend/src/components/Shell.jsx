@@ -11,11 +11,13 @@ import { useInspector } from '../lib/inspector.jsx';
 import { RunContextProvider, useRunContext } from '../lib/run-context.jsx';
 
 const TITLES = [
-  [/^\/$/, 'Collect'],
+  [/^\/$/, 'Investigate'],
+  [/^\/dashboard$/, 'Provenance'],
   [/^\/runs\/?$/, 'Runs'],
   [/^\/runs\//, 'Run'],
-  [/^\/library\/?$/, 'Library'],
+  [/^\/library\/?$/, 'Datasets'],
   [/^\/library\//, 'Dataset'],
+  [/^\/sources\/?$/, 'Sources'],
   [/^\/intel\/?$/, 'Intel'],
 ];
 
@@ -34,7 +36,8 @@ function Frame() {
   const { close, open: inspectorOpen } = useInspector();
 
   // Global shortcuts. Digits are ignored while typing in a field, which
-  // useHotkey enforces, so "3" in a prompt never navigates.
+  // useHotkey enforces, so "3" in a prompt never navigates. The order matches
+  // the sidebar: Investigate, Provenance, Runs, Datasets, Sources.
   useHotkey({
     'mod+k': () => setPalette(true),
     escape: () => {
@@ -45,9 +48,10 @@ function Frame() {
     },
     'mod+b': () => setMobileNav((v) => !v),
     1: () => navigate('/'),
-    2: () => navigate('/runs'),
-    3: () => navigate('/library'),
-    4: () => navigate('/intel'),
+    2: () => navigate('/dashboard'),
+    3: () => navigate('/runs'),
+    4: () => navigate('/library'),
+    5: () => navigate('/sources'),
   });
 
   useEffect(() => {
@@ -62,7 +66,10 @@ function Frame() {
 
       <div className="shell-layer flex h-full w-full overflow-hidden">
         <div className="hidden sm:block">
-          <NavRail onOpenSettings={() => setSettings(true)} />
+          <NavRail
+            onOpenSettings={() => setSettings(true)}
+            onOpenPalette={() => setPalette(true)}
+          />
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
@@ -91,10 +98,11 @@ function Frame() {
         {mobileNav ? (
           <div className="fixed inset-x-0 bottom-0 z-40 flex justify-around border-t border-rule bg-paper-2/95 py-1.5 backdrop-blur sm:hidden animate-slide-left">
             {[
-              ['/', 'Collect'],
+              ['/', 'Investigate'],
+              ['/dashboard', 'Provenance'],
               ['/runs', 'Runs'],
-              ['/library', 'Library'],
-              ['/intel', 'Intel'],
+              ['/library', 'Datasets'],
+              ['/sources', 'Sources'],
             ].map(([to, label]) => (
               <button
                 key={to}

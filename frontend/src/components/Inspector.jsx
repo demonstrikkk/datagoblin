@@ -378,8 +378,8 @@ function RunView({ run }) {
   return (
     <>
       <div className="flex items-center gap-1.5 border-b border-rule px-4 py-2.5">
-        <Pill tone={meta.tone} glyph={meta.glyph} live={meta.live}>
-          {meta.label}
+        <Pill tone={meta.tone} glyph={meta.glyph} live={meta.live} title={`Status: ${meta.label}`}>
+          {meta.display || meta.label}
         </Pill>
         {partial ? (
           <Pill tone="warn" glyph="◐" title="A dataset was written before the run budget ran out">

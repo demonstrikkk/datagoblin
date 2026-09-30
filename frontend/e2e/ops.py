@@ -91,7 +91,10 @@ def main() -> int:
         go("/")
         page.wait_for_selector("nav[aria-label='Primary']", timeout=30_000)
         rail = page.inner_text("nav[aria-label='Primary']")
-        page.locator("nav[aria-label='Primary'] a[aria-label='Dashboard']").click()
+        # By visible label. The nav rail is labelled rather than icon-only, and
+        # the dashboard is presented as a provenance story, so the link reads
+        # "Provenance" while the route stays /dashboard.
+        page.locator("nav[aria-label='Primary'] a:has-text('Provenance')").first.click()
         page.wait_for_function(
             "() => location.pathname === '/dashboard'", timeout=20_000)
         # The aggregate reads every dataset's records, so wait for its own
@@ -135,17 +138,51 @@ def main() -> int:
             # "is this trustworthy".
             "provenance ribbon": all(s in body for s in (
                 "Sources fetched", "Records", "Values", "Proven")),
-            "proven stated as a share": "of all values" in low,
-            "unproven is not called proven": "nothing judged it" in low,
-            "disputes surfaced": "sources disagree" in low,
-            "host ranking present": "which sites paid" in low,
-            "never-filled counted separately": "fields on no record" in low,
+            # These were four stat cards with sub-labels; they are now one
+            # sentence plus a single distribution bar, and the words that carry
+            # the claim moved with them. The assertions follow the claim, not
+            # the old layout.
+            "proven stated as a share": "trace back to a stored page" in low,
+            "unproven is not called proven": "unresolved" in low,
+            "disputes surfaced": "dispute" in low,
+            "never-filled counted separately": "never filled" in low,
             "sortable by what you choose": "most never filled" in low,
+            # The host ranking moved to the Sources page, where it can be
+            # filtered and carries pages, text and last-used per host. The
+            # dashboard points at it instead of repeating it.
+            "links out to sources": "browse every stored source" in low,
         }
         for k, v in checks.items():
             print(f"  {k:28}: {v}")
             if not v:
                 fails.append(f"dashboard missing: {k}")
+
+        # -- sources page: owns the host ranking --------------------------
+        print("\n=== sources ===")
+        page.goto(f"{BASE}/sources", wait_until="domcontentloaded")
+        try:
+            page.wait_for_selector("table tbody tr", timeout=45_000)
+        except Exception:
+            fails.append("the sources page rendered no host rows")
+        src_low = page.inner_text("main").lower()
+        src_checks = {
+            "host ranking present": "who paid" in src_low,
+            "ranks by what each host stored": "share of the text" in src_low,
+            "states the concentration": "hold" in src_low and "%" in src_low,
+            "filterable": page.locator("input[aria-label*='Filter sources']").count() == 1,
+            "per-host detail": all(
+                s in src_low for s in ("pages", "text stored", "runs", "last used")),
+        }
+        for k, v in src_checks.items():
+            print(f"  {k:28}: {v}")
+            if not v:
+                fails.append(f"sources missing: {k}")
+
+        # The two pages must not both carry a host ranking: two lists of the
+        # same hosts measured two different ways is the duplication this split
+        # was made to remove.
+        if "who paid" in low and "who paid" in src_low:
+            fails.append("the host ranking is on the dashboard and on Sources")
 
         # The numbers must agree with the API, or the page is decoration.
         truth = _api("dashboard")

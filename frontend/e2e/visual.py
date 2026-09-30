@@ -140,7 +140,9 @@ async def main():
         # settings
         await p.keyboard.press("Escape")
         await p.wait_for_timeout(300)
-        await p.click("nav[aria-label='Primary'] button[aria-label='Settings']")
+        # By visible label — the nav rail is labelled, not icon-only. See the
+        # note in interactions.py.
+        await p.click('nav[aria-label=\'Primary\'] button:has-text("Settings")')
         await p.wait_for_timeout(700)
         await p.screenshot(path=f"{OUT}/09-settings.png")
         print("  shot 09-settings")

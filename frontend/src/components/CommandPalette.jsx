@@ -5,10 +5,11 @@ import { Kbd, Spinner } from './ui.jsx';
 import { when } from '../lib/format.js';
 
 const DESTINATIONS = [
-  { id: 'nav-collect', label: 'Collect', hint: 'Start a new research run', go: '/' },
+  { id: 'nav-collect', label: 'Investigate', hint: 'Start a new research run', go: '/' },
+  { id: 'nav-dashboard', label: 'Provenance', hint: 'Provenance across every dataset', go: '/dashboard' },
   { id: 'nav-runs', label: 'Runs', hint: 'Browse run history', go: '/runs' },
-  { id: 'nav-library', label: 'Library', hint: 'Browse verified datasets', go: '/library' },
-  { id: 'nav-intel', label: 'Intel', hint: 'Model comparison and free-model health', go: '/intel' },
+  { id: 'nav-library', label: 'Datasets', hint: 'Browse verified datasets', go: '/library' },
+  { id: 'nav-sources', label: 'Sources', hint: 'Every page stored in the workspace', go: '/sources' },
 ];
 
 const score = (needle, hay) => {

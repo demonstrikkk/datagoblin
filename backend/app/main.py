@@ -1096,6 +1096,29 @@ async def dataset_coverage(did: str, cid: str = Depends(correlation_id)) -> dict
     return {"data": matrix, "error": None, "meta": {"correlation_id": cid}}
 
 
+@app.get("/api/sources", dependencies=[Depends(require_api_key)])
+async def list_sources(limit: int = Query(default=500, ge=1, le=2000),
+                       cid: str = Depends(correlation_id)) -> dict:
+   """Every host this workspace has stored evidence from, across all runs.
+
+   The source browser answers "what has ever been fetched, and how much of it
+   paid". There was no read for it: `get_pages` is scoped to one run and
+   `get_sources` to one dataset, so the only way to assemble the view was one
+   request per run from the browser.
+
+   Returns an empty list rather than an error on a repository that has not
+   implemented the aggregate, so the view degrades to "no trail yet" instead of
+   a 500 that looks like a broken backend.
+   """
+   getter = getattr(repo(), "list_sources", None)
+   if getter is None:
+      return {"data": {"hosts": [], "unsupported": True},
+              "error": None, "meta": {"correlation_id": cid}}
+   hosts = await asyncio.to_thread(getter, limit)
+   return {"data": {"hosts": hosts, "unsupported": False},
+           "error": None, "meta": {"correlation_id": cid}}
+
+
 @app.get("/api/runs/{run_id}/pages", dependencies=[Depends(require_api_key)])
 async def run_pages(run_id: str, limit: int = Query(default=200, ge=1, le=500),
                     cid: str = Depends(correlation_id)) -> dict:

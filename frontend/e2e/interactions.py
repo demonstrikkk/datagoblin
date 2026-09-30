@@ -118,7 +118,12 @@ async def main() -> int:
         errs.clear()
         await p.goto(f"{BASE}/", wait_until="domcontentloaded")
         await p.wait_for_timeout(700)
-        await p.click("nav[aria-label='Primary'] button[aria-label='Settings']")
+        # Selected by its visible label, not an aria-label. The nav rail used to
+        # be icon-only and needed `aria-label="Settings"` to be nameable; it now
+        # carries the word "Settings" as text, and a button whose accessible
+        # name is pinned by aria-label while the visible text says the same
+        # thing is a place the two can drift apart.
+        await p.click('nav[aria-label=\'Primary\'] button:has-text("Settings")')
         await p.wait_for_timeout(700)
         dlg = p.locator('[role=dialog][aria-label="Settings"]')
         print("  dialog opens:", await dlg.count() == 1)

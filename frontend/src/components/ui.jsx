@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useRef, useState } from 'react';
-import { toneClass, truncate } from '../lib/format.js';
+import { toneClass, toneVar, truncate, num } from '../lib/format.js';
 import { useReveal } from '../hooks/useUi.js';
 
 /* ------------------------------------------------------------------ status */
@@ -208,12 +208,12 @@ export function StackedBar({ rows, total, onSelect, activeKey, height = 8, class
     );
   }
   const colors = {
-    ok: 'var(--ok)',
-    danger: 'var(--danger)',
-    warn: 'var(--warn)',
-    info: 'var(--info)',
-    judge: 'var(--judge)',
-    muted: 'var(--rule-2)',
+    ok: 'rgb(var(--ok))',
+    danger: 'rgb(var(--danger))',
+    warn: 'rgb(var(--warn))',
+    info: 'rgb(var(--info))',
+    judge: 'rgb(var(--judge))',
+    muted: 'rgb(var(--rule-2))',
   };
   return (
     <div
@@ -498,7 +498,7 @@ export function Histogram({ buckets, median: med, format = (n) => String(n), hei
               width={8}
               height={Math.max(b.n > 0 ? 1.5 : 0, h)}
               rx={1}
-              fill="var(--accent)"
+              fill="rgb(var(--accent))"
               opacity={0.35 + 0.65 * (b.n / max)}
             >
               <title>{`${format(b.from)} – ${format(b.to)}: ${b.n}`}</title>
@@ -510,7 +510,7 @@ export function Histogram({ buckets, median: med, format = (n) => String(n), hei
           x2={medBucket * 10 + 5}
           y1={0}
           y2={height}
-          stroke="var(--ink)"
+          stroke="rgb(var(--ink))"
           strokeWidth={1}
           strokeDasharray="2 2"
           opacity={0.5}
@@ -590,9 +590,20 @@ function squarify(items, x, y, w, h) {
 }
 
 /**
- * A treemap of shares. Labels are drawn only where they fit — a label inside a
- * tile too small for it is noise, and the ranked list beside the tiles carries
- * every value anyway.
+ * A treemap of shares — shape only, no in-tile labels.
+ *
+ * Labels were drawn here and were removed. The SVG carries
+ * `preserveAspectRatio="none"`, so a 100x100 viewBox is stretched to whatever
+ * the container is: text in viewBox units cannot be sized against a tile in
+ * viewBox units and land correctly, and every attempt produced clipped
+ * fragments — "Ki…", "rse…", "any" — laid over their neighbours. An SVG <text>
+ * is not clipped by a neighbouring <rect>, so a label too wide for its tile
+ * simply runs over the next one.
+ *
+ * The tiles now show only proportion, which is the part a treemap is actually
+ * good at, and the full name and count are on the tile's <title> for hover.
+ * Every value is also listed with its count and share in the ranked column
+ * beside the chart, so nothing is only reachable by hovering.
  */
 export function Treemap({ items, height = 132, onSelect, activeKey }) {
   const list = (items || []).filter((it) => it && it.value > 0);
@@ -608,7 +619,6 @@ export function Treemap({ items, height = 132, onSelect, activeKey }) {
       preserveAspectRatio="none"
     >
       {rects.map((r) => {
-        const fits = r.w > 14 && r.h > 9;
         const dim = activeKey && activeKey !== r.key;
         return (
           <g
@@ -623,23 +633,11 @@ export function Treemap({ items, height = 132, onSelect, activeKey }) {
               width={Math.max(0, r.w - 0.8)}
               height={Math.max(0, r.h - 0.8)}
               rx={1.5}
-              fill={r.tone ? `var(--${r.tone})` : 'var(--accent)'}
+              fill={r.tone ? toneVar(r.tone) : 'rgb(var(--accent))'}
               opacity={r.tone ? 0.9 : 0.82}
             >
               <title>{`${r.label} — ${r.n}`}</title>
             </rect>
-            {fits && (
-              <text
-                x={r.x + r.w / 2}
-                y={r.y + r.h / 2 + 1.6}
-                textAnchor="middle"
-                fontSize={Math.min(4.4, Math.max(2.6, r.w / 8))}
-                fill="var(--paper)"
-                style={{ pointerEvents: 'none' }}
-              >
-                {r.label.length > 12 ? `${r.label.slice(0, 11)}…` : r.label}
-              </text>
-            )}
           </g>
         );
       })}
@@ -680,7 +678,7 @@ export function Timeline({ byYear, min, max, height = 56 }) {
               y={height - h}
               width={Math.max(0.5, step - 0.6)}
               height={h}
-              fill={r.n ? 'var(--accent)' : 'var(--rule)'}
+              fill={r.n ? 'rgb(var(--accent))' : 'rgb(var(--rule))'}
               opacity={r.n ? 0.4 + 0.6 * (r.n / maxN) : 1}
             >
               <title>{`${r.year}: ${r.n}`}</title>
@@ -694,6 +692,81 @@ export function Timeline({ byYear, min, max, height = 56 }) {
         <span>{max}</span>
       </figcaption>
     </figure>
+  );
+}
+
+/**
+ * A ranked bar chart.
+ *
+ * This replaces a treemap for host yield, and the reason is the shape of the
+ * data rather than taste: stored-text totals across sources are extremely
+ * long-tailed — on this workspace the largest host holds 2.0 MB and the
+ * smallest 70 KB, a 28x spread across 72 rows. Squarified into equal areas that
+ * is a stack of hairlines: technically correct, visually a barcode, and it
+ * answers nothing.
+ *
+ * Bars show the same distribution honestly. The taper *is* the finding — a few
+ * hosts carry most of the evidence and the rest contribute a long thin tail —
+ * and it is legible at a glance where a treemap of the same numbers is not.
+ *
+ * One row per host, on a single line, with the bar in its own middle column.
+ * The bar does not run the full width of the page: at 1100px a 35% share is a
+ * 400px rule, which reads as an underline rather than as a quantity. Confining
+ * it to a fixed-width column keeps the eye comparing lengths.
+ */
+export function RankBars({ items, total, limit = 12, format = num, showShare = true, tailFormat }) {
+  const rows = (items || []).filter((r) => Number.isFinite(r.value) && r.value >= 0);
+  if (!rows.length) return null;
+  const shown = rows.slice(0, limit);
+  const max = Math.max(...shown.map((r) => r.value), 1);
+  const sum = total ?? rows.reduce((a, r) => a + r.value, 0);
+  const rest = (sum || 0) - shown.reduce((a, r) => a + r.value, 0);
+  const tail = tailFormat || format;
+
+  return (
+    <div>
+      <ol className="space-y-[5px]">
+        {shown.map((r) => {
+          const share = sum ? (r.value / sum) * 100 : 0;
+          return (
+            <li
+              key={r.key}
+              className="grid grid-cols-[minmax(0,168px)_minmax(80px,260px)_auto] items-center gap-x-3"
+            >
+              <span
+                className="truncate font-mono text-[11px] text-ink-2"
+                title={r.label}
+              >
+                {r.label}
+              </span>
+              <span className="h-[6px] overflow-hidden rounded-[2px] bg-warm/80">
+                <span
+                  className="block h-full rounded-[2px] transition-[width] duration-500 ease-swift"
+                  style={{
+                    width: `${Math.max(r.value > 0 ? 1.5 : 0, (r.value / max) * 100)}%`,
+                    background: 'rgb(var(--accent))',
+                  }}
+                />
+              </span>
+              <span className="flex items-baseline gap-2 text-[11px] tabular-nums">
+                <span className="font-mono text-ink">{format(r.value)}</span>
+                {showShare ? (
+                  <span className="w-11 text-right text-[10px] text-muted">
+                    {share >= 0.1 ? `${share.toFixed(1)}%` : '<0.1%'}
+                  </span>
+                ) : null}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      {rows.length > shown.length ? (
+        <p className="mt-2 text-[10.5px] text-muted">
+          {num(rows.length - shown.length)} more host{rows.length - shown.length === 1 ? '' : 's'}{' '}
+          contributed {tail(rest)} between them.
+        </p>
+      ) : null}
+    </div>
   );
 }
 

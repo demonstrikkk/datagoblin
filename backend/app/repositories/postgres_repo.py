@@ -609,6 +609,39 @@ class PostgresRepo:
                  FROM pages WHERE run_id=%s ORDER BY retrieved_at DESC LIMIT %s""",
             (run_id, max(1, min(int(limit), 500))))
 
+    def list_sources(self, limit: int = 500) -> list[dict]:
+        """Every stored page in the workspace, grouped by host.
+
+        The source browser needs "what has this workspace ever fetched, and how
+        much of it paid" across all runs, and there was no read that did that:
+        `get_pages` is scoped to one run, so the only way to build the view was
+        one request per run from the browser.
+
+        Aggregated in SQL rather than by fetching every page and folding in
+        Python, because `markdown` is the bulk of the table and none of it is
+        needed to answer this. One row per host, with the page count, the
+        characters stored, the number of runs that touched it, and the newest
+        retrieval time, ordered by what the host actually supplied.
+        """
+        return self._rows(
+            "list_sources",
+            """SELECT
+                 host,
+                 count(*)::int               AS pages,
+                 sum(snapshot_chars)::bigint AS chars,
+                 max(retrieved_at)           AS last_used,
+                 count(DISTINCT run_id)::int AS runs
+               FROM (
+                 SELECT run_id, snapshot_chars, retrieved_at,
+                        coalesce(nullif(split_part(split_part(url, '://', 2), '/', 1), 'www.'), '')
+                          AS host
+                 FROM pages
+               ) p
+               GROUP BY host
+               ORDER BY pages DESC, chars DESC
+               LIMIT %s""",
+            (max(1, min(int(limit), 2000)),))
+
     def get_pages_by_ids(self, page_ids: list[str]) -> list[dict]:
         """Page rows for specific ids, in one round trip, WITHOUT raw_html.
 

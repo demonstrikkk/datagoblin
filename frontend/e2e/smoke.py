@@ -139,12 +139,17 @@ async def main() -> int:
 
         # Digit shortcut navigates. Blur the autofocused textarea first: a bare
         # digit is *supposed* to be ignored while typing.
+        #
+        # `4` is Datasets. The digits follow the sidebar order — Investigate,
+        # Provenance, Runs, Datasets, Sources — so this asserts the binding
+        # tracks the navigation rather than a fixed literal. It was `3` before
+        # Intel left the rail and Provenance took a slot.
         await page.evaluate("document.activeElement?.blur()")
-        await page.keyboard.press("3")
+        await page.keyboard.press("4")
         await page.wait_for_timeout(1200)
         url_after = page.url
         print(f"\n=== interaction ===")
-        print(f"  key '3' -> url      : {url_after}")
+        print(f"  key '4' -> url      : {url_after}")
         if "/library" not in url_after:
             failures.append(f"digit shortcut did not navigate (got {url_after})")
 

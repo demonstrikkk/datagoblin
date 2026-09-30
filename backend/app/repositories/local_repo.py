@@ -107,12 +107,54 @@ class LocalRepo:
                                "content_hash": page.get("content_hash", ""),
                                "markdown": page.get("markdown", ""),
                                "raw_html": page.get("raw_html", ""),
-                               "snapshot_chars": int(page.get("snapshot_chars", 0) or 0)})
+                                "snapshot_chars": int(page.get("snapshot_chars", 0) or 0),
+                                # `retrieved_at` was dropped here while PostgresRepo
+                                # kept it, so the two did not actually mirror each
+                                # other: `get_pages` documents itself as "newest
+                                # first" and had no timestamp to order by, and the
+                                # source browser's "last used" column was
+                                # permanently null under local persistence.
+                                "retrieved_at": page.get("retrieved_at") or ""})
         return pid
 
     def get_pages(self, run_id: str, limit: int = 200) -> list[dict]:
         rows = [p for p in self._scan("pages") if p.get("run_id") == run_id]
         return rows[-max(1, min(int(limit), 500)):]
+
+    def list_sources(self, limit: int = 500) -> list[dict]:
+        """Every stored page grouped by host. See PostgresRepo.list_sources."""
+        agg: dict = {}
+        for p in self._scan("pages"):
+            url = str(p.get("url") or "")
+            host = ""
+            if "://" in url:
+                host = url.split("://", 1)[1].split("/", 1)[0]
+            if host.startswith("www."):
+                host = host[4:]
+            row = agg.setdefault(
+                host,
+                {"host": host, "pages": 0, "chars": 0, "runs": set(), "last_used": None},
+            )
+            row["pages"] += 1
+            row["chars"] += int(p.get("snapshot_chars") or 0)
+            row["runs"].add(str(p.get("run_id") or ""))
+            got = p.get("retrieved_at")
+            if got and (row["last_used"] is None or str(got) > str(row["last_used"])):
+                row["last_used"] = got
+
+        out = []
+        for r in agg.values():
+            out.append(
+                {
+                    "host": r["host"],
+                    "pages": r["pages"],
+                    "chars": r["chars"],
+                    "runs": len(r["runs"]),
+                    "last_used": r["last_used"],
+                }
+            )
+        out.sort(key=lambda r: (-r["pages"], -r["chars"]))
+        return out[: max(1, min(int(limit), 2000))]
 
     def get_pages_by_ids(self, page_ids: list[str]) -> list[dict]:
         """Full page rows for specific ids, in one pass. See PostgresRepo."""

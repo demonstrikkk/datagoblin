@@ -190,7 +190,7 @@ function FieldCard({ field, onInspect }) {
                 <span className="h-2 w-full overflow-hidden rounded-full bg-warm">
                   <span
                     className="block h-full rounded-full"
-                    style={{ width: `${Math.max(2, (v.n / max) * 100)}%`, background: 'var(--accent)' }}
+                    style={{ width: `${Math.max(2, (v.n / max) * 100)}%`, background: 'rgb(var(--accent))' }}
                   />
                 </span>
                 <span className="tnum shrink-0 text-[11px] text-ink-2">{v.n}</span>

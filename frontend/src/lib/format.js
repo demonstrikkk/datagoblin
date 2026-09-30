@@ -20,16 +20,33 @@ export const TERMINAL_STATUS = new Set([
   'FAILED+partial',
 ]);
 
+/**
+ * Status wording.
+ *
+ * `display` is the headline noun shown beside the glyph; `label` is the precise
+ * backend state. They differ where the enum is internal jargon — "Partial
+ * (error)" is literally `FAILED` with a partial flag, which tells a reader
+ * nothing, so the display word leads and the precise state stays available.
+ *
+ * The voice is a person reporting an outcome, not a UI admitting an absence.
+ * It never replaces a fact: every one of these is still paired with the reason
+ * and the count in the panel around it.
+ */
 export const RUN_STATUS = {
-  PLANNING:  { label: 'Planning',   tone: 'muted',  glyph: '·' },
-  RUNNING:   { label: 'Running',    tone: 'info',   glyph: '◍', live: true },
-  COMPLETED: { label: 'Complete',   tone: 'ok',     glyph: '✓' },
-  FAILED:    { label: 'Failed',     tone: 'danger', glyph: '✕' },
-  CANCELLED: { label: 'Cancelled',  tone: 'muted',  glyph: '⊘' },
-  PARTIAL:   { label: 'Partial',    tone: 'warn',   glyph: '◐' },
+  PLANNING:  { label: 'Planning',   display: 'Planning',  tone: 'muted',  glyph: '·' },
+  RUNNING:   { label: 'Running',    display: 'Hunting',   tone: 'info',   glyph: '◍', live: true },
+  COMPLETED: { label: 'Complete',   display: 'Hunt closed', tone: 'ok',    glyph: '✓' },
+  FAILED:    { label: 'Failed',     display: 'Hunt stopped early', tone: 'danger', glyph: '✕' },
+  CANCELLED: { label: 'Cancelled',  display: 'Called off', tone: 'muted',  glyph: '⊘' },
+  PARTIAL:   { label: 'Partial',    display: 'Partial catch', tone: 'warn', glyph: '◐' },
   // A partial result is persisted as FAILED + partial=true, and the stage is
   // FAILED while the status is PARTIAL. Surface the truth, not the raw enum.
-  'FAILED+partial': { label: 'Partial (error)', tone: 'warn', glyph: '◐' },
+  'FAILED+partial': {
+    label: 'Partial (error)',
+    display: 'Partial catch',
+    tone: 'warn',
+    glyph: '◐',
+  },
 };
 
 /** Normalise the two ways the API reports a partial run into one key. */
@@ -42,7 +59,9 @@ export function runStatusKey(run) {
 
 export const runStatusMeta = (run) => {
   const key = runStatusKey(run);
-  return RUN_STATUS[key] || { label: key || 'Unknown', tone: 'muted', glyph: '?' };
+  return (
+    RUN_STATUS[key] || { label: key || 'Unknown', display: key || 'Unknown', tone: 'muted', glyph: '?' }
+  );
 };
 
 /**
@@ -118,6 +137,21 @@ export const TONE = {
 };
 
 export const toneClass = (tone) => TONE[tone] || TONE.muted;
+
+/**
+ * A tone as a CSS colour usable in inline styles and SVG attributes.
+ *
+ * The palette tokens are stored as bare RGB channel triplets (`--ok: 63 125 88`)
+ * so Tailwind can apply an alpha modifier. That makes `var(--ok)` *not a colour*
+ * on its own: it expands to `63 125 88`, which is invalid. An invalid CSS
+ * `background` silently paints nothing, and an invalid SVG `fill` falls back to
+ * black — so `StackedBar` rendered as an empty pill and `Treemap` as a solid
+ * black rectangle, with no error anywhere.
+ *
+ * Everything that needs a token as a whole colour goes through here.
+ * `muted` maps to `rule-2`, the hairline it is drawn as everywhere else.
+ */
+export const toneVar = (tone) => `rgb(var(--${tone === 'muted' ? 'rule-2' : tone}))`;
 
 /**
  * The `RunStage` values, in the order the runner executes them.

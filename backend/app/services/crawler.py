@@ -756,9 +756,14 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
 
 async def emit_source(emit: Any, url: str, ok_flag: bool) -> None:
     import datetime
+    # `data` carries the url and the outcome structurally. It used to be absent
+    # and the url existed only inside the human-readable `message`, which meant
+    # any client wanting to build a list of what was actually fetched had to
+    # regex a sentence. `url` is already in scope here, so the field is free.
     await emit({"type": "source.fetched", "run_id": "",
                 "stage": "FETCHING", "message": f"{'Fetched' if ok_flag else 'Skipped'} {url[:80]}",
-                "progress": 40, "timestamp": datetime.datetime.utcnow().isoformat() + "Z"})
+                "progress": 40, "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+                "data": {"url": url, "ok": bool(ok_flag)}})
 
 
 async def _default_fetch(url: str, method: str) -> dict[str, Any]:

@@ -127,6 +127,24 @@ paths:
         "200": {description: "{run_id, status}"}
         "404": {$ref: "#/components/responses/NotFound"}
 
+  /api/sources:
+    get:
+      tags: [evidence]
+      summary: |
+        Every host this workspace has stored evidence from, across all runs,
+        with the pages each supplied, the characters stored from it, how many
+        runs touched it and when it was last used.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 2000, default: 500}
+      responses:
+        "200":
+          description: |
+            Returns `unsupported: true` with an empty `hosts` array on a
+            repository that has not implemented the cross-run aggregate, so the
+            source browser degrades to "no trail yet" instead of erroring.
+
   /api/runs/{run_id}/pages:
     get:
       tags: [evidence]

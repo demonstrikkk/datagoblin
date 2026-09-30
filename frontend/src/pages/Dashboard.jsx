@@ -9,29 +9,26 @@ import {
   Loading,
   Notice,
   Pill,
-  Section,
   StackedBar,
-  Stat,
-  Treemap,
 } from '../components/ui.jsx';
-import { num } from '../lib/format.js';
+import { VoiceEmpty } from '../components/evidence.jsx';
+import { num, toneVar, when } from '../lib/format.js';
 
 /**
- * Is any of this working?
+ * The provenance story.
  *
- * The library answers "what datasets do I have" and the run list answers "what
- * ran". Neither answers the question someone actually opens the app to ask, and
- * the previous version of this page answered it with a row of numbers and two
- * tables — accurate, and unreadable, because a percentage with nothing to
+ * The previous version of this page opened with four stat cards: sources,
+ * records, values, proven. Accurate, and unreadable — four numbers of the same
+ * shape stacked in a row is an admin panel, and a percentage with nothing to
  * compare it against does not tell you whether to worry.
  *
- * So it is built as the pipeline, left to right, and the width of each stage is
- * the number of things that survived it. Sources become pages become records
- * become cells become *proven* cells, and the last stage is a small fraction of
- * the one before it on any honest dataset — that ratio is the product's whole
- * claim, and it should be the first thing on the page rather than buried in a
- * tooltip. Every figure comes from the same server-side aggregate the API
- * serves, so this page and the dataset page cannot disagree.
+ * What this page is actually for is one question: how much of what I am looking
+ * at can be defended, and where did it come from. So it leads with a sentence,
+ * then the one shape that carries the answer — the share of values by how far
+ * each got — then which sites paid, then the datasets themselves.
+ *
+ * Every figure comes from the same server-side aggregate the API serves, so this
+ * page and the dataset page cannot disagree.
  */
 export default function Dashboard() {
   const { data, status, error, refetch, isStale } = useResource(
@@ -56,213 +53,277 @@ export default function Dashboard() {
   if (status === 'loading' && !data) return <Loading label="Reading stored evidence" rows={4} />;
   if (error && !data) return <ErrorNote error={error} onRetry={refetch} />;
   if (!data) {
-    return <Empty title="Nothing to summarise yet" hint="Run a plan to build a dataset." />;
+    return (
+      <VoiceEmpty
+        state="noDatasets"
+        action={
+          <Link to="/" className="btn-primary btn-xs">
+            Start an investigation
+          </Link>
+        }
+      />
+    );
   }
 
   const cells = t?.cells || 0;
+  const nDatasets = data.datasets_summarised || 0;
+
+  const bands = [
+    { key: 'verified', n: t?.verified || 0, tone: 'ok', label: 'proven', hint: 'the value sits inside its own quote, and that quote re-locates in the stored page' },
+    { key: 'unverified', n: t?.unverified || 0, tone: 'info', label: 'unresolved', hint: 'a quote was captured, but no judge has ruled on it' },
+    { key: 'conflicting', n: t?.conflicting || 0, tone: 'judge', label: 'disputed', hint: 'two sources disagree about this value' },
+    { key: 'missing', n: t?.missing || 0, tone: 'muted', label: 'never filled', hint: 'a field the schema asked for that no record carries' },
+  ].filter((b) => b.n > 0);
+
+  /* The pipeline, left to right, each stage's width being what survived it.
+     On an honest dataset the last stage is a small fraction of the one before
+     it, and that ratio is the product's whole claim. */
   const stages = [
-    { key: 'sources', label: 'Sources fetched', value: t?.sources || 0, sub: `${t?.source_ok || 0} ok` },
+    { key: 'sources', label: 'Sources fetched', value: t?.sources || 0, sub: `${num(t?.source_ok || 0)} ok` },
     { key: 'records', label: 'Records', value: t?.records || 0, sub: 'survived dedupe' },
     { key: 'cells', label: 'Values', value: cells, sub: 'fields × records' },
     { key: 'proven', label: 'Proven', value: t?.verified || 0, sub: 'quote re-locates in the page' },
   ];
 
   return (
-    <div className="page space-y-6">
-      <Section
-        title="Dashboard"
-        sub={
-          data.truncated
-            ? `First ${data.datasets_summarised} of ${data.datasets_available} datasets`
-            : `${data.datasets_summarised} dataset${data.datasets_summarised === 1 ? '' : 's'}`
-        }
-        right={
-          <button type="button" className="btn btn-quiet" onClick={refetch}>
+    <div className="space-y-7">
+      {/* The headline. One statement about the whole workspace, then the
+          numbers that make it checkable underneath. */}
+      <header className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <p className="eyebrow">
+              {nDatasets} dataset{nDatasets === 1 ? '' : 's'}
+              {cells ? ` · ${num(cells)} values` : ''}
+            </p>
+            <h1 className="mt-1.5 h-display text-[30px] leading-[1.1] text-ink balance">
+              {cells ? 'The web left a trail.' : 'Nothing carried back yet.'}
+            </h1>
+          </div>
+          <button type="button" className="btn-outline btn-xs" onClick={refetch}>
             {isStale ? 'Refreshing…' : 'Refresh'}
           </button>
-        }
-      >
-        <ProvenanceRibbon stages={stages} />
-
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Stat
-            label="Proven of all values"
-            value={`${t?.proven_pct || 0}%`}
-            sub={`${num(t?.verified || 0)} of ${num(cells)}`}
-            tone={t?.proven_pct >= 50 ? 'ok' : 'ink'}
-          />
-          <Stat
-            label="Unproven"
-            value={num(t?.unverified || 0)}
-            sub="a quote exists, nothing judged it"
-            tone="info"
-          />
-          <Stat
-            label="Disputed"
-            value={num(t?.conflicting || 0)}
-            sub="sources disagree"
-            tone={t?.conflicting ? 'judge' : 'ink'}
-          />
-          <Stat
-            label="Never filled"
-            value={num(t?.empty_fields || 0)}
-            sub="fields on no record at all"
-            tone={t?.empty_fields ? 'warn' : 'ink'}
-          />
         </div>
 
         {cells ? (
-          <div className="mt-4">
-            <div className="mb-1 flex items-baseline justify-between text-[11px] text-muted">
-              <span>Where the values are</span>
-              <span className="tnum">{num(cells)} total</span>
-            </div>
-            <StackedBar
-              height={10}
-              total={cells}
-              rows={[
-                { key: 'verified', n: t.verified, tone: 'ok', label: 'Proven' },
-                { key: 'unverified', n: t.unverified, tone: 'info', label: 'Unproven' },
-                { key: 'conflicting', n: t.conflicting, tone: 'judge', label: 'Disputed' },
-                { key: 'missing', n: t.missing, tone: 'muted', label: 'Empty' },
-              ].filter((r) => r.n > 0)}
-            />
+          <p className="max-w-2xl font-display text-[17px] leading-[1.45] text-ink-2">
+            {num(t?.verified || 0)} of {num(cells)} values have a source behind them
+            {t?.unverified ? `, and ${num(t.unverified)} still need a decision` : ''}
+            {t?.conflicting ? `. ${num(t.conflicting)} disagree with another source` : ''}.
+          </p>
+        ) : null}
+      </header>
+
+      <ProvenanceRibbon stages={stages} />
+
+      {cells ? (
+        <section className="surface p-4">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="eyebrow">Provenance</h2>
+            <span className="text-[11px] text-muted">
+              {t?.proven_pct || 0}% of every value trace back to a stored page
+            </span>
           </div>
-        ) : (
-          <Notice tone="info">
-            No values are stored yet, so there is nothing to summarise beyond the
-            dataset list.
-          </Notice>
-        )}
+          <StackedBar height={12} total={cells} rows={bands} />
+          <dl className="mt-3 grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
+            {bands.map((b) => (
+              <div key={b.key} className="flex items-baseline gap-2" title={b.hint}>
+                <span
+                  className="h-1.5 w-1.5 shrink-0 translate-y-px rounded-full"
+                  style={{ background: toneVar(b.tone) }}
+                  aria-hidden="true"
+                />
+                <dt className="text-[12px] text-ink-2">{b.label}</dt>
+                <dd className="font-mono tnum text-[12px] text-ink">{num(b.n)}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ) : (
+        <Notice tone="info">
+          No values are stored yet, so there is nothing to summarise beyond the dataset list.
+        </Notice>
+      )}
 
-        {data.unreadable_datasets > 0 && (
-          <Notice tone="warn">
-            {data.unreadable_datasets} dataset
-            {data.unreadable_datasets === 1 ? "'s records" : "s' records"} could not
-            be read and {data.unreadable_datasets === 1 ? 'is' : 'are'} listed below
-            without figures, rather than being dropped.
-          </Notice>
-        )}
-      </Section>
-
-      {data.top_hosts?.length ? (
-        <Section
-          title="Which sites paid"
-          sub="Ranked by proven values, read from the quotes your cells already carry"
-        >
-          <HostYield hosts={data.top_hosts} />
-        </Section>
+      {data.unreadable_datasets > 0 ? (
+        <Notice tone="warn">
+          {data.unreadable_datasets} dataset
+          {data.unreadable_datasets === 1 ? "'s records" : "s' records"} could not be read and{' '}
+          {data.unreadable_datasets === 1 ? 'is' : 'are'} listed below without figures, rather
+          than being dropped.
+        </Notice>
       ) : null}
 
-      <Section title="Datasets" sub="Sorted by what you chose">
-        <div className="mb-2 flex flex-wrap gap-1">
-          {[
-            { k: 'proven', l: 'Proven values' },
-            { k: 'coverage', l: 'Most filled' },
-            { k: 'records', l: 'Most records' },
-            { k: 'gaps', l: 'Most never filled' },
-          ].map((o) => (
-            <button
-              key={o.k}
-              type="button"
-              onClick={() => setSort(o.k)}
-              className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors duration-200 ease-swift focusable ${
-                sort === o.k
-                  ? 'border-ink bg-ink text-paper'
-                  : 'border-rule-2 text-muted hover:border-ink hover:text-ink'
-              }`}
-            >
-              {o.l}
-            </button>
-          ))}
-        </div>
-        <div className="table-wrap">
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Dataset</th>
-                <th className="num">Records</th>
-                <th>Values</th>
-                <th className="num">Proven</th>
-                <th>Never filled</th>
-              </tr>
-            </thead>
-            <tbody>
-              {datasets.map((d) => (
-                <tr
-                  key={d.dataset_id}
-                  onClick={() =>
-                    inspect({ kind: 'dataset', id: d.dataset_id, label: d.name || d.dataset_id })
-                  }
-                  style={{ cursor: 'pointer' }}
-                >
-                  <td>
-                    <Link
-                      to={`/library/${d.dataset_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="link"
-                    >
-                      {d.name || d.dataset_id.slice(0, 8)}
-                    </Link>
-                    {d.sampled && (
-                      <Pill tone="info" title="Figures are computed from the first 2000 records.">
-                        sampled
-                      </Pill>
-                    )}
-                  </td>
-                  <td className="num mono">{num(d.records || 0)}</td>
-                  {d.coverage == null ? (
-                    <td colSpan={3}>
-                      <Pill tone="warn" title={d.reason || ''}>
-                        unreadable
-                      </Pill>
-                    </td>
-                  ) : (
-                    <>
-                      <td style={{ minWidth: 130 }}>
-                        <StackedBar
-                          height={6}
-                          total={d.records || 1}
-                          rows={[
-                            { key: 'verified', n: d.coverage.verified, tone: 'ok', label: 'Proven' },
-                            { key: 'unverified', n: d.coverage.unverified, tone: 'info', label: 'Unproven' },
-                            { key: 'conflicting', n: d.coverage.conflicting, tone: 'judge', label: 'Disputed' },
-                            { key: 'missing', n: d.coverage.missing, tone: 'muted', label: 'Empty' },
-                          ].filter((r) => r.n > 0)}
-                        />
-                      </td>
-                      <td className="num mono">
-                        {d.proven_pct}%
-                        {d.conflicting > 0 && (
-                          <Pill tone="judge" title={`${d.conflicting} value(s) have sources that disagree`}>
-                            {d.conflicting}
-                          </Pill>
-                        )}
-                      </td>
-                      <td>
-                        {d.empty_fields > 0 ? (
-                          <Pill tone="warn" title="Declared by the schema but filled on no record.">
-                            {d.empty_fields}
-                          </Pill>
-                        ) : d.partial_fields > 0 ? (
-                          <Pill tone="info" title="Filled on some records and empty on others — a top-up closes these.">
-                            {d.partial_fields} partial
-                          </Pill>
-                        ) : (
-                          <span className="muted">none</span>
-                        )}
-                      </td>
-                    </>
-                  )}
+      {/*
+        Source data is not repeated here.
+
+        This page used to carry a "which sites paid" host ranking, and the
+        dedicated Sources page carries the same ranking properly — filterable,
+        with pages, text stored, runs touched and last used per host. Having it
+        in both places meant two lists of the same hosts measured two different
+        ways (proven values here, stored characters there), which is worse than
+        either one: two numbers for the same thing invites a reader to assume
+        the smaller one is a defect.
+
+        So the dashboard says where the evidence came from in one line and
+        points at the page that can be interrogated. Its own subject stays
+        single: how much of what is in front of me can be defended.
+      */}
+      {data.top_hosts?.length ? (
+        <section className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1.5 border-t border-rule pt-4">
+          <p className="text-[12.5px] text-ink-2">
+            <span className="text-ink">{data.top_hosts.length}</span> sites have supplied proven
+            values, led by{' '}
+            <span className="font-mono text-ink">{data.top_hosts[0]?.host}</span> with{' '}
+            <span className="font-mono text-ink">{num(data.top_hosts[0]?.verified || 0)}</span>.
+          </p>
+          <Link to="/sources" className="link text-[12px]">
+            Browse every stored source
+          </Link>
+        </section>
+      ) : null}
+
+      <section>
+        <header className="mb-2 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <h2 className="eyebrow">Datasets</h2>
+            <p className="mt-0.5 text-[11.5px] text-muted">
+              {data.truncated
+                ? `First ${data.datasets_summarised} of ${data.datasets_available}`
+                : 'Sorted by what you chose'}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {[
+              { k: 'proven', l: 'Proven values' },
+              { k: 'coverage', l: 'Most filled' },
+              { k: 'records', l: 'Most records' },
+              { k: 'gaps', l: 'Most never filled' },
+            ].map((o) => (
+              <button
+                key={o.k}
+                type="button"
+                onClick={() => setSort(o.k)}
+                aria-pressed={sort === o.k}
+                className={`focusable rounded-xs border px-2 py-0.5 text-[11px] transition-colors duration-150 ease-swift ${
+                  sort === o.k
+                    ? 'border-ink bg-ink text-paper-2'
+                    : 'border-rule-2 text-muted hover:border-ink hover:text-ink'
+                }`}
+              >
+                {o.l}
+              </button>
+            ))}
+          </div>
+        </header>
+
+        {datasets.length ? (
+          <div className="surface overflow-x-auto">
+            <table className="w-full min-w-max border-collapse text-left">
+              <thead>
+                <tr className="border-b border-rule-2">
+                  <th className="eyebrow px-3.5 py-2.5 font-semibold" scope="col">Dataset</th>
+                  <th className="eyebrow px-3.5 py-2.5 text-right font-semibold" scope="col">Records</th>
+                  <th className="eyebrow px-3.5 py-2.5 font-semibold" scope="col">Provenance</th>
+                  <th className="eyebrow px-3.5 py-2.5 text-right font-semibold" scope="col">Proven</th>
+                  <th className="eyebrow px-3.5 py-2.5 font-semibold" scope="col">Never filled</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {!datasets.length && (
-          <Empty title="No datasets yet" hint="Compile a plan and run it; this page fills in from what gets stored." />
+              </thead>
+              <tbody className="divide-y divide-rule">
+                {datasets.map((d) => (
+                  <tr
+                    key={d.dataset_id}
+                    onClick={() =>
+                      inspect({ kind: 'event', event: d, title: d.name || d.dataset_id })
+                    }
+                    className="row cursor-pointer text-[12px] text-ink-2 hover:text-ink"
+                  >
+                    <td className="px-3.5 py-2.5">
+                      <span className="flex items-center gap-1.5">
+                        <Link
+                          to={`/library/${d.dataset_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="link"
+                        >
+                          {d.name || d.dataset_id.slice(0, 8)}
+                        </Link>
+                        {d.sampled ? (
+                          <Pill tone="info" title="Figures are computed from the first 2000 records.">
+                            sampled
+                          </Pill>
+                        ) : null}
+                        {d.partial ? (
+                          <Pill tone="warn" title="The run stopped before it finished.">
+                            partial catch
+                          </Pill>
+                        ) : null}
+                      </span>
+                      {d.created_at ? (
+                        <span className="mt-0.5 block text-[10.5px] text-muted">
+                          {when(d.created_at)}
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3.5 py-2.5 text-right font-mono tnum">
+                      {num(d.records || 0)}
+                    </td>
+                    {d.coverage == null ? (
+                      <td colSpan={3} className="px-3.5 py-2.5">
+                        <Pill tone="warn" title={d.reason || ''}>
+                          unreadable
+                        </Pill>
+                      </td>
+                    ) : (
+                      <>
+                        <td className="px-3.5 py-2.5" style={{ minWidth: 140 }}>
+                          <StackedBar
+                            height={6}
+                            total={d.records || 1}
+                            rows={[
+                              { key: 'verified', n: d.coverage.verified, tone: 'ok', label: 'Proven' },
+                              { key: 'unverified', n: d.coverage.unverified, tone: 'info', label: 'Unresolved' },
+                              { key: 'conflicting', n: d.coverage.conflicting, tone: 'judge', label: 'Disputed' },
+                              { key: 'missing', n: d.coverage.missing, tone: 'muted', label: 'Empty' },
+                            ].filter((r) => r.n > 0)}
+                          />
+                        </td>
+                        <td className="px-3.5 py-2.5 text-right font-mono tnum">
+                          {d.proven_pct}%
+                        </td>
+                        <td className="px-3.5 py-2.5">
+                          {d.empty_fields > 0 ? (
+                            <Pill tone="warn" title="Declared by the schema but filled on no record.">
+                              {num(d.empty_fields)}
+                            </Pill>
+                          ) : d.partial_fields > 0 ? (
+                            <Pill
+                              tone="info"
+                              title="Filled on some records and empty on others — a top-up closes these."
+                            >
+                              {num(d.partial_fields)} partial
+                            </Pill>
+                          ) : (
+                            <span className="text-muted">none</span>
+                          )}
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <VoiceEmpty
+            state="noDatasets"
+            action={
+              <Link to="/" className="btn-primary btn-xs">
+                Start an investigation
+              </Link>
+            }
+          />
         )}
-      </Section>
+      </section>
     </div>
   );
 }
@@ -271,36 +332,49 @@ export default function Dashboard() {
  * The pipeline as one shape: each stage's width is what survived it.
  *
  * The gap between "values" and "proven" is the honest answer to "is this
- * trustworthy", and on a real dataset it is large — most values carry a quote
- * that nothing has judged. Drawing the stages proportionally makes that visible
- * before a single number is read, which is the whole reason this is a ribbon
- * rather than four stat cards.
+ * trustworthy", and on a real dataset it is large. Drawing the stages
+ * proportionally makes that visible before a single number is read, which is why
+ * this is a ribbon and not four stat cards.
  */
 function ProvenanceRibbon({ stages }) {
   const max = Math.max(...stages.map((s) => s.value), 1);
   return (
-    <ol className="flex items-stretch gap-1.5">
+    <ol className="flex items-stretch gap-2" aria-label="What survived each stage">
       {stages.map((s, i) => {
-        const w = Math.max(0.12, s.value / max);
+        const w = Math.max(0.1, s.value / max);
         return (
           <li key={s.key} className="min-w-0 flex-1">
             <div
-              className="relative h-11 overflow-hidden rounded-sm bg-warm"
+              className="relative h-10 overflow-hidden rounded-sm bg-warm/60"
               title={`${s.label}: ${num(s.value)}`}
             >
               <div
-                className="absolute inset-y-0 left-0 transition-all duration-500 ease-swift"
+                className="absolute inset-y-0 left-0 rounded-l-sm transition-all duration-500 ease-swift"
                 style={{
                   width: `${w * 100}%`,
-                  background: 'var(--accent)',
-                  opacity: 0.9 - i * 0.14,
+                  background: 'rgb(var(--accent))',
+                  opacity: 0.92 - i * 0.15,
                 }}
               />
-              <span className="absolute inset-y-0 right-2 flex items-center text-[11px] font-medium text-ink-2">
+              {/* The figure sits at the end of its own bar, so the number and
+                  the length it describes read as one object. When the bar
+                  fills the cell there is no room outside it, so the label goes
+                  inside against the copper — and flips to paper fill, because
+                  copper-on-copper at this size is unreadable. Clamping the
+                  offset is what stops `8,318` being sliced in half by the edge
+                  of a nearly-full cell. */}
+              <span
+                className="absolute top-1/2 -translate-y-1/2 whitespace-nowrap text-[11.5px] font-medium tabular-nums"
+                style={
+                  w > 0.8
+                    ? { right: 8, color: 'rgb(var(--paper))' }
+                    : { left: `calc(${w * 100}% + 8px)`, color: 'rgb(var(--ink-2))' }
+                }
+              >
                 {num(s.value)}
               </span>
             </div>
-            <p className="mt-1 truncate text-[11px] text-ink" title={s.label}>
+            <p className="mt-1 truncate text-[11px] font-medium text-ink" title={s.label}>
               {s.label}
             </p>
             <p className="truncate text-[10px] text-muted" title={s.sub}>
@@ -310,61 +384,5 @@ function ProvenanceRibbon({ stages }) {
         );
       })}
     </ol>
-  );
-}
-
-/**
- * Host yield as a treemap rather than a table.
- *
- * The interesting fact about a crawl is not which sites were visited, it is how
- * unevenly they paid — one site produced 226 proven values from two pages while
- * every other host produced none. A ranked list makes that a number to compare;
- * tiles sized by share make it the shape of the whole thing at a glance.
- */
-function HostYield({ hosts }) {
-  const top = hosts.slice(0, 10);
-  const rest = hosts.slice(10);
-  const items = top.map((h, i) => ({
-    key: h.host,
-    label: h.host,
-    value: Math.max(1, h.verified || 0),
-    n: h.verified || 0,
-    // Ranked by area, but shaded by whether anything was proven at all, so a
-    // site that was fetched and gave nothing is visibly a failure rather than
-    // just a small tile.
-    tone: h.verified ? (i < 3 ? undefined : 'info') : 'muted',
-  }));
-  if (rest.length) {
-    const restVerified = rest.reduce((a, h) => a + (h.verified || 0), 0);
-    if (restVerified > 0) {
-      items.push({
-        key: '__rest',
-        label: `${rest.length} more`,
-        value: restVerified,
-        n: restVerified,
-        tone: 'info',
-      });
-    }
-  }
-  return (
-    <div className="grid gap-4 sm:grid-cols-[1.5fr_1fr]">
-      <Treemap items={items} height={168} />
-      <ul className="space-y-1 self-center">
-        {hosts.slice(0, 8).map((h) => (
-          <li
-            key={h.host}
-            className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-baseline gap-2 text-[11.5px]"
-          >
-            <span className="truncate font-mono text-ink-2" title={h.host}>
-              {h.host}
-            </span>
-            <span className="tnum text-muted">{num(h.verified)}</span>
-            <span className="tnum w-16 text-right text-muted" title="Proven values this host supplied">
-              {num(h.verified)} proven
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }

@@ -9,6 +9,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
 const Runs = lazy(() => import('./pages/Runs.jsx'));
 const RunPage = lazy(() => import('./pages/RunPage.jsx'));
 const Library = lazy(() => import('./pages/Library.jsx'));
+const Sources = lazy(() => import('./pages/Sources.jsx'));
 const DatasetPage = lazy(() => import('./pages/DatasetPage.jsx'));
 const Intel = lazy(() => import('./pages/Intel.jsx'));
 
@@ -91,8 +92,9 @@ export default function App() {
                 <Route path="dashboard" element={<Dashboard />} />
                 <Route path="runs" element={<Runs />} />
                 <Route path="runs/:id" element={<RunPage />} />
-                <Route path="library" element={<Library />} />
-                <Route path="library/:id" element={<DatasetPage />} />
+              <Route path="library" element={<Library />} />
+              <Route path="library/:id" element={<DatasetPage />} />
+              <Route path="sources" element={<Sources />} />
                 <Route path="intel" element={<Intel />} />
                 <Route path="*" element={<NotFound />} />
               </Route>

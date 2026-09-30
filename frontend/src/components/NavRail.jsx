@@ -1,12 +1,13 @@
 import { NavLink, useNavigate } from 'react-router-dom';
+import { Kbd } from './ui.jsx';
 
 /* Hand-rolled 17px line icons — no icon dependency, consistent 1.5 stroke.
    Shared attributes live here and are spread onto a real <svg>, never a
    <span>: spreading viewBox/stroke onto a span makes the browser try to parse
    <path>/<circle> as unknown HTML elements. */
 const S = {
-  width: 17,
-  height: 17,
+  width: 16,
+  height: 16,
   viewBox: '0 0 20 20',
   fill: 'none',
   stroke: 'currentColor',
@@ -39,6 +40,12 @@ const ICONS = {
       <path d="M2.5 7.6h15M7.6 7.6v8.9M12.4 7.6v8.9" />
     </>
   ),
+  sources: (
+    <>
+      <circle cx="10" cy="10" r="6.2" />
+      <path d="M3.9 10h12.2M10 3.8c1.7 1.8 2.6 3.9 2.6 6.2s-.9 4.4-2.6 6.2c-1.7-1.8-2.6-3.9-2.6-6.2S8.3 5.6 10 3.8Z" />
+    </>
+  ),
   intel: (
     <>
       <circle cx="10" cy="10" r="2.4" />
@@ -49,13 +56,6 @@ const ICONS = {
       <path d="M5.3 6.6 8 8.6M14.7 6.6 12 8.6M5.3 13.4 8 11.4M14.7 13.4 12 11.4" />
     </>
   ),
-  dashboard: (
-    <>
-      <path d="M3 12.5l4-4.2 3 2.8 3.2-4.1 3.8 4" />
-      <path d="M2.8 16.8h14.4" />
-      <rect x="2.8" y="3.2" width="14.4" height="13.6" rx="1.6" />
-    </>
-  ),
   settings: (
     <>
       <circle cx="10" cy="10" r="2.6" />
@@ -64,83 +64,122 @@ const ICONS = {
   ),
 };
 
+/**
+ * Primary destinations.
+ *
+ * The labels are the point. This was a 60px rail of icons whose names only
+ * appeared on hover, which is fine for four well-known glyphs and poor for
+ * "Sources" — a globe-ish icon next to a library grid tells you nothing about
+ * which one holds the stored pages. A wider, labelled rail costs ~140px of
+ * width and buys a navigation someone can read at a glance.
+ *
+ * Intel is not in the main rail. It reports cross-model agreement on free
+ * providers, which is an operator diagnostic rather than part of hunting,
+ * proving or reading data, and it was sitting between "Datasets" and the
+ * evidence pages where it competed with them. The page and its route are
+ * untouched, so it is still reachable at /intel.
+ *
+ * Routes are unchanged; the width is the only other difference.
+ */
 const ITEMS = [
-  { to: '/', label: 'Collect', icon: 'collect', end: true },
-  { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
-  { to: '/runs', label: 'Runs', icon: 'runs' },
-  { to: '/library', label: 'Library', icon: 'library' },
-  { to: '/intel', label: 'Intel', icon: 'intel' },
+  { to: '/', label: 'Investigate', icon: 'collect', end: true, hint: 'Start a hunt' },
+  { to: '/dashboard', label: 'Provenance', icon: 'runs', hint: 'Provenance across every dataset' },
+  { to: '/runs', label: 'Runs', icon: 'runs', hint: 'Live and past hunts' },
+  { to: '/library', label: 'Datasets', icon: 'library', hint: 'Collected results' },
+  { to: '/sources', label: 'Sources', icon: 'sources', hint: 'Every page in storage' },
 ];
 
-function RailButton({ to, label, icon, end, onNavigate }) {
+function RailLink({ to, label, icon, end, hint, onNavigate }) {
   return (
     <NavLink
       to={to}
       end={end}
       onClick={onNavigate}
-      aria-label={label}
-      className="group relative flex h-11 w-11 items-center justify-center rounded-md transition-all duration-200 ease-swift focusable"
+      title={hint}
+      className="focusable group relative flex items-center gap-2.5 rounded-sm px-2 py-[7px] text-[13px] transition-colors duration-150 ease-swift"
     >
       {({ isActive }) => (
         <>
           <span
             aria-hidden="true"
-            className={`absolute -left-[7px] top-1/2 h-5 w-[2.5px] -translate-y-1/2 rounded-r-full bg-accent transition-all duration-250 ease-swift ${
+            className={`absolute -left-2 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-r-full bg-accent transition-all duration-200 ease-swift ${
               isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'
             }`}
           />
           <svg
             {...S}
-            className={`transition-all duration-200 ease-swift ${
-              isActive ? 'text-accent' : 'text-muted group-hover:scale-105 group-hover:text-ink'
+            className={`shrink-0 transition-colors duration-150 ease-swift ${
+              isActive ? 'text-accent' : 'text-muted group-hover:text-ink'
             }`}
           >
             {ICONS[icon]}
           </svg>
-          <span className="pointer-events-none absolute left-[52px] z-50 hidden whitespace-nowrap rounded-sm border border-rule bg-paper-3 px-2 py-1 text-[11.5px] text-ink shadow-lift group-hover:block group-focus-visible:block animate-scale-in">
-            {label}
-          </span>
+          <span className={isActive ? 'font-medium text-ink' : 'text-ink-2'}>{label}</span>
         </>
       )}
     </NavLink>
   );
 }
 
-export default function NavRail({ onNavigate, onOpenSettings }) {
+export default function NavRail({ onNavigate, onOpenSettings, onOpenPalette }) {
   const nav = useNavigate();
   return (
     <nav
       aria-label="Primary"
-      className="chrome-blur z-30 flex h-full w-[var(--rail-w)] shrink-0 flex-col items-center gap-1 py-3"
+      className="chrome-blur z-30 flex h-full w-[var(--rail-w)] shrink-0 flex-col px-3 py-3"
     >
       <button
         type="button"
         onClick={() => nav('/')}
         aria-label="Datagoblin home"
-        className="focusable mb-2 grid h-9 w-9 place-items-center rounded-md font-display text-[19px] leading-none text-accent transition-transform duration-200 ease-spring hover:scale-105 active:scale-95"
+        className="focusable mb-4 flex items-center gap-2 rounded-sm px-1 py-1 text-left"
       >
-        ᚠ
+        <span
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-accent font-display text-[15px] leading-none text-accent-ink"
+          aria-hidden="true"
+        >
+          ᚠ
+        </span>
+        <span className="font-display text-[15px] leading-none text-ink">DataGoblin</span>
       </button>
 
-      <div className="flex flex-1 flex-col items-center gap-1.5">
+      <div className="flex flex-1 flex-col gap-0.5">
         {ITEMS.map((it) => (
-          <RailButton key={it.to} {...it} onNavigate={onNavigate} />
+          <RailLink key={it.to} {...it} onNavigate={onNavigate} />
         ))}
       </div>
 
-      <button
-        type="button"
-        onClick={onOpenSettings}
-        aria-label="Settings"
-        className="focusable group relative grid h-11 w-11 place-items-center rounded-md text-muted transition-colors duration-200 hover:text-ink"
-      >
-        <svg {...S}>
-          {ICONS.settings}
-        </svg>
-        <span className="pointer-events-none absolute left-[52px] z-50 hidden whitespace-nowrap rounded-sm border border-rule bg-paper-3 px-2 py-1 text-[11.5px] text-ink shadow-lift group-hover:block animate-scale-in">
-          Settings
-        </span>
-      </button>
+      {/* Workspace. The backend identity is a fact about the machine, not a
+          navigation target, so it sits below the destinations. */}
+      <div className="mt-2 space-y-0.5 border-t border-rule pt-2">
+        <button
+          type="button"
+          onClick={onOpenPalette}
+          className="focusable group flex w-full items-center gap-2.5 rounded-sm px-2 py-[7px] text-[13px] text-ink-2 transition-colors duration-150 hover:bg-warm/60"
+        >
+          <svg {...S} className="shrink-0 text-muted group-hover:text-ink">
+            <circle cx="9" cy="9" r="5.2" />
+            <path d="m13 13 4 4" />
+          </svg>
+          <span className="flex-1 text-left">Search</span>
+          <Kbd>⌘K</Kbd>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="focusable group flex w-full items-center gap-2.5 rounded-sm px-2 py-[7px] text-[13px] text-ink-2 transition-colors duration-150 hover:bg-warm/60"
+        >
+          <svg {...S} className="shrink-0 text-muted group-hover:text-ink">
+            {ICONS.settings}
+          </svg>
+          <span>Settings</span>
+        </button>
+        {/* The backend identity is deliberately not repeated here. CommandBar
+            already carries the live health chip for it, and a second indicator
+            in a different corner of the same screen can only ever disagree with
+            the first one. */}
+      </div>
     </nav>
   );
 }

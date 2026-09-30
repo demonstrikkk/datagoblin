@@ -5,7 +5,7 @@ import { useLocalStore, useMediaQuery } from '../hooks/useUi.js';
 
 const SHORTCUTS = [
   ['⌘K', 'Command palette'],
-  ['1 – 4', 'Collect · Runs · Library · Intel'],
+  ['1 – 5', 'Investigate · Provenance · Runs · Datasets · Sources'],
   ['⌘B', 'Toggle mobile navigation'],
   ['Esc', 'Close inspector, dialog or palette'],
   ['↑ ↓ ↵', 'Move through and open palette results'],
