@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, downloadBlob } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
+import FieldsView from '../components/FieldsView.jsx';
 import {
   CopyButton,
   Dot,
@@ -1792,14 +1793,19 @@ export default function DatasetPage() {
         value={tab}
         onChange={setTab}
         options={[
+          { value: 'fields', label: 'Fields' },
           { value: 'records', label: 'Records' },
-          { value: 'coverage', label: 'Coverage' },
+          { value: 'coverage', label: 'Gaps' },
           { value: 'conflicts', label: 'Conflicts' },
-          { value: 'ask', label: 'Ask' },
           { value: 'sources', label: 'Sources' },
+          { value: 'ask', label: 'Ask' },
           { value: 'export', label: 'Export' },
         ]}
       />
+
+      {tab === 'fields' ? (
+        <FieldsView datasetId={id} />
+      ) : null}
 
       {tab === 'records' ? (
         <RecordsTable

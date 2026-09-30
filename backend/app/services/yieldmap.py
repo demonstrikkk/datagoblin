@@ -100,11 +100,18 @@ def _record_hosts(rec: dict) -> dict[str, dict[str, int]]:
 
 
 def build(store, dataset_id: str, records: list[dict] | None = None,
-          run_id: str = "") -> dict:
+          run_id: str = "", light: bool = False) -> dict:
     """Host -> what it produced. Read-only, derived entirely from stored evidence.
 
     `records` may be passed in by a caller that already has them (the backfill
     path does), which is what keeps this free rather than a second full read.
+
+    `light=True` skips the two extra queries — sources and pages — and reports
+    only what the records themselves prove: which host owns how many proven
+    values. The dashboard's own aggregate used to call this once per dataset and
+    those two queries were the bulk of its cost, over a remote database, for a
+    figure the summary did not use. A host with no `pages` key is *unknown* cost,
+    not zero cost, and is reported that way rather than as a rate of zero.
     """
     hosts: dict[str, dict] = {}
 
@@ -137,27 +144,28 @@ def build(store, dataset_id: str, records: list[dict] | None = None,
             else:
                 row["_anon"] += 1
 
-    # Sources: what was actually fetched, and how it ended.
-    try:
-        src_block = store.get_sources(dataset_id) or {}
-    except Exception:  # noqa: BLE001
-        src_block = {}
-    for src in src_block.get("sources") or []:
-        host = host_of(src.get("url"))
-        if not host:
-            continue
-        row = slot(host)
-        row["sources"] += 1
-        if str(src.get("status") or "") in ("ok", "reused"):
-            row["source_ok"] += 1
+    if not light:
+        # Sources: what was actually fetched, and how it ended.
+        try:
+            src_block = store.get_sources(dataset_id) or {}
+        except Exception:  # noqa: BLE001
+            src_block = {}
+        for src in src_block.get("sources") or []:
+            host = host_of(src.get("url"))
+            if not host:
+                continue
+            row = slot(host)
+            row["sources"] += 1
+            if str(src.get("status") or "") in ("ok", "reused"):
+                row["source_ok"] += 1
 
     # Pages: what it cost to find out.
-    if not run_id:
+    if not light and not run_id:
         lister = getattr(store, "get_dataset_row", None)
         if callable(lister):
             row_data = lister(dataset_id) or {}
             run_id = str(row_data.get("run_id") or "")
-    if run_id:
+    if not light and run_id:
         try:
             for page in store.get_pages(run_id, 500) or []:
                 host = host_of(page.get("url"))
@@ -179,6 +187,8 @@ def build(store, dataset_id: str, records: list[dict] | None = None,
         # earned nothing, which is a zero rather than an infinity.
         row["yield"] = (
             round(row["verified"] / row["pages"], 3) if row["pages"] else 0.0)
+        if light:
+            row["cost_unknown"] = True
 
     ordered = sorted(
         hosts.items(),
@@ -188,6 +198,7 @@ def build(store, dataset_id: str, records: list[dict] | None = None,
         "run_id": run_id,
         "records_read": len(records),
         "sampled": sampled,
+        "light": bool(light),
         "hosts": dict(ordered),
         "ranking": [h for h, _ in ordered],
     }

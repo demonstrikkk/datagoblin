@@ -268,21 +268,28 @@ export default function useRunStream(runId, { enabled = true } = {}) {
 
       // named listeners for every declared event type, so a server that sets
       // `event:` is handled identically to a bare message
-      const named = [
-        'run.partial',
-        'stage.started',
-        'stage.progress',
-        'source.discovered',
-        'source.fetched',
-        'record.extracted',
-        'record.verified',
-        'record.needs_review',
-        'record.rejected',
-        'duplicate.merged',
-        'run.completed',
-        'run.failed',
-        'run.cancelled',
-      ];
+        const named = [
+          'run.partial',
+          'stage.started',
+          'stage.progress',
+          'source.discovered',
+          'source.fetched',
+          // Missing here, so the frame never reached this hook at all. The
+          // server names every frame `event: <type>`, and EventSource only routes
+          // *untyped* frames to onmessage, so an unlisted name is dropped before
+          // `apply` runs — the `case 'source.reused'` below was unreachable. A
+          // reused source was invisible in the run view while being counted in
+          // the sources panel.
+          'source.reused',
+          'record.extracted',
+          'record.verified',
+          'record.needs_review',
+          'record.rejected',
+          'duplicate.merged',
+          'run.completed',
+          'run.failed',
+          'run.cancelled',
+        ];
       named.forEach((n) => es.addEventListener(n, (ev) => apply(ev.data)));
 
       es.onerror = () => {

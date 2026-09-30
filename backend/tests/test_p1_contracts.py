@@ -220,5 +220,20 @@ def test_runview_counters_real(client):
             break
         assert time.monotonic() < end
         time.sleep(0.2)
-    assert set(st["counters"]) == {"attempted", "successful", "failed",
-                                   "records", "verified", "needs_review"}
+    # The full set, not the six that used to be declared. `main._emit` builds
+    # `fields_verified`, `fields_judgment_unavailable`, `records_fully_verified`
+    # and their siblings on every terminal event, and pydantic dropped all of
+    # them — so this endpoint reported `verified: 0, needs_review: 0` for every
+    # run in the database. `tests/test_run_reporting.py` checks the same
+    # relationship from the other direction, reading the emitter's source.
+    assert set(st["counters"]) == {
+        "attempted", "successful", "failed", "records", "verified",
+        "needs_review", "fields_verified", "fields_unverified",
+        "fields_judgment_unavailable", "fields_rate_limited",
+        "records_fully_verified", "records_needing_review",
+    }
+    # A budget-stopped run must be distinguishable from a clean one. Both keys
+    # were computed on every terminal event and unreachable, because RunView had
+    # no fields for them.
+    assert "partial" in st and "no_yield_reason" in st
+    assert st["partial"] is False

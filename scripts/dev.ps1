@@ -191,11 +191,16 @@ if ($api) {
     -RedirectStandardOutput "$LogDir\api.out.log" `
     -RedirectStandardError "$LogDir\api.err.log"
   if (Wait-Http "http://127.0.0.1:$ApiPort/api/health" 45) {
-    $persist = (Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/health" -TimeoutSec 20).data.persistence
-    Write-Host "  api      : up on $ApiPort ($persist.adapter)"
-    if ($persist.adapter -ne "postgres") {
-      Write-Host "             WARNING: persistence is '$($persist.detail)'" -ForegroundColor Yellow
-    }
+  # `.data.persistence` is the object; PowerShell stringifies the whole thing if
+  # the property name is wrong, which printed the raw hashtable instead of the
+  # adapter — and this line exists to answer "is the database actually wired up".
+  $persist = (Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/health" -TimeoutSec 20).data.persistence
+  $adapter = if ($persist -and $persist.PSObject.Properties.Name -contains "adapter") { $persist.adapter } else { "" }
+  Write-Host "  api      : up on $ApiPort${adapter}"
+  if ($adapter -ne "postgres") {
+    $detail = if ($persist -and $persist.PSObject.Properties.Name -contains "detail") { $persist.detail } else { "adapter not reported" }
+    Write-Host "             WARNING: persistence is '$detail'" -ForegroundColor Yellow
+  }
   } else {
     Write-Host "  api      : FAILED - see $LogDir\api.err.log" -ForegroundColor Red
     Get-Content "$LogDir\api.err.log" -Tail 6 -ErrorAction SilentlyContinue | ForEach-Object { "             $_" }

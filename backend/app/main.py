@@ -30,6 +30,7 @@ from app.repositories.factory import build_repo
 from app.schemas.run import DatasetView, Envelope, RunView
 from app.services import backfill as backfill_svc
 from app.services import dashboard as dashboard_svc
+from app.services import profile as profile_svc
 from app.services import refresh as refresh_svc
 from app.services import yieldmap as yieldmap_svc
 from app.services import crawler as crawler_svc
@@ -39,6 +40,13 @@ from app.services import impersonation as impersonation_svc
 from app.services import jobs as jobs_svc
 from app.services import metering as metering_svc
 from app.services import planner as planner_svc
+# Module level, not function-local. `_reuse` calls `politeness_svc.fingerprint`
+# and this was only imported inside `intel_ask` at line ~1261, so the name was
+# unbound in every other function: `_reuse` raised NameError, `fetch_all` caught
+# it and fell through to a real fetch, and stored-page reuse never once engaged.
+# Every run silently re-downloaded every URL it already had. The reuse tests pass
+# because they inject their own closure, so only the HTTP path exposed it.
+from app.services import politeness as politeness_svc
 from app.services import proposals as proposals_svc
 from app.services import runner as runner_svc
 from app.services import selector_learn as selector_learn_svc
@@ -294,6 +302,14 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
                         "fields_judgment_unavailable": data.get(
                             "fields_judgment_unavailable", 0),
                         "fields_rate_limited": data.get("fields_rate_limited", 0)}
+            # Every terminal event changes what the dashboard reports, so the cached
+        # aggregate is dropped here rather than left to expire. Recomputing it is
+        # 26s of reads against a remote database, and a stale summary on the page
+        # someone lands on straight after a run is worse than a slow one.
+        if ev["type"] in ("run.completed", "run.partial", "run.failed",
+                          "run.cancelled"):
+            dashboard_svc.invalidate()
+        if data:
             if ev["type"] == "run.completed":
                 st.update(status="COMPLETED", dataset_id=data.get("dataset_id"),
                           partial=False,
@@ -435,12 +451,19 @@ async def run_status(run_id: str, cid: str = Depends(correlation_id)) -> dict:
         if stored is None:
             raise not_found("run", run_id)
         return {"data": stored, "error": None, "meta": {"correlation_id": cid}}
-    view = RunView(run_id=run_id, status=_run_view(run_id)["status"],
-                   current_stage=_run_view(run_id)["current_stage"],
-                   progress=_run_view(run_id)["progress"],
-                   counters=_run_view(run_id).get("counters", {}),
-                   dataset_id=_run_view(run_id)["dataset_id"],
-                   error=_run_view(run_id)["error"])
+
+    # `partial` and `no_yield_reason` are computed on every terminal event and
+    # were unreachable, because RunView had no such fields. A run that stored
+    # only what it verified read as a run that verified everything.
+    live = _run_view(run_id)
+    view = RunView(run_id=run_id, status=live["status"],
+                   current_stage=live["current_stage"],
+                   progress=live["progress"],
+                   counters=live.get("counters", {}),
+                   dataset_id=live["dataset_id"],
+                   error=live["error"],
+                   partial=bool(live.get("partial", False)),
+                   no_yield_reason=str(live.get("no_yield_reason", "") or ""))
     return {"data": view.model_dump(), "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -635,6 +658,32 @@ async def backfill_run(did: str, body: dict, cid: str = Depends(correlation_id))
                                      include_partial=include_partial)
     except backfill_svc.BackfillRefused as exc:
         raise validation(str(exc))
+    if apply_flag and out.get("written"):
+        dashboard_svc.invalidate()
+    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/profile", dependencies=[Depends(require_api_key)])
+async def dataset_profile(did: str,
+                          limit: int = Query(default=profile_svc.MAX_RECORDS,
+                                             ge=10, le=5000),
+                          cid: str = Depends(correlation_id)) -> dict:
+    """What each field looks like, and where the records are.
+
+    Computed server-side and from the same coverage function the Coverage view
+    uses, because a shape computed in the browser from whatever the records
+    table happened to page in is a different set of numbers for the same fields
+    in the same screen.
+
+    Charts are omitted where the data cannot support one: a field with a single
+    distinct value gets no distribution, a field with no values is described
+    rather than drawn as a zero-height bar, and a date column becomes a timeline
+    instead of one bar per date.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    out = await asyncio.to_thread(profile_svc.profile, r, did, None, limit)
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -749,6 +798,8 @@ async def refresh_run(did: str, body: dict, cid: str = Depends(correlation_id)) 
                                     apply=bool(body.get("apply")), fetch=_fetch)
     except refresh_svc.RefreshRefused as exc:
         raise validation(str(exc))
+    if bool(body.get("apply")) and out.get("written"):
+        dashboard_svc.invalidate()
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -1221,7 +1272,12 @@ async def intel_ask(body: dict, cid: str = Depends(correlation_id)) -> dict:
         if page.get("skipped"):
             raise validation(f"Source refused: {page.get('skipped')}")
         from app.services import reducer as reducer_svc
-        from app.services import politeness as politeness_svc
+        # `politeness_svc` is deliberately NOT imported here. It is bound at
+        # module level for `_reuse`, and an import inside this function would make
+        # the name local to the whole function — so the `politeness_svc` use below
+        # would raise UnboundLocalError. The original bug and this one are the
+        # same bug: an import bound in the wrong scope, and
+        # `tests/test_import_hygiene.py` now checks for both.
         # Same precedence as crawler._one: the rendered rungs (crawl4ai, jina)
         # return `markdown`, only the static rung returns `html`. Reading html
         # alone reported "no readable text" for pages that fetched perfectly.

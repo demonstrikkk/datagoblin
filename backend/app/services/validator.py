@@ -159,6 +159,20 @@ async def verify_field(value: object, quote: str, source_text: str,
     # A's counter on startup, so one run's cap counted against another's and
     # the docstring's claim of "per-run" was simply untrue. The module-level
     # default remains only for callers that never had a budget to give.
+    # The deterministic verdict is resolved *before* the budget is charged.
+    #
+    # It used to be charged first: `budget.spend()` ran, then
+    # `evidence_verification` returned SUPPORTED from a substring test without
+    # calling anything. So the per-run cap of 400 was spent on arithmetic, and a
+    # real judgement could be refused as `judgment_unavailable` while the run
+    # reported its budget consumed. A cap exists to bound the expensive thing.
+    quick = jev.deterministic_verdict(str(value), quote, source_text)
+    if quick is not None:
+        # Same two outcomes the judge path would have produced, for free.
+        if quick["judgment"] == "SUPPORTED":
+            return value, "verified"
+        return None, "unverified"
+
     budget = budget if budget is not None else JUDGE_BUDGET
     if budget.exhausted:
         # The cap is spent. Keep the value - the quote genuinely is on the page

@@ -188,7 +188,7 @@ def main() -> int:
         # puts the section back to a known state.
         page.locator("button", has_text=re.compile("^Records$")).first.click()
         page.wait_for_timeout(800)
-        page.locator("button", has_text=re.compile("^Coverage$")).first.click()
+        page.locator("button", has_text=re.compile("^Gaps$")).first.click()
         try:
             page.wait_for_function(
                 "() => /Per-field coverage/.test(document.body.innerText)", timeout=120_000)
@@ -204,7 +204,7 @@ def main() -> int:
                 fails.append("the backfill panel did not say it crawls nothing")
         except Exception:
             fails.append(
-                "the Coverage tab never rendered. It said: "
+                "the Gaps tab never rendered. It said: "
                 + repr(page.inner_text("body")[-220:]))
 
         if errors:

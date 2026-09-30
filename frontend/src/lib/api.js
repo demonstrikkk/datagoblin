@@ -219,6 +219,11 @@ export const api = {
   // `yield` is a read of the quotes every verified cell already carries, so it
   // is cheap and never a source of its own claims. Refresh re-fetches over the
   // network, so it gets the same long timeout as a backfill.
+  // The per-field shape and the place distribution. Read from the server so
+  // the numbers are the same ones the Coverage view shows, rather than a
+  // second opinion computed from whatever the records table paged in.
+  profile: (id, params, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/profile${qs(params)}`, o),
   yieldMap: (id, o) => request(`/datasets/${encodeURIComponent(id)}/yield`, o),
   refreshProposal: (id, params, o) =>
     request(`/datasets/${encodeURIComponent(id)}/refresh${qs(params)}`, o),

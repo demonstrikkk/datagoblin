@@ -448,4 +448,253 @@ export function Ticker({ children, ms = 1000 }) {
   return <>{children}</>;
 }
 
+/* ------------------------------------------------------------------ figures */
+
+/**
+ * A histogram, for a field that is actually numeric.
+ *
+ * Drawn as thin columns on a baseline with the median marked, rather than as a
+ * filled area or a bar list. Two reasons it is shaped this way: a distribution
+ * is about where the mass sits, and a solid block of colour hides the gap; and
+ * the median is the one number a reader actually wants, so it is drawn rather
+ * than written under the title.
+ *
+ * Returns null when there is nothing to draw. One bucket is a sentence with
+ * axes, and a caller that passes one is describing a constant, not a shape.
+ */
+export function Histogram({ buckets, median: med, format = (n) => String(n), height = 64 }) {
+  const list = (buckets || []).filter((b) => b && Number.isFinite(b.n));
+  if (list.length < 2) return null;
+  const max = Math.max(...list.map((b) => b.n)) || 1;
+  const total = list.reduce((a, b) => a + b.n, 0) || 1;
+  // The median's bucket, found from the cumulative count. Asking the caller for
+  // a pixel position would mean two passes over the same data.
+  let seen = 0;
+  let medBucket = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    if (seen + list[i].n >= total / 2) {
+      medBucket = i;
+      break;
+    }
+    seen += list[i].n;
+  }
+  return (
+    <figure className="min-w-0">
+      <svg
+        viewBox={`0 0 ${list.length * 10} ${height}`}
+        preserveAspectRatio="none"
+        className="w-full"
+        style={{ height }}
+        role="img"
+        aria-label={`Distribution across ${list.length} buckets, peak ${max}, median ${format(med)}`}
+      >
+        {list.map((b, i) => {
+          const h = (b.n / max) * (height - 6);
+          return (
+            <rect
+              key={i}
+              x={i * 10 + 1}
+              y={height - h}
+              width={8}
+              height={Math.max(b.n > 0 ? 1.5 : 0, h)}
+              rx={1}
+              fill="var(--accent)"
+              opacity={0.35 + 0.65 * (b.n / max)}
+            >
+              <title>{`${format(b.from)} – ${format(b.to)}: ${b.n}`}</title>
+            </rect>
+          );
+        })}
+        <line
+          x1={medBucket * 10 + 5}
+          x2={medBucket * 10 + 5}
+          y1={0}
+          y2={height}
+          stroke="var(--ink)"
+          strokeWidth={1}
+          strokeDasharray="2 2"
+          opacity={0.5}
+        />
+      </svg>
+      <figcaption className="mt-1 flex justify-between text-[10px] tabular-nums text-muted">
+        <span>{format(list[0].from)}</span>
+        <span className="tnum">median {format(med)}</span>
+        <span>{format(list[list.length - 1].to)}</span>
+      </figcaption>
+    </figure>
+  );
+}
+
+/**
+ * Squarified treemap — an equal-area layout over shares.
+ *
+ * Used for the "where these records are" panel, and deliberately *not* a world
+ * map. A hand-drawn map would be a picture of a world this run never visited,
+ * and it would need geographic data the dataset does not have. Tiles sized by
+ * share answer the same question with the data that exists.
+ *
+ * Squarifying (Bruls, Huizing & van Wijk) keeps every tile as close to a square
+ * as it can, so no category is visually inflated by being placed in a long thin
+ * strip. That matters here: with a naive slice-and-dice the first category gets
+ * a full-width band and reads as dominant even when it is not.
+ */
+function squarify(items, x, y, w, h) {
+  const out = [];
+  const total = items.reduce((a, it) => a + it.value, 0) || 1;
+  let rest = items.slice();
+  let area = { x, y, w, h };
+
+  const worst = (row, side) => {
+    if (!row.length) return Infinity;
+    const s = row.reduce((a, it) => a + it.value, 0);
+    const rMax = Math.max(...row.map((it) => it.value));
+    const rMin = Math.min(...row.map((it) => it.value));
+    const s2 = s * s;
+    const w2 = side * side;
+    return Math.max((w2 * rMax) / s2, s2 / (w2 * rMin));
+  };
+
+  while (rest.length) {
+    const side = Math.min(area.w, area.h);
+    const row = [];
+    let i = 0;
+    while (i < rest.length) {
+      const next = [...row, rest[i]];
+      if (row.length && worst(next, side) > worst(row, side)) break;
+      row.push(rest[i]);
+      i += 1;
+    }
+    rest = rest.slice(row.length);
+    const s = row.reduce((a, it) => a + it.value, 0);
+    const rowArea = (s / total) * area.w * area.h;
+    const thickness = side ? rowArea / side : 0;
+    const horizontal = area.w >= area.h;
+    let offset = horizontal ? area.y : area.x;
+    for (const it of row) {
+      const len = s ? (it.value / s) * (horizontal ? area.w : area.h) : 0;
+      out.push(
+        horizontal
+          ? { ...it, x: area.x, y: offset, w: Math.max(0, len), h: Math.max(0, thickness) }
+          : { ...it, x: offset, y: area.y, w: Math.max(0, thickness), h: Math.max(0, len) }
+      );
+      offset += len;
+    }
+    if (horizontal) {
+      area = { x: area.x, y: area.y + thickness, w: area.w, h: area.h - thickness };
+    } else {
+      area = { x: area.x + thickness, y: area.y, w: area.w - thickness, h: area.h };
+    }
+    if (area.w <= 0.5 || area.h <= 0.5) break;
+  }
+  return out;
+}
+
+/**
+ * A treemap of shares. Labels are drawn only where they fit — a label inside a
+ * tile too small for it is noise, and the ranked list beside the tiles carries
+ * every value anyway.
+ */
+export function Treemap({ items, height = 132, onSelect, activeKey }) {
+  const list = (items || []).filter((it) => it && it.value > 0);
+  if (!list.length) return null;
+  const rects = squarify(list, 0, 0, 100, 100);
+  return (
+    <svg
+      viewBox="0 0 100 100"
+      className="w-full"
+      style={{ height }}
+      role="img"
+      aria-label={list.map((i) => `${i.label} ${i.n}`).join(', ')}
+      preserveAspectRatio="none"
+    >
+      {rects.map((r) => {
+        const fits = r.w > 14 && r.h > 9;
+        const dim = activeKey && activeKey !== r.key;
+        return (
+          <g
+            key={r.key}
+            onClick={onSelect ? () => onSelect(activeKey === r.key ? null : r.key) : undefined}
+            className={onSelect ? 'cursor-pointer' : undefined}
+            opacity={dim ? 0.3 : 1}
+          >
+            <rect
+              x={r.x + 0.4}
+              y={r.y + 0.4}
+              width={Math.max(0, r.w - 0.8)}
+              height={Math.max(0, r.h - 0.8)}
+              rx={1.5}
+              fill={r.tone ? `var(--${r.tone})` : 'var(--accent)'}
+              opacity={r.tone ? 0.9 : 0.82}
+            >
+              <title>{`${r.label} — ${r.n}`}</title>
+            </rect>
+            {fits && (
+              <text
+                x={r.x + r.w / 2}
+                y={r.y + r.h / 2 + 1.6}
+                textAnchor="middle"
+                fontSize={Math.min(4.4, Math.max(2.6, r.w / 8))}
+                fill="var(--paper)"
+                style={{ pointerEvents: 'none' }}
+              >
+                {r.label.length > 12 ? `${r.label.slice(0, 11)}…` : r.label}
+              </text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/**
+ * A timeline, for a field whose values are points in time.
+ *
+ * A year bar per year, with the empty years left visible rather than collapsed —
+ * a gap in a date column is a finding, and skipping those years would draw the
+ * same picture as no gap at all. Which is the difference between saying "records
+ * arrived in 2019 and 2022" and saying "records arrived over four years".
+ */
+export function Timeline({ byYear, min, max, height = 56 }) {
+  const rows = (byYear || []).filter((b) => b && Number.isFinite(b.n));
+  if (rows.length < 2) return null;
+  const maxN = Math.max(...rows.map((r) => r.n)) || 1;
+  const W = 100;
+  const step = W / rows.length;
+  return (
+    <figure className="min-w-0">
+      <svg
+        viewBox={`0 0 ${W} ${height}`}
+        preserveAspectRatio="none"
+        className="w-full"
+        style={{ height }}
+        role="img"
+        aria-label={`${rows.length} years from ${min} to ${max}, peak ${maxN}`}
+      >
+        {rows.map((r, i) => {
+          const h = r.n ? Math.max(1.5, (r.n / maxN) * (height - 2)) : 0;
+          return (
+            <rect
+              key={r.year}
+              x={i * step + 0.3}
+              y={height - h}
+              width={Math.max(0.5, step - 0.6)}
+              height={h}
+              fill={r.n ? 'var(--accent)' : 'var(--rule)'}
+              opacity={r.n ? 0.4 + 0.6 * (r.n / maxN) : 1}
+            >
+              <title>{`${r.year}: ${r.n}`}</title>
+            </rect>
+          );
+        })}
+      </svg>
+      <figcaption className="mt-1 flex justify-between text-[10px] tabular-nums text-muted">
+        <span>{min}</span>
+        <span className="tnum">{max - min + 1} year{max - min === 0 ? '' : 's'}</span>
+        <span>{max}</span>
+      </figcaption>
+    </figure>
+  );
+}
+
 export { truncate };

@@ -56,15 +56,15 @@ def main() -> int:
         # timing out before the UI ever appeared. Wait for the control instead.
         page.wait_for_function(
             "() => [...document.querySelectorAll('button')]"
-            ".some(b => b.textContent.trim() === 'Coverage')",
+            ".some(b => b.textContent.trim() === 'Gaps')",
             timeout=30_000,
         )
         page.wait_for_timeout(1500)
 
         # -- coverage tab -----------------------------------------------------
-        coverage_tab = page.locator("button", has_text=re.compile("^Coverage$")).first
+        coverage_tab = page.locator("button", has_text=re.compile("^Gaps$")).first
         if coverage_tab.count() == 0:
-            fails.append("no Coverage tab")
+            fails.append("no Gaps tab")
         else:
             coverage_tab.click()
             # Wait for the content, not for the loading text to disappear.

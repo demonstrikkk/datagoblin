@@ -125,6 +125,39 @@ async def source_relevance(url: str, title: str, snippet: str, entity: str) -> d
             "provider": r["provider"]}
 
 
+def deterministic_verdict(value: str, quote: str, source_text: str) -> dict | None:
+    """The verdict that needs no model, or `None` if a judgement is genuinely needed.
+
+    Split out of `evidence_verification` so the caller can know *before* it spends
+    a budget unit. The budget used to be charged first and the deduction
+    returned second, so the per-run cap of 400 was consumed by arithmetic that
+    costs nothing — and a real judgement could be refused as
+    `judgment_unavailable` while the record showed the budget was "used up" on
+    free deductions. A cap is supposed to bound the expensive thing.
+
+    Both branches are deductions, not guesses:
+
+    * a quote that is not on the page cannot support anything;
+    * a value that is literally inside its own quote needs no interpretation.
+    """
+    import re
+    norm = lambda s: re.sub(r"\s+", " ", (s or "").strip().lower())
+    v, q = norm(value), norm(quote)
+    if not quote or q not in norm(source_text):
+        return {"judgment": "NOT_SUPPORTED", "confidence": 0.95,
+                "provider": "deterministic"}
+    if v and v in q:
+        # The value is literally inside its own quote, so "does this evidence
+        # support the claim" has no answer other than yes. Spending a judge call
+        # on it is pure latency: a live run reached 728 extracted records, and
+        # asking a model about every field of every one of them meant thousands
+        # of round trips and a blown budget. This is a deduction, not a guess -
+        # the substring is the claim.
+        return {"judgment": "SUPPORTED", "confidence": 0.95,
+                "provider": "deterministic"}
+    return None
+
+
 async def evidence_verification(value: str, quote: str, source_text: str) -> dict:
     """B. SUPPORTED / NOT_SUPPORTED / UNCERTAIN / JUDGMENT_UNAVAILABLE /
     RATE_LIMITED.
@@ -140,20 +173,9 @@ async def evidence_verification(value: str, quote: str, source_text: str) -> dic
     in with absence: "told to wait" and "nothing to judge" call for different
     responses, and a busy run should be able to say it was throttled.
     """
-    import re
-    norm = lambda s: re.sub(r"\s+", " ", (s or "").strip().lower())
-    v, q = norm(value), norm(quote)
-    if not quote or q not in norm(source_text):
-        return {"judgment": "NOT_SUPPORTED", "confidence": 0.95, "provider": "deterministic"}
-    if v and v in q:
-        # The value is literally inside its own quote, so "does this evidence
-        # support the claim" has no answer other than yes. Spending a judge call
-        # on it is pure latency: a live run reached 728 extracted records, and
-        # asking a model about every field of every one of them meant thousands
-        # of round trips and a blown budget. This is a deduction, not a guess -
-        # the substring is the claim.
-        return {"judgment": "SUPPORTED", "confidence": 0.95,
-                "provider": "deterministic"}
+    quick = deterministic_verdict(value, quote, source_text)
+    if quick is not None:
+        return quick
     from app.providers.llm import zen
     try:
         ans = await _jev_call(

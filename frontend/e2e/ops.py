@@ -103,9 +103,18 @@ def main() -> int:
                      return /Records/i.test(t) && !/^Loading/i.test(t.trim());
                    }""",
                 timeout=90_000)
-        except Exception:
-            fails.append("the dashboard never rendered its totals. It said: "
-                         + repr(page.inner_text("main")[-200:]))
+        except Exception as exc:
+            # Read the page defensively. The obvious `page.inner_text("main")`
+            # can itself block for the full timeout when the page is the thing
+            # that failed to load, and a 90s wait inside an error handler
+            # reports a timeout instead of the real cause.
+            try:
+                said = page.inner_text("body", timeout=5_000)[-200:]
+            except Exception:
+                said = "(the page could not be read at all)"
+            fails.append(
+                f"the dashboard never rendered its totals ({exc}). It said: "
+                + repr(said))
             browser.close()
             print("=" * 60)
             print("FAILURES:")
@@ -113,16 +122,28 @@ def main() -> int:
                 print(f"  - {f}")
             return 1
         body = page.inner_text("main")
+        # The section titles and stat labels are uppercased by CSS, and
+        # `innerText` reflects rendered text-transform, so these comparisons are
+        # case-insensitive. Comparing exactly matched nothing and reported five
+        # missing sections on a page that showed all five.
+        low = body.lower()
 
         checks = {
-            "totals reported": "Proven cells" in body,
-            "coverage explained": "of all cells" in body,
-            "dataset table present": "Filled" in body and "Conflicts" in body,
-            "host ranking present": "Proven per page" in body,
-            "honest about unproven": "no verdict" in body,
+            # The ribbon is the page's argument: sources become pages become
+            # records become values become *proven* values, and the last stage
+            # being much narrower than the one before is the honest answer to
+            # "is this trustworthy".
+            "provenance ribbon": all(s in body for s in (
+                "Sources fetched", "Records", "Values", "Proven")),
+            "proven stated as a share": "of all values" in low,
+            "unproven is not called proven": "nothing judged it" in low,
+            "disputes surfaced": "sources disagree" in low,
+            "host ranking present": "which sites paid" in low,
+            "never-filled counted separately": "fields on no record" in low,
+            "sortable by what you choose": "most never filled" in low,
         }
         for k, v in checks.items():
-            print(f"  {k:26}: {v}")
+            print(f"  {k:28}: {v}")
             if not v:
                 fails.append(f"dashboard missing: {k}")
 
@@ -133,7 +154,12 @@ def main() -> int:
                 f"dashboard shows a different proven_pct than the API "
                 f"({truth['totals']['proven_pct']}%)")
         else:
-            print(f"  {'agrees with the API':26}: True")
+            print(f"  {'agrees with the API':28}: True")
+        if f"{truth['totals']['records']:,}" not in body and str(
+                truth["totals"]["records"]) not in body:
+            fails.append("dashboard does not show the API's record count")
+        else:
+            print(f"  {'agrees on record count':28}: True")
 
         # A zero-state must be described, not rendered as an empty chart.
         if truth["totals"]["cells"] == 0 and "nothing to summarise" not in body.lower():
@@ -179,7 +205,7 @@ def main() -> int:
         print("\n=== backfill: top up partly filled columns ===")
         go(f"/library/{did}")
         page.wait_for_selector("[role=tab]", timeout=45_000)
-        page.locator("[role=tab]", has_text=re.compile("Coverage")).first.click()
+        page.locator("[role=tab]", has_text=re.compile("Gaps")).first.click()
         try:
             page.wait_for_selector(
                 "input[type=checkbox]", timeout=60_000)
@@ -228,7 +254,7 @@ def main() -> int:
         print("\n=== refresh ===")
         go(f"/library/{did}")
         page.wait_for_selector("[role=tab]", timeout=45_000)
-        page.locator("[role=tab]", has_text=re.compile("Coverage")).first.click()
+        page.locator("[role=tab]", has_text=re.compile("Gaps")).first.click()
         try:
             page.wait_for_function(
                 """() => /Refresh sources/.test(

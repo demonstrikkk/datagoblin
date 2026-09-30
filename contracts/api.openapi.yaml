@@ -243,6 +243,39 @@ paths:
       responses:
         "200": {description: "{sources_attempted, sources_successful, sources_failed, sources[]}"}
 
+  /api/datasets/{did}/profile:
+    get:
+      tags: [datasets]
+      summary: |
+        What each field looks like, and where the records are.
+
+        Computed server-side and from the same coverage function the Coverage view
+        uses, because a shape computed in the browser from whatever the records
+        table paged in is a different set of numbers for the same fields on the
+        same screen.
+
+        Charts are omitted where the data cannot support one: a field with a
+        single distinct value gets no distribution, a field with no values is
+        described rather than drawn as a zero-height bar, and a date column
+        becomes a timeline instead of one bar per date.
+
+        The place panel is an equal-area tile layout over the country field the
+        schema has, not a map projection, and it reports how many spellings it
+        collapsed — `London`, `London, England` and `London, UK` are one city
+        here, and the disagreement is itself the finding.
+      parameters:
+        - {$ref: "#/components/parameters/did"}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 10, maximum: 5000, default: 2000}
+      responses:
+        "200":
+          description: |
+            `{records, records_read, sampled, fields[], place, totals}`. `sampled`
+            is true when the shape was drawn from fewer records than the dataset
+            holds, and is reported rather than presented as complete.
+        "404": {$ref: "#/components/responses/NotFound"}
+
   /api/datasets/{did}/yield:
     get:
       tags: [datasets]
