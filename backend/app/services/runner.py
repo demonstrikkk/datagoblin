@@ -43,6 +43,21 @@ class _Budget:
     def expired(self) -> bool:
         return self.remaining() <= 0.0
 
+    # Fraction of the budget reserved for validating, deduplicating and storing
+    # whatever has already been extracted.
+    #
+    # Spending the whole allowance on fetching is what made a run fail *after* it
+    # had done its expensive part. Extraction took the full 600s, the pipeline was
+    # killed at the wall, and the extracted records were thrown away unvalidated -
+    # so the run reported "no records" having read every page successfully. The
+    # stages that make records publishable are the cheapest ones in the pipeline;
+    # starving them to feed more fetches is backwards.
+    TAIL_FRACTION = 0.65
+
+    def soft_expired(self) -> bool:
+        """True once no more *new work* should start, but the tail may still run."""
+        return self.remaining() <= self.total * (1.0 - self.TAIL_FRACTION)
+
     def elapsed(self) -> float:
         return time.monotonic() - self.started
 
@@ -283,19 +298,19 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         # Stop waiting as soon as the budget is gone, but let the in-flight pages
         # finish so their records are not thrown away.
         while not task.done():
-            if await asyncio.wait({task}, timeout=2.0) and budget.expired():
+            if await asyncio.wait({task}, timeout=2.0) and budget.soft_expired():
                 break
             if cancelled():
                 task.cancel()
                 return {"status": "CANCELLED", "records": []}
         if not task.done():
             task.cancel()
-            partial_reason = (f"runtime budget exhausted after "
+            partial_reason = (f"runtime budget reserved for validation after "
                               f"{len(extract_providers)} of {len(pages)} pages")
         else:
             await task
-            if budget.expired():
-                partial_reason = (f"runtime budget exhausted after "
+            if budget.soft_expired():
+                partial_reason = (f"runtime budget reserved for validation after "
                                   f"{len(extract_providers)} of {len(pages)} pages")
     progress["extract_providers"] = extract_providers
     progress["partial_reason"] = partial_reason
@@ -521,9 +536,17 @@ async def execute_run(run_id: str, plan: dict, ctx: dict, emit: object) -> dict:
     try:
         return await asyncio.wait_for(
             _body(run_id, plan, ctx, emit, budget, progress),
-            # A grace margin over the stage-level budget, so the pipeline gets
-            # to notice the budget itself and persist what it has.
-            timeout=settings.RUN_MAX_RUNTIME_S + 30)
+            # A generous margin over the stage-level budget, so the pipeline gets
+            # to notice the budget itself and persist what it has. This is the
+            # last line of defence: extraction now stops at
+            # `_Budget.TAIL_FRACTION` so validation, deduplication and storage
+            # fit inside the budget with room to spare, and this margin exists
+            # only for a stage that hangs outright. At +30s a single slow page
+            # could still land the kill on top of a validation in progress, and
+            # `_finish_partial` only keeps records that were already validated -
+            # so an unvalidated record is lost, which is the whole failure this
+            # is avoiding.
+            timeout=settings.RUN_MAX_RUNTIME_S + 180)
     except asyncio.TimeoutError:
         # A stage overran its own bound (a hung fetch, an unbounded wait). Keep
         # the work that already completed.

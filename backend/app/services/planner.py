@@ -109,7 +109,7 @@ async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
                        "content": "Convert to a WorkflowPlan. "
                                   f"Business data request: {prompt[:2000]}"}],
             response_model=WorkflowPlan, max_retries=1), timeout=120)
-        return plan.model_dump(), "instructor:gemini"
+        return _cap_total_fields(_cap_required(plan.model_dump())), "instructor:gemini"
     except Exception:
         return None
 
@@ -118,6 +118,13 @@ async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
 #: field has no evidence, so a plan requiring everything guarantees an empty
 #: dataset. Two is enough to identify a record; the rest are enrichment.
 MAX_REQUIRED_FIELDS = 2
+
+# Total fields a plan may carry, whatever the planner proposed.
+#
+# Cost is fields x pages, so this number sets a run's price. 22 imagined fields
+# is what put a real run past its runtime budget; 12 is enough for a schema a
+# person would actually read and use.
+MAX_TOTAL_FIELDS = 12
 
 
 def _cap_required(plan: dict) -> dict:
@@ -139,6 +146,56 @@ def _cap_required(plan: dict) -> dict:
     for f in required[MAX_REQUIRED_FIELDS:]:
         f["required"] = False
     return plan
+
+
+def _cap_total_fields(plan: dict) -> dict:
+    """Cap the *total* field count, keeping the ones a dataset is identified by.
+
+    `_cap_required` bounds how many fields can be mandatory but nothing bounded
+    how many exist. A vague prompt about AI engineering jobs produced 22 fields -
+    \`contact_email\`, \`apply_deadline_status\`, \`company_revenue\`,
+    \`company_funding_stage\` - and every one of them is extracted and validated
+    against every page. That is the arithmetic behind a run that sat in planning
+    for minutes and then overran its runtime: cost is fields x pages, so the
+    planner's imagination sets the run's price.
+
+    Keeping the identity fields and the fields the prompt actually named is also
+    the honest outcome. A schema nobody asked for is not a schema the user
+    wanted; it is a guess that happens to be expensive.
+
+    Applied on every path, LLM and rule-based alike.
+    """
+    fields = plan.get("fields") or []
+    if len(fields) <= MAX_TOTAL_FIELDS:
+        return plan
+
+    keep, seen = [], set()
+    # Identity first: dedupe keys and required fields are what make the output a
+    # dataset rather than a list of text.
+    ranked = ([f for f in fields if f.get("name") in _identity_names(plan)]
+              + [f for f in fields if f.get("required")]
+              + list(fields))
+    for f in ranked:
+        name = str(f.get("name") or "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        keep.append(f)
+        if len(keep) >= MAX_TOTAL_FIELDS:
+            break
+
+    dropped = [str(f.get("name")) for f in fields if f.get("name") not in seen]
+    plan["fields"] = keep[:MAX_TOTAL_FIELDS]
+    if dropped:
+        # Recorded on the plan rather than logged: the plan is returned to the
+        # caller, so this is where the user sees which columns they did not get
+        # and can ask for one by name.
+        plan["dropped_fields"] = dropped
+    return plan
+
+
+def _identity_names(plan: dict) -> set:
+    return {str(n) for n in (plan.get("dedupe_keys") or []) if n}
 
 
 async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
@@ -172,12 +229,14 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
                 WorkflowPlan.model_json_schema())
             data = out.get("data", out) if isinstance(out, dict) else {}
             plan = WorkflowPlan(**data).model_dump()
-            return _cap_required(plan), (out.get("provider", "llm")
-                                         if isinstance(out, dict) else "llm")
+            return (_cap_total_fields(_cap_required(plan)),
+                (out.get("provider", "llm")
+                 if isinstance(out, dict) else "llm"))
         except Exception:
             pass  # fall through to rule-based compiler (honest, marked)
     try:
-        return _cap_required(WorkflowPlan(**_rule_plan(prompt)).model_dump()), "rule-based"
+        return (_cap_total_fields(_cap_required(
+            WorkflowPlan(**_rule_plan(prompt)).model_dump())), "rule-based")
     except Exception:
         return _fallback_plan(prompt), "fallback"
 
