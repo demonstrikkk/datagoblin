@@ -147,11 +147,27 @@ class JudgeBudget:
 JUDGE_BUDGET = JudgeBudget(0)
 
 
+#: Routes whose value is proved by the deterministic gates, not by a model.
+#:
+#: `json_ld`, `labelled`, `api` and `selectors` all carry the page's own line as
+#: the quote, so confirming that line is on the page *is* the verification. A
+#: model asked whether it agrees adds cost and latency and cannot make the answer
+#: more true.
+_DETERMINISTIC_ROUTES = frozenset({"json_ld", "labelled", "api", "selectors"})
+
+
 async def verify_field(value: object, quote: str, source_text: str,
                        required: bool, ftype: str, reference_id: str = "",
                        references: str = "", budget: JudgeBudget | None = None,
-                       norm_source: str | None = None) -> tuple[object | None, str]:
+                       norm_source: str | None = None,
+                       judged_by_construction: bool = False) -> tuple[object | None, str]:
     """Grade one field. Returns (value_to_store, status).
+
+    `judged_by_construction` short-circuits the model: the caller asserts this
+    field came from a deterministic rung whose quote is the page's own line, so
+    the gates below have already done the verification. It exists because the
+    ladder was avoiding extraction calls but not judge calls, and that asymmetry
+    is what got a real run throttled (HTTP 429) after reading every page.
 
     Order matters: the cheap deterministic gates come first, the judge last,
     because the judge is the only step that can be unavailable and the only one
@@ -233,6 +249,14 @@ async def verify_field(value: object, quote: str, source_text: str,
             return value, "verified"
         return None, "unverified"
 
+    # Every gate above has passed: the quote is on the page, it is attributable,
+    # and the value is consistent with it. For a deterministic rung that is the
+    # whole verification - the quote *is* the line the page printed - so the model
+    # is not asked. Placed after the deterministic verdict, not before, so a rung
+    # whose value is not actually in its own quote is still nulled.
+    if judged_by_construction:
+        return value, "verified"
+
     budget = budget if budget is not None else JUDGE_BUDGET
     if budget.exhausted:
         # The cap is spent. Keep the value - the quote genuinely is on the page
@@ -240,7 +264,17 @@ async def verify_field(value: object, quote: str, source_text: str,
         return value, "judgment_unavailable"
     if not budget.spend():
         return value, "judgment_unavailable"
-    verdict = await jev.evidence_verification(str(value), quote, source_text)
+    try:
+        verdict = await jev.evidence_verification(str(value), quote, source_text)
+    except Exception as _exc:  # noqa: BLE001
+        # A throttled or unreachable judge must never end the run.
+        #
+        # `evidence_verification` raises `JevRateLimited` after its retries, and
+        # that exception propagated out of here and failed the whole run - so a
+        # provider 429 discarded every record in a run that had already fetched
+        # and extracted all of them. Throttling is a fact about the provider, not
+        # about the evidence: the value stays, unproven, and the run continues.
+        return value, "rate_limited"
     judgment = verdict.get("judgment")
     if judgment == "NOT_SUPPORTED":
         return None, "unverified"
@@ -282,10 +316,29 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
         route = str(ev.get("read_method") or "")
         quote = ev.get("quote", "")
         ref_id = ev.get("reference_id", "")
-        v, st = await verify_field(raw.get("fields", {}).get(name), quote,
-                                   source_text, f.get("required", False),
-                                   f.get("type", "string"), ref_id, references,
-                                   budget=budget, norm_source=norm_source)
+        # A field a deterministic rung filled is not asked of the judge.
+        #
+        # The ladder's whole purpose is to avoid model calls, and it was only
+        # avoiding half of them: extraction was rung-first but *judging* still
+        # went to the model for every field, so a page whose identity came free
+        # from JSON-LD still cost a judge call per cell. That is the call pattern
+        # that got a real run throttled to death (HTTP 429) after it had already
+        # read every page.
+        #
+        # Nothing is lost by skipping it. A rung's quote *is* the line the page
+        # printed, so the deterministic gate that confirms the quote is present
+        # is a stronger check than asking a model whether it agrees.
+        if route in _DETERMINISTIC_ROUTES:
+            v, st = await verify_field(raw.get("fields", {}).get(name), quote,
+                                       source_text, f.get("required", False),
+                                       f.get("type", "string"), ref_id, references,
+                                       budget=budget, norm_source=norm_source,
+                                       judged_by_construction=True)
+        else:
+            v, st = await verify_field(raw.get("fields", {}).get(name), quote,
+                                       source_text, f.get("required", False),
+                                       f.get("type", "string"), ref_id, references,
+                                       budget=budget, norm_source=norm_source)
         start, end = locate_quote(quote, source_text) if st == "verified" else (None, None)
         # How the value was read, not just whether it was checked. Absent on a
         # raw extraction, so it defaults to `llm` — which is what it was, since
