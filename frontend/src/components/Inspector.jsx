@@ -1,19 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useInspector } from '../lib/inspector.jsx';
-import { api } from '../lib/api.js';
 import { Empty, ErrorNote, KeyVal, Pill, SkeletonLines, CopyButton } from './ui.jsx';
+import {
+  CellStatus,
+  FieldValue,
+  ProvenanceRail,
+  asField,
+  canProve,
+  evidenceDepth,
+} from './evidence.jsx';
 import {
   REC_VERIFY,
   host,
   isPartialRun,
   num,
   runStatusMeta,
-  toneClass,
   truncate,
   when,
 } from '../lib/format.js';
 
-/* ------------------------------------------------------------- primitives */
+/* ------------------------------------------------------------ primitives */
 
 function Head({ eyebrow, title, sub, onClose, actions }) {
   return (
@@ -45,232 +51,42 @@ function Head({ eyebrow, title, sub, onClose, actions }) {
 /* ------------------------------------------------------------------ proof */
 
 /**
- * Longest field value shown inline before it is clamped. A `description` is a
- * paragraph and `product_photos` is a list of URLs; either rendered in full
- * pushed every other field on the record off the panel, which is why a long
- * value looked like oversized text wherever the inspector was opened.
+ * One field, and the evidence behind it.
+ *
+ * This row is the three-level evidence drawer. The levels are progressive and
+ * they are the product's core claim made navigable:
+ *
+ *   1  glance   — status glyph and where the value came from, always visible
+ *   2  evidence — the quote, its offsets, and the source it was cut from
+ *   3  page     — the stored page with the quote highlighted where it sits
+ *
+ * Level 3 is fetched only on request. It is the most expensive read in the app
+ * and most reviewers never need it, so it must not load eagerly — a 30-field
+ * record would otherwise issue 30 page requests the moment the panel opened.
+ *
+ * The row is only interactive when there is something to show. A field with no
+ * source at all renders as static text, because a disclosure triangle that
+ * opens onto nothing is worse than no triangle.
  */
-const LONG_VALUE = 420;
-
-/**
- * Render a stored field value readably.
- *
- * Raw extraction output is often an unformatted number — `17000000000` for a
- * funding amount. Printing that verbatim is unreadable, so large integers get
- * thousands separators plus a compact gloss. The exact value stays in the
- * title attribute, because rounding a figure someone may rely on would be its
- * own kind of lie.
- *
- * Text is clamped rather than dropped: the full value is one click away, so
- * bounding what is shown does not mean hiding what was extracted.
- */
-function FieldValue({ raw }) {
-  const [open, setOpen] = useState(false);
-  if (raw === null || raw === undefined || raw === '') {
-    return <span className="text-rule-2">—</span>;
-  }
-  if (typeof raw === 'boolean') {
-    return <span>{raw ? 'yes' : 'no'}</span>;
-  }
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    const grouped = raw.toLocaleString('en-US');
-    if (Math.abs(raw) >= 1e6) {
-      return (
-        <span title={grouped}>
-          {grouped}
-          <span className="ml-1.5 text-[11px] text-muted">
-            ({(raw / 1e6).toLocaleString('en-US', { maximumFractionDigits: 1 })}M)
-          </span>
-        </span>
-      );
-    }
-    return <span className="font-mono tnum">{grouped}</span>;
-  }
-  const text = typeof raw === 'object'
-    ? (Array.isArray(raw) ? raw.join(', ') : JSON.stringify(raw))
-    : String(raw);
-
-  // A `description` is a paragraph and `product_photos` is a list of URLs. Both
-  // are legitimate field values, and rendering either in full pushed every
-  // other field on the record off the panel — which is why long values showed
-  // up as oversized text wherever the inspector opened: Records, Library, Runs.
-  // Bounded by default, with the full value one click away rather than hidden.
-  if (text.length <= LONG_VALUE) {
-    return <span className="break-words">{text}</span>;
-  }
-  if (open) {
-    return (
-      <span className="block">
-        <span className="block break-words whitespace-pre-wrap">{text}</span>
-        <button
-          type="button"
-          onClick={() => setOpen(false)}
-          className="mt-1 text-[11px] text-muted underline underline-offset-2 hover:text-ink"
-        >
-          Show less
-        </button>
-      </span>
-    );
-  }
-  return (
-    <span className="block">
-      <span className="block break-words">{`${text.slice(0, LONG_VALUE).trimEnd()}…`}</span>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="mt-1 text-[11px] text-muted underline underline-offset-2 hover:text-ink"
-      >
-        Show all {text.length.toLocaleString('en-US')} characters
-      </button>
-    </span>
-  );
-}
-
-/**
- * Show a quote sitting inside the stored page it was taken from.
- *
- * The offsets a field carries were computed in Python, where every string index
- * counts a Unicode *code point*. JavaScript counts UTF-16 *code units*, so a
- * single character outside the Basic Multilingual Plane — an emoji, some CJK —
- * shifts every later position by one and the wrong span gets highlighted.
- * Slicing an expanded code-point array keeps the two in step.
- *
- * The result is then checked against the quote rather than assumed. If the
- * stored page has changed, or the offsets address something else, this says so
- * and shows no highlight — a proof view that highlights plausible-looking text
- * it cannot verify would be worse than no proof view at all.
- */
-const PROOF_CONTEXT = 300;
-
-function resolveProof(markdown, start, end) {
-  const chars = [...(markdown || '')];
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > chars.length) {
-    return null;
-  }
-  return {
-    before: chars.slice(Math.max(0, start - PROOF_CONTEXT), start).join(''),
-    hit: chars.slice(start, end).join(''),
-    after: chars.slice(end, Math.min(chars.length, end + PROOF_CONTEXT)).join(''),
-    total: chars.length,
-  };
-}
-
-function ProofView({ src }) {
-  const [state, setState] = useState({ phase: 'loading' });
-
-  useEffect(() => {
-    let alive = true;
-    setState({ phase: 'loading' });
-    api
-      .page(src.page_id)
-      .then((payload) => {
-        if (!alive) return;
-        // api.request already unwraps the envelope's `data`, so the payload IS
-        // the page. Reading `payload.data` here yields undefined, which makes
-        // every proof view claim its offsets fall outside an empty page.
-        const page = payload || {};
-        const markdown = page.markdown || '';
-        const proof = resolveProof(markdown, src.start, src.end);
-        if (!proof) {
-          setState({ phase: 'bad-offsets', markdown });
-        } else if (src.quote && proof.hit !== src.quote) {
-          setState({ phase: 'mismatch', proof, page });
-        } else {
-          setState({ phase: 'ok', proof, page });
-        }
-      })
-      .catch((err) => {
-        if (alive) setState({ phase: 'error', message: err?.message || 'Could not load the page.' });
-      });
-    return () => {
-      alive = false;
-    };
-  }, [src.page_id, src.start, src.end, src.quote]);
-
-  if (state.phase === 'loading') {
-    return <SkeletonLines lines={3} />;
-  }
-  if (state.phase === 'error') {
-    return <ErrorNote title="Stored page unavailable">{state.message}</ErrorNote>;
-  }
-  if (state.phase === 'bad-offsets') {
-    return (
-      <p className="text-[11.5px] text-warn">
-        This quote carries offsets that do not fall inside the stored page, so it cannot be shown in
-        context.
-      </p>
-    );
-  }
-  if (state.phase === 'mismatch') {
-    // The page is there and the offsets resolve, but they select different
-    // text than the quote claims. Report the disagreement instead of
-    // highlighting whichever text the offsets happen to land on.
-    return (
-      <div className="space-y-1.5">
-        <p className="text-[11.5px] text-warn">
-          The stored page no longer matches this quote: the recorded offsets select different text.
-          The page may have been re-crawled since this value was verified.
-        </p>
-        <p className="text-[11px] text-muted">
-          offsets select{' '}
-          <code className="font-mono text-ink-2">“{truncate(state.proof.hit, 160)}”</code>
-        </p>
-      </div>
-    );
-  }
-
-  const { proof, page } = state;
-  return (
-    <div className="space-y-1.5">
-      <p className="text-[10.5px] uppercase tracking-[0.14em] text-muted">
-        {page?.url ? host(page.url) : 'stored page'} · character offsets {src.start}–{src.end} of{' '}
-        {proof.total}
-      </p>
-      <blockquote className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-accent/50 pl-2.5 text-[12px] leading-relaxed text-ink-2">
-        {proof.before ? <span className="text-muted">{proof.before}</span> : null}
-        <mark className="rounded-[2px] bg-accent/20 px-0.5 text-ink">{proof.hit}</mark>
-        <span className="text-muted">{proof.after}</span>
-      </blockquote>
-      <p className="text-[10.5px] text-muted">
-        Verbatim match against the page stored at run time.
-        {page?.retrieved_at ? ` Retrieved ${when(page.retrieved_at)}.` : null}
-      </p>
-    </div>
-  );
-}
-
 function FieldRow({ name, prov }) {
   const [open, setOpen] = useState(false);
-  const [showProof, setShowProof] = useState(false);
-  // `ProvenanceField` = { value, verification_status, source, normalized }
-  const pf = prov && typeof prov === 'object' ? prov : {};
-  const status = pf.verification_status;
-  const m = status ? REC_VERIFY[status] : null;
-  const src = pf.source || null;
-  const hasEvidence = Boolean(src && (src.quote || src.url || src.page_id));
-  // Offsets are only proof if there is a page to resolve them against.
-  const canProve = Boolean(src?.page_id && src?.quote && Number.isInteger(src?.start) && Number.isInteger(src?.end));
+  const [showPage, setShowPage] = useState(false);
+  const pf = asField(prov);
+  const src = pf.source;
+  const depth = evidenceDepth(src);
 
   return (
     <div className="border-b border-rule last:border-0">
       <button
         type="button"
-        onClick={() => hasEvidence && setOpen((o) => !o)}
+        onClick={() => depth > 0 && setOpen((o) => !o)}
         className={`row flex w-full items-start gap-2.5 px-4 py-2.5 text-left ${
-          hasEvidence ? 'cursor-pointer' : 'cursor-default'
+          depth > 0 ? 'cursor-pointer' : 'cursor-default'
         }`}
-        aria-expanded={hasEvidence ? open : undefined}
+        aria-expanded={depth > 0 ? open : undefined}
       >
-        <span className="mt-[3px] shrink-0" title={m?.hint || 'No judge assessment for this field'}>
-          {m ? (
-            <span className={toneClass(m.tone).split(' ')[0]} aria-hidden="true">
-              {m.glyph}
-            </span>
-          ) : (
-            <span className="text-rule-2" aria-hidden="true">
-              ·
-            </span>
-          )}
+        <span className="mt-[3px] shrink-0">
+          <CellStatus status={pf.status} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="eyebrow block">{name}</span>
@@ -278,7 +94,7 @@ function FieldRow({ name, prov }) {
             <FieldValue raw={pf.value} />
           </span>
         </span>
-        {hasEvidence ? (
+        {depth > 0 ? (
           <span
             className="mt-px shrink-0 text-[10px] text-muted transition-transform duration-200 ease-swift"
             style={{ transform: open ? 'rotate(90deg)' : 'none' }}
@@ -289,70 +105,23 @@ function FieldRow({ name, prov }) {
         ) : null}
       </button>
 
-      {open && hasEvidence ? (
-        <div className="space-y-2 border-t border-dashed border-rule bg-warm/30 px-4 py-2.5 animate-fade-in">
-          {src.quote ? (
-            <blockquote className="border-l-2 border-accent/50 pl-2.5 text-[12px] italic leading-relaxed text-ink-2">
-              “{truncate(src.quote, 480)}”
-            </blockquote>
-          ) : (
-            <p className="text-[11.5px] text-warn">
-              This field has a source but no verbatim quote, so it cannot be re-checked against the
-              stored page.
-            </p>
-          )}
-          <div className="flex flex-wrap items-center gap-2 pl-2.5">
-            {src.url ? (
-              <a href={src.url} target="_blank" rel="noreferrer noopener" className="link text-[11px]">
-                {src.title || host(src.url)}
-              </a>
-            ) : null}
-            {src.page_id ? (
-              <span
-                className="font-mono text-[10px] text-muted"
-                title="Stored page this quote was located in"
-              >
-                page {String(src.page_id).slice(0, 8)}
-              </span>
-            ) : (
-              <span className="text-[10px] text-warn" title="No stored page backing this claim">
-                no stored page
-              </span>
-            )}
-            {src.start !== null && src.start !== undefined ? (
-              <span
-                className="font-mono text-[10px] text-muted"
-                title="Character offsets of the quote inside the stored page text"
-              >
-                @{src.start}–{src.end}
-              </span>
-            ) : null}
-            {src.retrieved_at ? (
-              <span className="text-[10px] text-muted">{when(src.retrieved_at)}</span>
-            ) : null}
-          </div>
+      {open && depth > 0 ? (
+        <div className="animate-fade-in border-t border-dashed border-rule bg-warm/25 px-4 py-3">
+          <ProvenanceRail name={name} prov={pf} showPage={showPage} />
 
-          {canProve ? (
-            <div className="pl-2.5">
-              <button
-                type="button"
-                onClick={() => setShowProof((v) => !v)}
-                aria-expanded={showProof}
-                className="rounded border border-rule bg-surface px-2 py-1 text-[11px] text-ink-2 transition-colors hover:border-accent/50 hover:text-ink"
-              >
-                {showProof ? 'Hide the stored page' : 'Show this quote in the stored page'}
-              </button>
-            </div>
-          ) : null}
-
-          {showProof && canProve ? (
-            <div className="animate-fade-in">
-              <ProofView src={src} />
-            </div>
+          {canProve(src) ? (
+            <button
+              type="button"
+              onClick={() => setShowPage((v) => !v)}
+              aria-expanded={showPage}
+              className="btn-outline btn-xs mt-3"
+            >
+              {showPage ? 'Hide the stored page' : 'Show the stored page'}
+            </button>
           ) : null}
 
           {pf.normalized ? (
-            <p className="pl-2.5 text-[10.5px] text-muted">
+            <p className="mt-2.5 text-[10.5px] leading-snug text-muted">
               normalised for dedupe as{' '}
               <code className="font-mono text-ink-2">
                 {truncate(
@@ -374,19 +143,21 @@ function RecordView({ record }) {
   if (!record) return <Empty title="No record selected" />;
 
   // `RecordRow` is `{ fields: { name: ProvenanceField } }`. Older/persisted rows
-  // may be a flat `{name: value}` map, so both are accepted.
+  // may be a flat `{name: value}` map, so both are accepted. asField does the
+  // normalising for the per-field rows below.
   const fields =
     record.fields && typeof record.fields === 'object'
-      ? Object.entries(record.fields).map(([k, v]) => [k, v])
+      ? Object.entries(record.fields)
       : Object.entries(record)
           .filter(([, v]) => v === null || typeof v !== 'object')
-          .map(([k, v]) => [k, { value: v, verification_status: null, source: null }]);
+          .map(([k, v]) => [k, v]);
 
-  const proven = fields.filter(([, pf]) => pf?.verification_status === 'verified').length;
-  // "Not proven" is everything that is not `verified` — including `unverified`
-  // and `judgment_unavailable`. Counting only fields with *no* status at all
-  // reported "0 unjudged" on records where most fields were in fact unproven,
-  // which is precisely the false comfort this tool exists to avoid.
+  const proven = fields.filter(([, pf]) => asField(pf).status === 'verified').length;
+  // "Not proven" is everything that is not `verified` — including `unverified`,
+  // `judgment_unavailable` and `rate_limited`. Counting only fields with *no*
+  // status at all reported "0 unjudged" on records where most fields were in
+  // fact unproven, which is precisely the false comfort this tool exists to
+  // avoid.
   const notProven = fields.length - proven;
 
   return (
@@ -472,7 +243,9 @@ function SourceView({ source }) {
           </Pill>
         ) : null}
         {s.robots_allowed !== undefined ? (
-          <Pill tone={s.robots_allowed ? 'ok' : 'warn'}>{s.robots_allowed ? 'robots ok' : 'robots denied'}</Pill>
+          <Pill tone={s.robots_allowed ? 'ok' : 'warn'}>
+            {s.robots_allowed ? 'robots ok' : 'robots denied'}
+          </Pill>
         ) : null}
       </div>
 
@@ -586,7 +359,7 @@ function RunView({ run }) {
         </Pill>
         {partial ? (
           <Pill tone="warn" glyph="◐" title="A dataset was written before the run budget ran out">
-            partial saved
+            partial catch
           </Pill>
         ) : null}
       </div>
@@ -667,3 +440,6 @@ export default function Inspector({ onClose }) {
   );
 }
 
+/* Re-exported so pages can reach the shared evidence pieces through the
+   inspector they already import from, instead of a second import path. */
+export { CellStatus, ProvenanceRail, FieldValue, REC_VERIFY };
