@@ -183,8 +183,23 @@ async def evidence_verification(value: str, quote: str, source_text: str) -> dic
             {"support": {"type": "noul",
                          "instructions": "Does the evidence support the claim?"}})
     except zen.JevRateLimited:
-        return {"judgment": "RATE_LIMITED", "confidence": 0.0,
-                "provider": "throttled"}
+        # Throttled. Fall back rather than stall.
+        #
+        # The dedicated judge is rate-limited on the free tier often enough to be
+        # the normal case, not the exception: a measured run reported 20 limited
+        # calls against 0 successful, and each one burned its full retry ladder
+        # before giving up. That is minutes of wall clock to learn nothing, and
+        # the run then finished with nothing to show.
+        #
+        # So a throttled judge hands the question to the general model that the
+        # rest of the pipeline already depends on, and the answer is recorded
+        # under its own provider so the record says which judge produced it. A
+        # caller that needs to distinguish a dedicated ruling from this fallback
+        # can, which is the point: the verdict is still a real judgement of the
+        # quote, just not from the judge that would have preferred.
+        return await _proxy_verdict(value, quote, throttled=True)
+    except Exception:  # noqa: BLE001
+        return await _proxy_verdict(value, quote, throttled=False)
     if ans is not None:
         node = ans.get("support", {})
         if not isinstance(node, dict) or node.get("type", "noul") != "noul":
@@ -200,8 +215,58 @@ async def evidence_verification(value: str, quote: str, source_text: str) -> dic
         # The 0.4-0.6 band is a real "I cannot tell". The validator used to
         # treat it as verified, so a hesitant judge was reported as support.
         return {"judgment": "UNCERTAIN", "confidence": 0.5, "provider": "jev"}
-    return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
-            "provider": "none"}
+    return await _proxy_verdict(value, quote, throttled=False)
+
+
+#: The fallback verdict schema. One question, one boolean.
+_PROXY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "supported": {"type": "boolean"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["supported"],
+    "additionalProperties": False,
+}
+
+
+async def _proxy_verdict(value: str, quote: str, *, throttled: bool) -> dict:
+    """Ask the general model the same question the dedicated judge would.
+
+    Used only when the dedicated judge cannot answer. The returned verdict names
+    `llm-proxy` as its provider so a record carries the truth about which judge
+    ruled on it.
+
+    A failure here is reported as `JUDGMENT_UNAVAILABLE`, never as support: two
+    unavailable judges still do not make a claim verified.
+    """
+    try:
+        from app.providers.llm import generate as llm_generate
+
+        out = await llm_generate.structured_generate(
+            "You are checking whether a quoted sentence from a web page states a "
+            "particular fact. Answer supported=true only if the quote itself "
+            "asserts the claim. A quote that merely mentions a related topic, or "
+            "that states the opposite, is supported=false.\n\n"
+            f"CLAIM: {value}\n\nQUOTE: {quote}",
+            _PROXY_SCHEMA)
+        node = out.get("data", out) if isinstance(out, dict) else {}
+        if not isinstance(node, dict) or "supported" not in node:
+            return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
+                    "provider": "none"}
+        supported = bool(node.get("supported"))
+        try:
+            confidence = float(node.get("confidence", 0.8 if supported else 0.8))
+        except (TypeError, ValueError):
+            confidence = 0.8
+        # Kept below the dedicated judge's floor so a proxy ruling never outranks
+        # a real one in any ordering that sorts on confidence.
+        confidence = min(max(confidence, 0.0), 0.75)
+        return {"judgment": "SUPPORTED" if supported else "NOT_SUPPORTED",
+                "confidence": confidence, "provider": "llm-proxy"}
+    except Exception:  # noqa: BLE001
+        return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
+                "provider": "none"}
 
 
 async def conflict_triage(field: str, value_a: str, value_b: str,
