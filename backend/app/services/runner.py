@@ -177,7 +177,28 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
             progress["blocked_domains"] = list(data.get("blocked_domains") or [])
         await _emit_stamped(emit, run_id)(ev)
 
-    sources = await discovery_svc.discover(run_id, plan, search_fn, llm, _discover_emit)
+    # Discovery gets its own slice of the budget, enforced as a wall clock.
+    #
+    # It emits nothing while it works, so a slow one is indistinguishable from a
+    # hung one: a measured run sat on PLANNING for minutes with an empty event
+    # log. The cause was real - every candidate came back robots-disallowed, and
+    # each re-query costs a model round trip - but the user's experience was a
+    # spinner. Bounding it means the worst case is an honest failure with a name
+    # for the cause, not silence.
+    discovery_cap = max(60.0, budget.total * 0.25)
+    try:
+        sources = await asyncio.wait_for(
+            discovery_svc.discover(run_id, plan, search_fn, llm, _discover_emit),
+            timeout=discovery_cap)
+    except asyncio.TimeoutError:
+        reason = (f"source discovery did not finish within "
+                  f"{discovery_cap:.0f}s")
+        await _emit(emit, {"type": "run.failed", "run_id": run_id,
+                           "stage": RunStage.FAILED, "message": reason,
+                           "progress": 12, "timestamp": _now(),
+                           "data": {"no_yield_reason": reason}})
+        return {"status": "FAILED", "records": [], "error": reason,
+                "no_yield_reason": reason}
     await _bill("discover_query", projection["queries"])
     if cancelled():
         return {"status": "CANCELLED", "records": []}
