@@ -271,7 +271,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                   className="btn-outline btn-xs"
                 >
-                  â† Prev
+                  ← Prev
                 </button>
                 <span className="px-1 font-mono text-[10.5px] text-muted">
                   {page + 1}/{pages}
@@ -282,7 +282,7 @@ function RecordsTable({ datasetId, schema, onPick }) {
                   onClick={() => setPage((p) => p + 1)}
                   className="btn-outline btn-xs"
                 >
-                  Next â†’
+                  Next →
                 </button>
               </div>
             </footer>
@@ -1465,7 +1465,7 @@ function SourceGrid({ datasetId }) {
                           title={good ? 'Fetched and stored' : s.error || 'Failed'}
                           aria-label={good ? 'Fetched' : 'Failed'}
                         >
-                          {good ? 'âœ“' : 'âœ•'}
+                          {good ? '✓' : '✗'}
                         </span>
                         <div className="min-w-0 flex-1">
                           <a
@@ -1611,7 +1611,7 @@ function ExportPanel({ datasetId, schema }) {
                       : 'border-rule bg-warm/50 text-muted hover:text-ink'
                   }`}
                 >
-                  {on ? 'âœ“ ' : ''}
+                  {on ? '✓ ' : ''}
                   {name}
                 </button>
               );
@@ -1633,7 +1633,7 @@ function ExportPanel({ datasetId, schema }) {
           </button>
           {done ? (
             <span className="text-[12px] text-ok animate-fade-in">
-              âœ“ {done} downloaded
+              ✓ {done} downloaded
             </span>
           ) : null}
         </div>
@@ -1658,7 +1658,7 @@ export default function DatasetPage() {
       <div className="space-y-4">
         <ErrorNote error={error} onRetry={refetch} />
         <Link to="/library" className="btn-outline btn-xs">
-          â† Back to library
+          ← Back to library
         </Link>
       </div>
     );
