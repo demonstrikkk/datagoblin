@@ -196,7 +196,7 @@ function AskPanel({
 
 /* ------------------------------------------------------------------ plan */
 
-function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBudget }) {
+function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBudget, request }) {
   const fields = plan?.fields || [];
   const required = fields.filter((f) => f.required);
   const sources = plan?.search_queries || [];
@@ -204,6 +204,35 @@ function PlanPanel({ plan, provider, planId, onRun, running, error, budget, onBu
 
   return (
     <div className="space-y-4 animate-fade-up">
+      {/*
+        The request above, the structure it became below.
+
+        The planner turns one sentence into an entity, a field schema and one to
+        five queries, and that transformation is the most interesting thing that
+        happens before a run starts — but it used to be invisible, appearing as a
+        form that had already been filled in. Putting the original sentence above
+        its own decomposition makes the machine's reading of the request
+        checkable: if `entity` is wrong, you can see that it read your sentence
+        wrong, instead of discovering it three stages later in a field name.
+      */}
+      {request ? (
+        <div className="surface p-3.5">
+          <p className="eyebrow">Your request</p>
+          <p className="mt-1.5 font-display text-[17px] leading-[1.4] text-ink">{request}</p>
+          <div className="mt-3 flex items-center gap-2 text-[11px] text-muted">
+            <span aria-hidden="true" className="text-accent">
+              ↓
+            </span>
+            <span>read as</span>
+            <span className="text-ink-2">{plan?.entity || 'no entity'}</span>
+            <span>·</span>
+            <span className="text-ink-2">{fields.length} fields</span>
+            <span>·</span>
+            <span className="text-ink-2">{sources.length} queries</span>
+          </div>
+        </div>
+      ) : null}
+
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="eyebrow">Compiled plan</p>
@@ -571,6 +600,7 @@ export default function Collect() {
               error={error}
               budget={budget}
               onBudget={setBudget}
+              request={prompt.trim() || null}
             />
             <div className="mt-4 flex justify-center">
               <button

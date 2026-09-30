@@ -27,6 +27,7 @@ import {
   host,
   num,
   numericShare,
+  toneVar,
   topCategories,
   truncate,
   when,
@@ -974,7 +975,7 @@ function BarChart({ title, items, unit = '' }) {
                 className="block h-full rounded-full"
                 style={{
                   width: `${Math.max(1.5, (i.value / max) * 100)}%`,
-                  background: i.tone ? `var(--${i.tone})` : 'var(--accent)',
+                  background: i.tone ? toneVar(i.tone) : 'rgb(var(--accent))',
                 }}
               />
             </span>

@@ -6,12 +6,12 @@ import { useRunContext } from '../lib/run-context.jsx';
 import { useInspector } from '../lib/inspector.jsx';
 import PipelineRail, { Counter } from './PipelineRail.jsx';
 import EventFeed from './EventFeed.jsx';
+import { FindingList, SourceTrail } from './SourceTrail.jsx';
 import {
   Dot,
   ErrorNote,
   Notice,
   Pill,
-  Skeleton,
   Stat,
   StackedBar,
 } from './ui.jsx';
@@ -126,7 +126,7 @@ export default function RunView({ runId, title, enriched }) {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
             <Pill tone={meta.tone} glyph={meta.glyph} live={meta.live}>
-              {meta.label}
+              {meta.display || meta.label}
             </Pill>
             {/* The stage is only worth naming while the run is going. On a
                 finished run it is FAILED or COMPLETED, which would just repeat
@@ -275,59 +275,43 @@ export default function RunView({ runId, title, enriched }) {
         </div>
       ) : null}
 
-      <div className="grid gap-3 lg:grid-cols-[1.6fr_1fr]">
-        <EventFeed
-          events={stream.events}
-          connection={stream.connection}
-          height={430}
-          emptyHint={isTerminal ? 'This run emitted no events.' : 'Waiting for the first event…'}
-        />
+      {/*
+        Research on the left, findings on the right.
 
-        <div className="surface p-3.5">
-          <p className="eyebrow mb-2">Latest activity</p>
-          {stream.events.length ? (
-            <ul className="space-y-2">
-              {stream.events
-                .slice(-7)
-                .reverse()
-                .map((e, i) => (
-                  <li key={i} className="flex items-start gap-2 text-[11.5px] leading-snug">
-                    <Dot
-                      tone={
-                        e.type === 'record.verified'
-                          ? 'ok'
-                          : e.type === 'record.rejected' || e.type === 'run.failed'
-                          ? 'danger'
-                          : e.type === 'record.needs_review' || e.type === 'run.partial'
-                          ? 'warn'
-                          : e.type === 'source.fetched'
-                          ? 'ok'
-                          : e.type === 'source.reused'
-                          ? 'info'
-                          : 'muted'
-                      }
-                    />
-                    <span className="min-w-0 flex-1 text-ink-2">
-                      <span className="text-muted">{e.stage || e.type}</span>{' '}
-                      {truncate(e.message || e.detail || '', 88)}
-                    </span>
-                    <span className="shrink-0 font-mono text-[9.5px] text-muted/70">
-                      {when(e.timestamp)}
-                    </span>
-                  </li>
-                ))}
-            </ul>
-          ) : (
-            <div className="space-y-2" aria-hidden="true">
-              {[0, 1, 2, 3].map((i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <Skeleton className="h-1.5 w-1.5 rounded-full" />
-                  <Skeleton className="h-2.5 flex-1" style={{ maxWidth: `${90 - i * 12}%` }} />
-                </div>
-              ))}
-            </div>
-          )}
+        The two columns answer the two questions a run raises — "where is it
+        looking" and "what did it come back with" — and pairing them means a
+        reader can watch a page become a record count without scrolling between
+        panels. The event log sits under research, because an event is an
+        explanation of the research rather than a result of it.
+      */}
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-3">
+          <SourceTrail
+            events={stream.events}
+            onPick={(r) =>
+              inspect({
+                kind: 'source',
+                source: {
+                  url: r.url,
+                  page_id: r.pageId,
+                  retrieved_at: r.at,
+                  ok: r.outcome === 'fetched',
+                },
+                title: r.url,
+                sub: r.reusedFrom ? `reused from run ${String(r.reusedFrom).slice(0, 8)}` : undefined,
+              })
+            }
+            height={300}
+          />
+          <EventFeed
+            events={stream.events}
+            connection={stream.connection}
+            height={260}
+            emptyHint={isTerminal ? 'This run emitted no events.' : 'Waiting for the first event…'}
+          />
         </div>
+
+        <FindingList events={stream.events} height={580} />
       </div>
     </div>
   );
