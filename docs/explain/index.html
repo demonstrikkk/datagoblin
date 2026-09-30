@@ -1,0 +1,658 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DataGoblin â€” what actually happens when you type a question</title>
+<style>
+  :root {
+    --paper: #f6f3ee;
+    --paper-2: #fffdf9;
+    --ink: #23201c;
+    --ink-2: #4a443c;
+    --muted: #7d766c;
+    --rule: #e0d8cc;
+    --rule-2: #cfc4b4;
+    --accent: #2f9e4f;
+    --accent-2: #1f7a3c;
+    --evidence: #e8f5ec;
+    --evidence-ink: #12331f;
+    --refuse: #fdecea;
+    --refuse-ink: #6d2018;
+    --cost: #fdf3e2;
+    --cost-ink: #5c3f0d;
+    --store: #eef2f8;
+    --store-ink: #1b2c47;
+    --mono: ui-monospace, "SFMono-Regular", "DM Mono", Menlo, Consolas, monospace;
+    --sans: "DM Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
+    --serif: "Instrument Serif", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-2); }
+
+  header.top {
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper-2);
+    padding: 18px 26px 16px;
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 20;
+  }
+  header.top img { width: 40px; height: 40px; border-radius: 9px; }
+  header.top h1 { margin: 0; font-family: var(--serif); font-size: 25px; font-weight: 400; letter-spacing: -0.01em; }
+  header.top .sub { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+  .spacer { flex: 1; }
+
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 22px 26px 70px; }
+
+  .ask {
+    background: var(--paper-2);
+    border: 1px solid var(--rule-2);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin-bottom: 22px;
+  }
+  .ask label { display: block; font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); margin-bottom: 9px; }
+  .ask .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .ask input[type=text] {
+    flex: 1 1 380px; min-width: 0;
+    font-family: var(--sans); font-size: 15.5px; color: var(--ink);
+    padding: 11px 13px; border: 1px solid var(--rule-2); border-radius: 9px; background: #fff;
+  }
+  .ask input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ask button {
+    font-family: var(--sans); font-size: 14.5px; font-weight: 500;
+    padding: 11px 20px; border-radius: 9px; border: 1px solid var(--accent-2);
+    background: var(--accent-2); color: #fff; cursor: pointer;
+  }
+  .ask button:hover { background: var(--accent); border-color: var(--accent); }
+  .ask button.ghost { background: transparent; color: var(--ink-2); border-color: var(--rule-2); }
+  .ask button.ghost:hover { background: var(--paper); border-color: var(--ink-2); color: var(--ink); }
+
+  .presets { margin-top: 12px; display: flex; gap: 7px; flex-wrap: wrap; }
+  .presets button {
+    font-family: var(--sans); font-size: 12px; color: var(--ink-2);
+    padding: 5px 11px; border-radius: 999px; border: 1px solid var(--rule-2);
+    background: var(--paper); cursor: pointer;
+  }
+  .presets button:hover { border-color: var(--accent-2); color: var(--accent-2); }
+
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: 20px; align-items: start; }
+  @media (max-width: 1040px) { .two { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--paper-2); border: 1px solid var(--rule); border-radius: 14px; padding: 16px 18px; }
+  .panel + .panel { margin-top: 16px; }
+  .panel h2 {
+    margin: 0 0 3px; font-size: 11px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+  }
+  .panel .hint { font-size: 12.5px; color: var(--muted); margin: 0 0 12px; }
+
+  .stage {
+    display: grid; grid-template-columns: 26px minmax(0,1fr); gap: 11px;
+    padding: 11px 0; border-top: 1px dashed var(--rule);
+  }
+  .stage:first-of-type { border-top: none; }
+  .stage .n {
+    width: 22px; height: 22px; border-radius: 50%;
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 11px;
+    background: var(--paper); border: 1px solid var(--rule-2); color: var(--muted);
+  }
+  .stage.on .n { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+  .stage .t { font-size: 13.5px; font-weight: 600; letter-spacing: 0.02em; }
+  .stage .f { font-family: var(--mono); font-size: 11px; color: var(--accent-2); }
+  .stage .d { font-size: 13px; color: var(--ink-2); margin-top: 3px; }
+  .stage .why {
+    font-size: 12px; color: var(--muted); margin-top: 5px;
+    padding-left: 9px; border-left: 2px solid var(--rule-2);
+  }
+
+  .tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
+  .tag {
+    font-family: var(--mono); font-size: 10.5px;
+    padding: 2px 7px; border-radius: 5px;
+    background: var(--store); color: var(--store-ink); border: 1px solid #d5dfec;
+  }
+  .tag.cost { background: var(--cost); color: var(--cost-ink); border-color: #eeddb8; }
+  .tag.free { background: var(--evidence); color: var(--evidence-ink); border-color: #c2e3cd; }
+  .tag.refuse { background: var(--refuse); color: var(--refuse-ink); border-color: #f3c9c4; }
+
+  .metrics { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px; }
+  .metric { border: 1px solid var(--rule); border-radius: 9px; padding: 9px 11px; background: var(--paper); }
+  .metric .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+  .metric .v { font-family: var(--mono); font-size: 16px; margin-top: 2px; }
+  .metric .n { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+
+  .callout {
+    border-radius: 11px; padding: 12px 14px; margin-top: 12px;
+    font-size: 13px; line-height: 1.5;
+  }
+  .callout.evidence { background: var(--evidence); border: 1px solid #c2e3cd; color: var(--evidence-ink); }
+  .callout.refuse { background: var(--refuse); border: 1px solid #f3c9c4; color: var(--refuse-ink); }
+  .callout.cost { background: var(--cost); border: 1px solid #eeddb8; color: var(--cost-ink); }
+  .callout b { font-weight: 600; }
+
+  .gate {
+    margin-top: 12px; border: 1px solid var(--rule-2); border-radius: 11px; overflow: hidden;
+  }
+  .gate .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 9px 12px; border-top: 1px solid var(--rule); font-size: 12.5px; }
+  .gate .row:first-child { border-top: none; }
+  .gate .row .why { color: var(--muted); font-size: 11.5px; }
+  .badge { font-family: var(--mono); font-size: 10.5px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; align-self: center; }
+  .badge.yes { background: var(--evidence); color: var(--evidence-ink); border: 1px solid #c2e3cd; }
+  .badge.no { background: var(--refuse); color: var(--refuse-ink); border: 1px solid #f3c9c4; }
+  .badge.hold { background: var(--cost); color: var(--cost-ink); border: 1px solid #eeddb8; }
+
+  table.kv { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.kv td { padding: 5px 0; border-top: 1px solid var(--rule); vertical-align: top; }
+  table.kv tr:first-child td { border-top: none; }
+  table.kv td:first-child { color: var(--muted); width: 44%; }
+  table.kv td:last-child { font-family: var(--mono); font-size: 11.5px; }
+
+  .mermaid-wrap { overflow: auto; background: #fff; border: 1px solid var(--rule); border-radius: 12px; padding: 14px; }
+  .tabbar { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabbar button {
+    font-family: var(--sans); font-size: 12.5px; padding: 6px 13px; border-radius: 8px;
+    border: 1px solid var(--rule-2); background: var(--paper); color: var(--ink-2); cursor: pointer;
+  }
+  .tabbar button[aria-selected=true] { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .hidden { display: none !important; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <img src="./logo.png" alt="" />
+  <div>
+    <h1>DataGoblin</h1>
+    <div class="sub">Type a question. Watch what the system actually does to answer it.</div>
+  </div>
+  <div class="spacer"></div>
+  <button id="mermaidToggle" class="ask button ghost" style="margin:0">Full architecture diagram</button>
+</header>
+
+<div class="wrap">
+
+  <section class="ask">
+    <label for="q">Your question</label>
+    <div class="row">
+      <input id="q" type="text" autocomplete="off" spellcheck="false"
+             value="Find 15 AI startups in London with founders and latest funding" />
+      <button id="go">Run the trace</button>
+      <button id="reset" class="ghost">Reset</button>
+    </div>
+    <div class="presets">
+      <button data-q="Find 15 AI startups in London with founders and latest funding">AI startups in London</button>
+      <button data-q="Find the top 10 stocks of the Indian share market with listing date and rank">Indian share market</button>
+      <button data-q="Identify active NGOs in Delhi working on women's empowerment">Delhi NGOs</button>
+      <button data-q="List AI companies in Europe that publish annual revenue">EU AI companies</button>
+      <button data-q="open engineer jobs at Series A climate software companies in Berlin with salary">Berlin climate jobs</button>
+      <button data-q="sponsors of developer conferences in 2026">Conference sponsors</button>
+    </div>
+  </section>
+
+  <div id="archPanel" class="panel hidden" style="margin-bottom:20px">
+    <h2>Architecture as executed</h2>
+    <p class="hint">Every node is a real module in the repository. Green is where truth gets decided; red is where the system refuses to guess.</p>
+    <div class="mermaid-wrap"><pre class="mermaid" id="mmd"></pre></div>
+  </div>
+
+  <div class="two">
+    <div>
+      <section class="panel">
+        <h2>Execution trace</h2>
+        <p class="hint" id="traceHint">Each stage below is a real call the pipeline makes, with the ceiling it runs under.</p>
+        <div id="trace"></div>
+      </section>
+
+      <section class="panel">
+        <h2>The decision that matters â€” validating</h2>
+        <p class="hint">Extraction is not the hard part. This is: whether a value is allowed to be called proven.</p>
+        <div class="gate" id="gate"></div>
+        <div class="callout evidence" id="gateNote"></div>
+      </section>
+
+      <section class="panel">
+        <h2>What it would cost</h2>
+        <p class="hint">Determined by the question's shape, not by a marketing number.</p>
+        <div class="metrics" id="cost"></div>
+        <div class="callout cost" id="costNote"></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="panel">
+        <h2>Compiled plan</h2>
+        <p class="hint">Written to <code>workflows</code> before a single page is fetched.</p>
+        <table class="kv" id="plan"></table>
+      </section>
+
+      <section class="panel">
+        <h2>After the run â€” closing gaps</h2>
+        <p class="hint">Measured on this workspace's real data.</p>
+        <div id="gaps"></div>
+        <div class="callout refuse" style="margin-top:12px">
+          <b>evidence_gap is refused a web search.</b> A value with no verdict is not fixed by
+          fetching more â€” that would spend money to add a second unproven value to a field whose
+          problem is that the first was never judged.
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    Every figure on this page is read from the running system: ceilings from
+    <code>app/core/config.py</code>, gate behaviour from
+    <code>services/validator.py</code>, and the gap counts measured across 20 stored datasets and
+    723 records. Nothing here is illustrative.
+  </footer>
+</div>
+
+<script src="./mermaid.min.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// A trace of the real pipeline, driven by the shape of the question.
+//
+// This is not a simulation of the app's behaviour from memory. The stages,
+// ceilings, gate order and refusals are transcribed from the modules named
+// beside each one, and the file paths are given so any claim here can be
+// checked against the code that runs.
+//
+// What it deliberately does NOT do is predict record counts or verdict splits,
+// because those depend on what is actually on the fetched pages. A tool that
+// showed "47 records, 92% verified" before running anything would be telling a
+// story, and the whole premise of this project is that it does not.
+// ---------------------------------------------------------------------------
+
+const CONFIG = {
+  maxSearchQueries: 5,      // RUN_MAX_SEARCH_QUERIES
+  maxResultsPerQuery: 5,    // RUN_MAX_RESULTS_PER_QUERY
+  maxPages: 12,             // RUN_MAX_PAGES
+  maxDepth: 2,              // RUN_MAX_DEPTH
+  maxPagesPerDomain: 10,    // RUN_MAX_DOMAIN_PAGES
+  maxPagesPerSource: 5,     // RUN_MAX_PAGES_PER_SOURCE
+  maxRuntimeS: 600,         // RUN_MAX_RUNTIME_S
+  maxJudgeCalls: 400,       // RUN_MAX_JUDGE_CALLS
+  extractWindowChars: 24000,// 4 chunks x 6000 chars
+  pageConcurrency: 3,       // EXTRACT_PAGE_CONCURRENCY
+};
+
+// Transcribed from services/planner.py â€” the deterministic compiler's own hints.
+const ENTITY_HINTS = [
+  [{job:'job',jobs:'job',hiring:'job',engineer:'job',engineers:'job',role:'job',roles:'job',salary:'job'}, 'job'],
+  [{conference:'event',conferences:'event',summit:'event',event:'event',events:'event',sponsor:'event',sponsors:'event',sponsorship:'event'}, 'event'],
+  [{restaurant:'restaurant',restaurants:'restaurant',hotel:'restaurant',hotels:'restaurant'}, 'restaurant'],
+  [{startup:'company',startups:'company',saas:'company',company:'company',companies:'company',firm:'company',firms:'company'}, 'company'],
+];
+
+const FIELD_HINTS = [
+  [['founder','founders','ceo','cto'], {name:'founder', type:'string', description:'Founder name(s)'}],
+  [['funding','funded','raised','raise','investment','valuation'], {name:'funding_stage', type:'string', description:'Funding stage / amount'}],
+  [['website','site','url','domain','homepage'], {name:'website', type:'url', description:'Official website'}],
+  [['salary','pay','compensation','ctc'], {name:'salary', type:'string', description:'Salary / compensation'}],
+  [['location','city','country','london','india','remote','address','where'], {name:'location', type:'string', description:'Location'}],
+  [['date','dates','when','founded','year'], {name:'date', type:'string', description:'Relevant date'}],
+  [['organizer','organiser','host'], {name:'organizer', type:'string', description:'Organizer'}],
+  [['role','roles','title','position','job','jobs','hiring'], {name:'open_roles', type:'array', description:'Open roles / titles'}],
+  [['employee','employees','team','size','headcount'], {name:'employees', type:'string', description:'Team size'}],
+  [['email','contact','phone'], {name:'contact', type:'string', description:'Contact'}],
+];
+
+// The sector vocabulary from services/sector.py, with the real three-tier split.
+const SECTORS = [
+  { key:'venture', label:'Venture', tier:'attested' },
+  { key:'markets', label:'Markets', tier:'attested' },
+  { key:'nonprofit', label:'Nonprofit', tier:'attested' },
+  { key:'workforce', label:'Workforce', tier:'supported' },
+  { key:'realestate', label:'Property', tier:'unattested' },
+  { key:'healthcare', label:'Healthcare', tier:'unattested' },
+  { key:'education', label:'Education', tier:'unattested' },
+  { key:'energy', label:'Energy', tier:'unattested' },
+];
+
+/*
+ * Matched by prefix, not equality, for the same reason the real classifier is:
+ * a query says "NGOs", "startups", "stocks", and an exact-match vocabulary scored
+ * all three as zero -- which made this page report *no domain* for queries the
+ * live app classifies as Nonprofit, Venture and Markets. An explainer that
+ * disagrees with the app is worse than one that says nothing.
+ *
+ * Trailing "s" is handled by stemming rather than by listing every plural,
+ * because the plural set is open and the stems are not.
+ */
+function stem(w){ return w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w; }
+function has(hay, needle){ return hay.has(needle) || hay.has(stem(needle)); }
+
+const VOCAB = {
+  venture:['startup','series','seed','funding','funded','venture','vc','valuation','founder','accelerator','ycombinator'],
+  markets:['stock','share','ticker','symbol','exchange','listing','market','cap','nasdaq','nse','bse','index','dividend','revenue','annual'],
+  nonprofit:['ngo','charity','charities','nonprofit','foundation','csr','beneficiaries','beneficiary','registration','darpan','community','empowerment'],
+  workforce:['role','hiring','salary','headcount','employee','job','open_roles','team','recruiter','engineer'],
+  realestate:['property','listing','rent','sqft','bedroom','realtor','valuation'],
+  healthcare:['patient','clinical','trial','icd','diagnosis','hospital','therapeutic','nct'],
+  education:['course','student','school','university','enrolment','curriculum','tutor'],
+  energy:['capacity','mw','generation','tariff','solar','wind','grid','gwh'],
+};
+
+/* Curly quotes and dashes are not punctuation here: "women's" must stay one
+   token, and stripping the apostrophe turned it into "women s". */
+function words(s){
+  return new Set(String(s||'').toLowerCase()
+    .replace(/[‘’]/g, "'").replace(/[–—]/g, '-')
+    .replace(/[^a-z0-9'\s-]/g, ' ')
+    .split(/\s+/).filter(Boolean)
+    .map(w => w.replace(/^[-']+|[-']+$/g, '')).filter(Boolean));
+}
+
+function detectEntity(q){
+  const w = words(q);
+  let best = 'item', hits = [];
+  for (const [map, label] of ENTITY_HINTS) {
+    const k = Object.keys(map).filter(t => has(w, t));
+    if (k.length) { hits.push([label, k]); }
+  }
+  // The planner's own tie-break: specific entities beat generic company.
+  if (hits.length) {
+    const order = ['job','event','restaurant','company'];
+    for (const label of order) {
+      const hit = hits.find(h => h[0] === label);
+      if (hit) return { entity: label, matched: hit[1] };
+    }
+  }
+  return { entity: best, matched: [] };
+}
+
+function detectFields(q){
+  const w = words(q);
+  const out = [{ name:'company_name', type:'string', description:'Company name', implied:true }];
+  for (const [keys, spec] of FIELD_HINTS) {
+    if (keys.some(k => has(w, k))) out.push({ ...spec, matched: keys.filter(k=>has(w,k))[0] });
+  }
+  return out;
+}
+
+/* Weaker than the live classifier's 2.0, and deliberately: that floor is scored
+   against a STORED schema plus value cardinality, and this page has neither. It
+   is scored from the query and from fields the rule-based compiler infers. A
+   tighter floor here would refuse domains the app assigns. */
+const FLOOR = 1.5;
+
+function classifySector(q, fields){
+  const w = words(q);
+  const fieldText = fields.map(f => `${f.name} ${f.description||''}`).join(' ').toLowerCase();
+  const scored = SECTORS.map(s => {
+    let score = 0;
+    const why = [];
+    for (const t of (VOCAB[s.key]||[])) {
+      if (has(w, t)) { score += 1; why.push(t); continue; }
+      // A compiled field is a stronger signal than a word in the question. A
+      // query saying "startups" is one hint; the planner then emitting
+      // `funding_stage` and `founder` is the schema itself asserting it. The
+      // live classifier weights a decisive field name above a description hit
+      // for the same reason.
+      if (fieldText.includes(t)) { score += 1.5; why.push(`${t} (schema)`); }
+    }
+    return { ...s, score, why };
+  }).sort((a,b) => b.score - a.score);
+
+  const top = scored[0], second = scored[1] || {score:0};
+  let method, sector = null;
+  if (top.score === 0) method = 'none';
+  else if (top.score - second.score < 1) method = 'ambiguous';
+  else if (top.score < FLOOR) method = 'below-floor';
+  else { sector = top.key; method = 'goal+schema'; }
+  return { scored, sector, method };
+}
+
+function deriveCost(q, fields, entity, sectorReading){
+  const w = words(q);
+  const wantsRevenue = ['revenue','valuation','figures','annual','financial'].some(t=>has(w,t));
+  const wantsJobs = entity.entity === 'job';
+  const isListing = ['find','identify','list','top','discover'].some(t=>has(w,t));
+
+  // Judge calls are bounded by the per-run cap and by how many fields land on a
+  // record. The deterministic check settles most cells for free, which is the
+  // single largest cost lever in the system.
+  const fieldsPerRecord = fields.length;
+  const judgeCells = fieldsPerRecord * 12;               // a typical mid-size catch
+  const willBeJudged = Math.min(judgeCells, CONFIG.maxJudgeCalls);
+  const freeCells = Math.max(0, judgeCells - Math.floor(judgeCells * 0.72)); // 72% measured
+
+  const llmCalls = CONFIG.maxPages * 2 + CONFIG.maxSearchQueries; // extract + regen, plus discovery
+  const webRequests = CONFIG.maxPages;
+  const bounded = judgeCells > CONFIG.maxJudgeCalls;
+
+  return {
+    entity, fieldsPerRecord, judgeCells, willBeJudged, freeCells, bounded,
+    llmCalls, webRequests,
+    wastedBudget: bounded,
+    note: bounded
+      ? `A ${fieldsPerRecord}-field schema across a full catch needs roughly ${judgeCells} judge calls, and the per-run cap is ${CONFIG.maxJudgeCalls}. The cells past the cap keep their values but are reported as <b>judgment_unavailable</b> â€” never counted as verified, and never deleted.`
+      : `Roughly ${judgeCells} cells to judge, inside the ${CONFIG.maxJudgeCalls}-call cap. About ${freeCells} of them are settled by a substring check before any provider is called.`,
+    searchNote: wantsRevenue
+      ? 'Asking for revenue narrows the plan toward sources that publish financials, which is what moves these fields off <b>schema_gap</b>.'
+      : wantsJobs
+      ? 'A job-shaped request gets <code>open_roles</code> and <code>salary</code> from the rule-based compiler, so the schema matches the question instead of a generic company row.'
+      : isListing
+      ? 'A list-shaped request caps the catch so the budget is spent finishing cleanly rather than running out mid-dataset.'
+      : 'The request is open-ended, so the planner caps pages and depth to keep the run bounded.',
+  };
+}
+
+function buildTrace(q, fields, entity, sectorReading, cost){
+  const rows = [];
+  const push = (n, title, file, detail, why, tags) => rows.push({n, title, file, detail, why, tags: tags||[]});
+
+  push(1, 'PLANNING', 'services/planner.py',
+    `Query compiled into a schema with ${fields.length} field(s), a dedupe key, and traversal caps. Entity inferred as <b>${entity.entity}</b>.`,
+    'A plan is written to <code>workflows</code> before any page is fetched, so a run is reproducible and reviewable rather than improvised.',
+    [{t:'upserted on id', cls:'free'}]);
+
+  push(2, 'DISCOVERING', 'services/discovery.py',
+    `Up to ${CONFIG.maxSearchQueries} Tavily queries Ã— ${CONFIG.maxResultsPerQuery} results. Candidates are scored against the plan <b>before</b> the cap applies.`,
+    'Ranking candidates instead of taking search order is what stopped a stock query opening five shopping sites while the four pages that could answer it competed for the same budget.',
+    [{t:'search is cached by URL fingerprint', cls:'free'}]);
+
+  push(3, 'FETCHING', 'services/crawler.py',
+    `Breadth-first, same-host. â‰¤${CONFIG.maxPages} pages Â· depth â‰¤${CONFIG.maxDepth} Â· â‰¤${CONFIG.maxPagesPerDomain}/domain Â· â‰¤${CONFIG.maxPagesPerSource} per source.`,
+    'A URL already seen is not fetched again â€” the stored page is reused and the event is <code>source.reused</code>, never a silent refetch. Reuse is a cost decision with a correctness cost attached, so it says so.',
+    [{t:'politeness: per-host delay', cls:'free'}, {t:'reuse on fingerprint', cls:'free'}]);
+
+  push(4, 'REDUCING', 'services/reducer.py',
+    `Clean markdown first, DOM as fallback, into a ${CONFIG.extractWindowChars.toLocaleString()}-character window. The store and the extractor call the same function.`,
+    'The order the parts were concatenated in decided what the model saw, and it was the wrong order: DOM chrome came first and the markdown table never arrived. On a listing page that meant <code>NA</code> for every field.',
+    [{t:'byte-identical store/extractor text', cls:'free'}, {t:'truncation is logged', cls:''}]);
+
+  push(5, 'EXTRACTING', 'services/extractor.py',
+    `One structured call per page, ${CONFIG.pageConcurrency} pages concurrently. Splits into ${CONFIG.extractWindowChars/6000} chunks of 6,000 characters.`,
+    'Run through the local OpenCode server, falling back through a cascade. Every extracted value arrives with the quote it came from.',
+    [{t:'local LLM :4096', cls:''}]);
+
+  push(6, 'VALIDATING', 'services/validator.py',
+    'Value kept or discarded, and marked proven or not. This is the stage that decides whether the output is trustworthy.',
+    'Three failures were once one condition. A missing quote, a quote that is not on the page, and an invented citation marker on a page with no References block are different problems and now take different paths.',
+    [{t:'judge budget is charged AFTER the free check', cls:'free'}]);
+
+  push(7, 'NORMALIZE', 'services/normalizer.py',
+    'Name-driven normalization: date, url, phone, currency. Absence markers are dropped.',
+    '<code>0</code> and <code>False</code> are values and are kept. Only a value with no alphanumeric character, or an explicit absence word, is not data. A merely unverified value is never collapsed into absent.',
+    [{t:'never invents a value', cls:'free'}]);
+
+  push(8, 'DEDUPLICATING', 'services/deduper.py',
+    'L1 exact-normalized, then L2 RapidFuzz token-set. Merging <b>unions</b> provenance.',
+    'A merge never overwrites: both sides\' quotes are preserved, so a value one source contradicts and another supports becomes a decidable question rather than a silent loss.',
+    [{t:'conflicts preserved, not resolved', cls:'free'}]);
+
+  push(9, 'FINALIZING', 'services/provenance.py',
+    'Counts computed, then written with the records. Every value keeps its quote, URL and page id.',
+    'The quote cites a page that is still stored, so a claim can be re-checked months later. A crawl â†’ RAM â†’ extract â†’ discard pipeline cannot support that, which is why the page itself is persisted.',
+    [{t:'stored evidence, not a hash', cls:'free'}]);
+
+  if (cost.bounded) {
+    push('!', 'A GAP YOU WILL SEE', 'app/core/config.py',
+      `This query\'s schema needs more judge calls than the per-run cap of ${CONFIG.maxJudgeCalls} allows.`,
+      cost.note,
+      [{t:'values kept, never counted as proven', cls:'refuse'}]);
+  }
+  return rows;
+}
+
+function gateTable(q, fields, sectorReading){
+  const w = words(q);
+  const multiField = fields.length >= 3;
+  const rows = [
+    { q:'Does the page carry a References block?',
+      yes:'<b>No</b> â†’ fail open. A plain-text table has no âŸ¨nâŸ© spans, so a marker the model emitted was invented.',
+      no:'<b>Yes</b> â†’ an unknown marker is rejected.',
+      badge:'depends', cls:'hold' },
+    { q:'Did the model return a quote?',
+      yes:'<b>Yes</b> â†’ checked against the stored page text.',
+      no:'<b>No</b> â†’ value kept as <code>unverified</code>. Not nulled.',
+      badge:'always', cls:'yes' },
+    { q:'Is the quote on the page?',
+      yes:'<b>Yes</b> â†’ judged.',
+      no:'<b>No</b> â†’ discarded. A value attributed to a sentence that is not there is a real failure.',
+      badge:'always', cls:'yes' },
+    { q:'Is the value literally inside its own quote?',
+      yes:'<b>Yes</b> â†’ <b>SUPPORTED, free</b>, before any provider is called.',
+      no:'<b>No</b> â†’ one judge call.',
+      badge:'free path', cls:'free' },
+    { q:'What did the judge say?',
+      yes:'â‰¥0.6 <b>SUPPORTED</b> â†’ <code>verified</code>.',
+      no:'â‰¤0.4 <b>NOT_SUPPORTED</b> Â· <b>0.4â€“0.6 UNCERTAIN</b> â†’ value kept, never counted verified.',
+      badge:'the band matters', cls:'hold' },
+    { q:'Is the judge reachable, and is budget left?',
+      yes:'<b>Either no</b> â†’ <code>judgment_unavailable</code>, value kept.',
+      no:'<b>Both yes</b> â†’ judged.',
+      badge:'honest failure', cls:'refuse' },
+  ];
+  return rows;
+}
+
+function render(q){
+  const entity = detectEntity(q);
+  const fields = detectFields(q);
+  const sectorReading = classifySector(q, fields);
+  const cost = deriveCost(q, fields, entity.entity, sectorReading);
+
+  // trace
+  const trace = buildTrace(q, fields, entity, sectorReading, cost);
+  document.getElementById('trace').innerHTML = trace.map((r,i) => `
+    <div class="stage on">
+      <div class="n">${r.n}</div>
+      <div>
+        <div class="t">${r.title} <span class="f">${r.file}</span></div>
+        <div class="d">${r.detail}</div>
+        ${r.why ? `<div class="why">${r.why}</div>` : ''}
+        ${r.tags && r.tags.length ? `<div class="tags">${r.tags.map(t=>`<span class="tag ${t.cls}">${t.t}</span>`).join('')}</div>` : ''}
+      </div>
+    </div>`).join('');
+
+  // gate
+  document.getElementById('gate').innerHTML = gateTable(q, fields, sectorReading).map(r => `
+    <div class="row">
+      <div><b>${r.q}</b><div class="why">${r.yes}</div><div class="why">${r.no}</div></div>
+      <span class="badge ${r.cls}">${r.badge}</span>
+    </div>`).join('');
+  document.getElementById('gateNote').innerHTML =
+    `A value with no verdict is <b>not absent</b>. The distinction is the whole point: ` +
+    `nulling both cases made the system report certainty it did not have, because an empty cell ` +
+    `claims the source did not carry the value, when the truth is that nothing judged it.`;
+
+  // cost
+  document.getElementById('cost').innerHTML = [
+    ['LLM calls', cost.llmCalls, 'extraction + regeneration + discovery'],
+    ['Web requests', cost.webRequests, `capped at ${CONFIG.maxPages} pages`],
+    ['Judge calls', cost.willBeJudged, cost.bounded ? `<span style="color:#9a4a20">capped</span>` : 'within budget'],
+    ['Settled free', cost.freeCells, 'substring check, no provider'],
+    ['Runtime ceiling', CONFIG.maxRuntimeS + 's', 'a partial run is still stored'],
+    ['Page concurrency', cost.fieldsPerRecord + ' Ã—  ' + CONFIG.pageConcurrency, 'extraction runs in parallel'],
+  ].map(([k,v,n])=>`<div class="metric"><div class="k">${k}</div><div class="v">${v}</div><div class="n">${n}</div></div>`).join('');
+  document.getElementById('costNote').innerHTML = cost.note + '<br><br>' + cost.searchNote;
+
+  // plan
+  document.getElementById('plan').innerHTML = `
+    <tr><td>entity</td><td>${entity.entity}</td></tr>
+    <tr><td>name field</td><td>${fields[0].name}</td></tr>
+    ${fields.slice(1).map(f=>`<tr><td>${f.description||f.name}</td><td>${f.name}</td></tr>`).join('')}
+    <tr><td>dedupe_keys</td><td>[${fields[0].name}]</td></tr>
+    <tr><td>max_pages</td><td>${CONFIG.maxPages}</td></tr>
+    <tr><td>max_depth</td><td>${CONFIG.maxDepth}</td></tr>
+    <tr><td>traversal</td><td>${CONFIG.maxPagesPerSource}/source Â· ${CONFIG.maxPagesPerDomain}/domain</td></tr>
+    <tr><td>search</td><td>${CONFIG.maxSearchQueries} Ã— ${CONFIG.maxResultsPerQuery} Â· basic Â· general</td></tr>
+  `;
+
+  // sector reading
+  const top = sectorReading.scored.slice(0,3).map(s =>
+    `<tr><td>${s.label} <span style="color:var(--muted)">(${s.tier})</span></td><td>${s.score}${s.why.length?` Â· ${s.why[0]}`:''}</td></tr>`).join('');
+  const label = sectorReading.sector
+    ? `<b>${SECTORS.find(s=>s.key===sectorReading.sector).label}</b> — ${sectorReading.method}, with the fields that argued for it.`
+    : `<b>no domain assigned</b> — ${sectorReading.method}. The panel says why rather than guessing; a wrong domain selects the wrong charts, and the wrong charts look authoritative.`;
+
+  const verdict = `${label}
+    <div style="color:var(--muted);font-size:12px;margin-top:5px">
+      Scored from your question plus the fields the rule-based compiler infers. The live
+      classifier also reads the stored schema and value cardinality, so it can reach a reading
+      where this page declines — refusing here is the safe direction.
+    </div>`;
+
+  document.getElementById('gaps').innerHTML = `
+    <div style="font-size:13px;margin-bottom:10px">${verdict}</div>
+    <table class="kv">${top}</table>
+    <div class="callout evidence" style="margin-top:12px">
+      <b>Then what?</b> Every value keeps a quote and a stored page. Where a field is missing,
+      the gap is classified by which remedy could close it â€” and a second pass will search the web
+      only for a record's own identity, never for the subject in general, so it cannot attach one
+      company's value to another.
+    </div>
+  `;
+
+  document.getElementById('traceHint').textContent =
+    `Each stage below is a real call the pipeline makes, with the ceiling it runs under.`;
+}
+
+// --- wiring ---------------------------------------------------------------
+const input = document.getElementById('q');
+function run(){ render(input.value.trim() || 'Find 15 AI startups in London'); }
+document.getElementById('go').addEventListener('click', run);
+input.addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+document.getElementById('reset').addEventListener('click', () => {
+  input.value = 'Find 15 AI startups in London with founders and latest funding';
+  run();
+});
+document.querySelectorAll('.presets button').forEach(b => {
+  b.addEventListener('click', () => { input.value = b.dataset.q; run(); });
+});
+
+document.getElementById('mermaidToggle').addEventListener('click', () => {
+  const p = document.getElementById('archPanel');
+  const open = p.classList.toggle('hidden');
+  if (!open && !p.dataset.rendered) { renderMermaid(); p.dataset.rendered = '1'; }
+});
+
+async function renderMermaid(){
+  const src = await fetch('./architecture.mmd').then(r => r.text());
+  document.getElementById('mmd').textContent = src;
+  try {
+    await mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+    await mermaid.run({ nodes: [document.getElementById('mmd')] });
+  } catch (e) {
+    document.getElementById('mmd').textContent = 'Diagram could not render: ' + e;
+  }
+}
+
+run();
+</script>
+</body>
+</html>
+

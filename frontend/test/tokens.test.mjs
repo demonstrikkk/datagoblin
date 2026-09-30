@@ -28,7 +28,11 @@ const EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.css']);
 /* Tokens that are lengths, easings and shadows, not colours. Using one of these
    as a colour is a different mistake and this check does not claim to catch it. */
 const NOT_A_COLOUR = new Set([
-  'e-swift',
+    // A data-URI background tile, not an RGB triplet. `background: var(--dither-tile)`
+    // is a url() image; wrapping it in rgb() would be nonsense, and the guard
+    // cannot tell the two apart on the line alone.
+    'dither-tile',
+    'e-swift',
   'e-spring',
   'e-exit',
   'dur-1',

@@ -60,8 +60,12 @@ export function Spinner({ className = '' }) {
 }
 
 export function Skeleton({ className = '', style }) {
-  return <div className={`skeleton ${className}`} style={style} aria-hidden="true" />;
-}
+    // `dither`, not a gradient sweep: the placeholder is a field of dots with a
+    // denser band passing through it, so brightness changes through dot density
+    // rather than opacity. It reads as a printhead crossing paper, and it is
+    // never a flat block of nothing.
+    return <div className={`dither ${className}`} style={style} aria-hidden="true" />;
+  }
 
 export function SkeletonLines({ n = 3, className = '' }) {
   const widths = ['100%', '92%', '76%', '96%', '84%', '68%'];

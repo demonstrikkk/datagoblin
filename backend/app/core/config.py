@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     # budget however much was already done. Kept low deliberately: the free tier
     # is rate limited, and the transport retries 429s, but inviting a storm to
     # save wall time is a bad trade.
-    EXTRACT_PAGE_CONCURRENCY: int = Field(default=3, ge=1, le=8)
+    EXTRACT_PAGE_CONCURRENCY: int = Field(default=6, ge=1, le=8)
     # Hard ceiling on judge calls per run. Verification asks a judge about every
     # field of every extracted record, and that count is a function of how much
     # the extractor found: a live run reached 728 records, which is thousands of
