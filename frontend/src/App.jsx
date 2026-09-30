@@ -5,6 +5,7 @@ import { InspectorProvider } from './lib/inspector.jsx';
 import { ErrorNote } from './components/ui.jsx';
 
 const Collect = lazy(() => import('./pages/Collect.jsx'));
+const Landing = lazy(() => import('./pages/Landing.jsx'));
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
 const Runs = lazy(() => import('./pages/Runs.jsx'));
 const RunPage = lazy(() => import('./pages/RunPage.jsx'));
@@ -98,6 +99,9 @@ export default function App() {
                 <Route path="intel" element={<Intel />} />
                 <Route path="*" element={<NotFound />} />
               </Route>
+              {/* The landing surface sits outside the operator shell: it is a
+                  full-bleed page, not a view inside the workspace frame. */}
+              <Route path="/welcome" element={<Landing />} />
             </Routes>
           </Suspense>
         </Boundary>

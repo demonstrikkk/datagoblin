@@ -1,0 +1,167 @@
+{
+ "_provenance": {
+  "run_id": "0ad4935d-da8d-4d72-89bc-33c0a79c193a",
+  "prompt": "find the top 8 companies of india that have got a valuation of 100 crore in the financial year 2024-2025",
+  "status": "COMPLETED",
+  "run_records": 0,
+  "dataset_id": "1534a92f-13fe-4cb8-9a78-42e97ebf85ea",
+  "page_url": "https://en.wikipedia.org/wiki/List_of_largest_companies_in_India",
+  "content_hash": "e6fcacf9b28b0d2dbc0a4ae06b6e8499aceb77515fa86612350589d9ba477e48",
+  "markdown_chars": 20989,
+  "refetched_on": "2026-09-30",
+  "reduced_by": "backend/app/services/reducer.py :: page_evidence_text()",
+"records_on_disk": 123,
+   "records_in_job": 123,
+   "credits_used": 33,
+   "pages_attempted": 12,
+   "pages_stored": 11,
+   "pages_failed": 0,
+   "fields_total": 369,
+  "status_tally": {
+   "verified": 196,
+   "unverified": 173
+  },
+  "records_with_null_valuation": 73,
+  "cited_quotes_today": 250,
+  "quotes_resolving_today": 195
+ },
+ "rows": [
+  {
+   "company": {
+    "value": "Reliance Industries Limited",
+    "status": "verified",
+    "quote": "Reliance Industries Limited",
+    "offsets": [
+     1025,
+     1052
+    ]
+   },
+   "valuation": {
+    "value": "997,795",
+    "status": "verified",
+    "quote": "997,795",
+    "offsets": [
+     7236,
+     7243
+    ]
+   }
+  },
+  {
+   "company": {
+    "value": "Life Insurance Corporation",
+    "status": "verified",
+    "quote": "Life Insurance Corporation",
+    "offsets": [
+     1274,
+     1300
+    ]
+   },
+   "valuation": {
+    "value": "893,465",
+    "status": "verified",
+    "quote": "893,465",
+    "offsets": [
+     7320,
+     7327
+    ]
+   }
+  },
+  {
+   "company": {
+    "value": "Indian Oil Corporation",
+    "status": "verified",
+    "quote": "Indian Oil Corporation",
+    "offsets": [
+     1541,
+     1563
+    ]
+   },
+   "valuation": {
+    "value": "766,008",
+    "status": "verified",
+    "quote": "766,008",
+    "offsets": [
+     7405,
+     7412
+    ]
+   }
+  },
+  {
+   "company": {
+    "value": "Oil and Natural Gas Corporation",
+    "status": "verified",
+    "quote": "Oil and Natural Gas Corporation",
+    "offsets": [
+     1441,
+     1472
+    ]
+   },
+   "valuation": {
+    "value": "624,805",
+    "status": "verified",
+    "quote": "624,805",
+    "offsets": [
+     7581,
+     7588
+    ]
+   }
+  },
+  {
+   "company": {
+    "value": "State Bank of India",
+    "status": "verified",
+    "quote": "State Bank of India",
+    "offsets": [
+     1121,
+     1140
+    ]
+   },
+   "valuation": {
+    "value": "663,343",
+    "status": "verified",
+    "quote": "663,343",
+    "offsets": [
+     7486,
+     7493
+    ]
+   }
+  },
+  {
+   "company": {
+    "value": "HDFC Bank",
+    "status": "verified",
+    "quote": "HDFC Bank",
+    "offsets": [
+     1202,
+     1211
+    ]
+   },
+   "valuation": {
+    "value": "470,916",
+    "status": "verified",
+    "quote": "470,916",
+    "offsets": [
+     7652,
+     7659
+    ]
+   }
+  },
+  {
+   "company": {
+    "value": "ICICI Bank",
+    "status": "verified",
+    "quote": "ICICI Bank",
+    "offsets": [
+     1368,
+     1378
+    ]
+   },
+   "valuation": {
+    "value": null,
+    "status": "unverified",
+    "quote": "",
+    "offsets": null
+   }
+  }
+ ]
+}
