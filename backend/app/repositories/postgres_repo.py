@@ -1,4 +1,4 @@
-"""Postgres repository — the real persistence substrate, over psycopg 3.
+﻿"""Postgres repository â€” the real persistence substrate, over psycopg 3.
 
 Why psycopg and not the REST adapter: `DATABASE_URL` already carried working
 credentials and the migrations are already Postgres DDL, but nothing in
@@ -9,7 +9,7 @@ new secret and no second schema dialect.
 Why this matters for correctness, not just tidiness:
 
   * `update_run` exists. The previous adapters had no way to advance a run's
-    status, so status was written exactly twice — at creation and at finalize.
+    status, so status was written exactly twice â€” at creation and at finalize.
     A run that died on the runtime budget therefore read `DISCOVERING`
     forever, indistinguishable from a live one.
   * `upsert_page` stores the page. Pages used to be fetched, reduced in RAM,
@@ -97,7 +97,7 @@ class PostgresRepo:
 
         Every operation used to open its own connection. A run does ~200+
         separate repository writes, and against a remote server each of those
-        pays a full TLS handshake — connection setup, not query execution, was
+        pays a full TLS handshake â€” connection setup, not query execution, was
         the dominant cost of persisting a run. The pool keeps a small number of
         warm connections instead.
 
@@ -133,7 +133,7 @@ class PostgresRepo:
                                 # with `DuplicatePreparedStatement: prepared
                                 # statement "_pg3_0" already exists`. That
                                 # surfaced as intermittent 503s reading pages,
-                                # and it is not a race — it recurs on any pool
+                                # and it is not a race â€” it recurs on any pool
                                 # that serves more than one caller.
                                 # prepare_threshold=None turns the cache off.
                                 # The cost is a re-parse per execution; the
@@ -276,7 +276,7 @@ class PostgresRepo:
         """The stored page for `url` from any run, newest first.
 
         `get_pages` is deliberately run-scoped and omits raw_html, so neither
-        could answer "have we already fetched this exact URL?" across runs —
+        could answer "have we already fetched this exact URL?" across runs â€”
         which is the question reuse asks.
 
         Newest first: if a page was re-fetched at some point, the freshest copy
@@ -438,7 +438,7 @@ class PostgresRepo:
         `field_coverage(recs, row.get("schema") or [])` needs it. Without the
         schema the coverage matrix can only see fields that happen to appear in
         at least one record, so a field the plan asked for and no page carried
-        is invisible here while `/coverage` — which does get the schema — lists
+        is invisible here while `/coverage` â€” which does get the schema â€” lists
         it as never extracted. The dashboard then under-reports its own "never
         filled" column and disagrees with the dataset page, which is the one
         thing its own docstring says cannot happen.
@@ -497,7 +497,7 @@ class PostgresRepo:
             cur.execute("SET LOCAL statement_timeout = '15s'")
             # No params unless there are some. Passing an empty tuple still
             # switches psycopg into placeholder interpolation, and it treats
-            # every `%` in the statement as one — so a perfectly ordinary
+            # every `%` in the statement as one â€” so a perfectly ordinary
             # `ILIKE '%acme%'` failed with "only '%s', '%b', '%t' are allowed
             # as placeholders". The model's SQL carries no parameters, and a
             # literal `%` in a search pattern has to survive as a literal.
@@ -510,7 +510,7 @@ class PostgresRepo:
         return self._run("run_readonly_sql", _fn) or []
 
     def get_dataset_schema(self, dataset_id: str) -> list | None:
-        """Just the declared schema — no record load.
+        """Just the declared schema â€” no record load.
 
         The coverage and conflict views need the schema (a field can be declared
         and never extracted, which is the whole point of showing it) but not the
@@ -522,6 +522,127 @@ class PostgresRepo:
                           "SELECT schema_json FROM datasets WHERE id=%s",
                           (dataset_id,))
         return (rows[0].get("schema_json") or []) if rows else None
+
+    def coverage_aggregates(self, dataset_ids: list[str]) -> dict:
+        """Per dataset and per field, the verdict counts â€” computed in the database.
+
+        The dashboard used to answer this by shipping up to `RECORD_SAMPLE`
+        `row_json` blobs per dataset and counting them in Python. That is 25
+        round trips carrying megabytes of JSON to produce a dozen integers each,
+        measured at 23s cold. Nothing about the answer needs the documents in the
+        process; only the shape of the evidence does, and that lives at known
+        paths inside each document.
+
+        So the counting happens where the documents already are. `jsonb_each`
+        over `row_json -> 'fields'` yields one row per (record, field), and two
+        grouped passes turn that into per-field counts and then per-dataset
+        totals â€” including `empty_fields` and `partial_fields`, which need the
+        per-field numbers and are therefore not expressible as a single sum.
+
+        Two shapes have to be handled or the query errors rather than
+        under-reports:
+
+        * A field whose value is a plain scalar, stored before provenance
+          existed. It is a value with no verdict, so it counts as `unverified`.
+        * A `fields` member that is JSON `null`, which `-> 'value'` cannot reach.
+          Treated as absent, matching `coverage._cell_value`.
+
+        Schema fields that appear in no record are added from `datasets.schema_json`
+        with `present = 0`, because "declared and never extracted" is the gap the
+        coverage view exists to show and would otherwise disappear from an
+        aggregate that only looks at records.
+
+        Returns `{dataset_id: {"records": n, "fields": {name: {...}}}}`. A dataset
+        with no records is present with `records: 0` and its declared fields at
+        zero, so the caller does not have to distinguish "no records" from
+        "unreadable".
+        """
+        ids = [str(d) for d in (dataset_ids or []) if d]
+        if not ids:
+            return {}
+
+        rows = self._rows(
+            "coverage_aggregates",
+            """
+            WITH declared AS (
+              SELECT d.id AS dataset_id,
+                     COALESCE(f->>'name', f->>'field') AS field
+                FROM datasets d,
+                     LATERAL jsonb_array_elements(
+                       CASE WHEN jsonb_typeof(d.schema_json) = 'array'
+                            THEN d.schema_json ELSE '[]'::jsonb END) AS f
+            ),
+            cells AS (
+              SELECT r.dataset_id,
+                     e.key AS field,
+                     e.value AS cell,
+                     -- A scalar predates provenance: a value with no verdict.
+                     jsonb_typeof(e.value) <> 'object' AS scalar,
+                     NULLIF(e.value->>'value', '') IS NULL
+                       AND jsonb_typeof(e.value) = 'object' AS empty
+                FROM dataset_records r,
+                     LATERAL jsonb_each(
+                       CASE WHEN jsonb_typeof(r.row_json -> 'fields') = 'object'
+                            THEN r.row_json -> 'fields' ELSE '{}'::jsonb END) AS e
+            ),
+            per_field AS (
+              SELECT dataset_id, field,
+                     count(*) AS present,
+                     count(*) FILTER (WHERE NOT scalar
+                                        AND lower(COALESCE(cell->>'verification_status',''))
+                                            = 'verified') AS verified,
+                     count(*) FILTER (WHERE scalar OR lower(
+                                        COALESCE(cell->>'verification_status',''))
+                                        IN ('unverified','not_proven')) AS unverified,
+                     count(*) FILTER (WHERE lower(
+                                        COALESCE(cell->>'verification_status',''))
+                                        = 'conflicting') AS conflicting
+                FROM cells
+               WHERE NOT empty
+               GROUP BY dataset_id, field
+            ),
+            record_counts AS (
+              SELECT dataset_id, count(*) AS n FROM dataset_records GROUP BY dataset_id
+            ),
+            /* A declared field seen in no record still has to appear, at zero. */
+            filled AS (
+              SELECT dataset_id, field, present, verified, unverified, conflicting
+                FROM per_field
+              UNION ALL
+              SELECT d.dataset_id, d.field, 0, 0, 0, 0
+                FROM declared d
+               WHERE NOT EXISTS (SELECT 1 FROM per_field p
+                                  WHERE p.dataset_id = d.dataset_id
+                                    AND p.field = d.field)
+                 AND d.field IS NOT NULL AND d.field <> ''
+            )
+            SELECT f.dataset_id, f.field, f.present, f.verified, f.unverified,
+                   f.conflicting, COALESCE(r.n, 0) AS records
+              FROM filled f
+              LEFT JOIN record_counts r ON r.dataset_id = f.dataset_id
+             WHERE f.dataset_id = ANY(%s::uuid[])
+            """,
+            (ids,))
+
+        out: dict = {i: {"records": 0, "fields": {}} for i in ids}
+        for row in rows:
+            did = str(row.get("dataset_id") or "")
+            field = str(row.get("field") or "")
+            if not did or not field:
+                continue
+            entry = out.setdefault(did, {"records": 0, "fields": {}})
+            n = int(row.get("records") or 0)
+            entry["records"] = max(entry["records"], n)
+            present = int(row.get("present") or 0)
+            entry["fields"][field] = {
+                "present": present,
+                "missing": max(0, n - present),
+                "records": n,
+                "verified": int(row.get("verified") or 0),
+                "unverified": int(row.get("unverified") or 0),
+                "conflicting": int(row.get("conflicting") or 0),
+            }
+        return out
 
     def get_records(self, dataset_id: str, q: str = "", limit: int = 100,
                     offset: int = 0) -> dict:
@@ -670,7 +791,7 @@ class PostgresRepo:
 
         `raw_html` is deliberately excluded. Measured on this instance, one
         page with its raw_html took 2.7s and the same page without it took
-        0.13s — the HTML is the whole cost and backfill does not need it. The
+        0.13s â€” the HTML is the whole cost and backfill does not need it. The
         `markdown` column *is* the stored evidence text (the crawler writes
         `page_evidence_text(page)` into it), so handing that to the extractor
         reproduces the same string the offsets were computed against. Losing the

@@ -1,4 +1,4 @@
-"""LOCAL DEV adapter — file-backed JSON persistence. EXPLICITLY NOT production.
+﻿"""LOCAL DEV adapter â€” file-backed JSON persistence. EXPLICITLY NOT production.
 
 Used only when Supabase keys are absent (local dev / CI without secrets).
 Every record carries {"_adapter": "local-dev"} so it can never be mistaken
@@ -261,11 +261,45 @@ class LocalRepo:
         return found
 
     def get_dataset_schema(self, dataset_id: str) -> list | None:
-        """Just the declared schema — no record copy. See PostgresRepo."""
+        """Just the declared schema â€” no record copy. See PostgresRepo."""
         for d in self._scan("datasets"):
             if d.get("id") == dataset_id:
                 return d.get("schema", []) or []
         return None
+
+    def coverage_aggregates(self, dataset_ids: list[str]) -> dict:
+        """Same contract as `PostgresRepo.coverage_aggregates`, computed in Python.
+
+        This adapter has no database to aggregate in, so it reads the records and
+        counts them locally. That is slow for the same reason the Postgres version
+        is fast â€” the records have to be in the process â€” but the *numbers* are
+        identical, which is the property the two adapters have to share: the
+        dashboard must not show different figures depending on which one is live.
+
+        Delegated to `coverage.field_coverage` rather than reimplemented, so there
+        is exactly one definition of what `unverified` and `not_proven` add up to
+        and no chance of the two adapters drifting apart on the same data.
+        """
+        from app.services import coverage as coverage_svc
+
+        ids = [str(d) for d in (dataset_ids or []) if d]
+        out: dict = {}
+        for did in ids:
+            row = self.get_dataset_row(did)
+            schema = (row or {}).get("schema") or []
+            recs = list((self.get_records(did, "", 5000, 0) or {}).get("records") or [])
+            matrix = coverage_svc.field_coverage(recs, schema)
+            out[did] = {"records": int(matrix.get("records") or 0), "fields": {}}
+            for f in matrix.get("fields") or []:
+                out[did]["fields"][f["field"]] = {
+                    "present": int(f.get("present") or 0),
+                    "missing": int(f.get("missing") or 0),
+                    "records": int(f.get("records") or 0),
+                    "verified": int(f.get("verified") or 0),
+                    "unverified": int(f.get("unverified") or 0),
+                    "conflicting": int(f.get("conflicting") or 0),
+                }
+        return out
 
     def get_records(self, dataset_id: str, q: str = "", limit: int = 100, offset: int = 0) -> dict:
         ds = self.get_dataset(dataset_id)
