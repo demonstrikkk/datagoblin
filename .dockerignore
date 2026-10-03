@@ -1,0 +1,63 @@
+# Build context for the DATAGOBLIN images. Everything here is either a local
+# dev artifact that would bloat the build context (the venv alone is ~800 MB) or
+# a secret. The context is uploaded to the daemon before any COPY runs, so an
+# unignored .venv costs real time even though it is never copied into a layer.
+#
+# Anchored patterns (/foo) match the repo root only; bare names (foo) match at
+# any depth. Anything the Dockerfile COPYs must stay visible.
+
+# --- secrets: never bake credentials into an image ---
+/.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- git / agent / editor ---
+/.git
+/.gitignore
+/.github
+/.agents
+/.claude
+/.vscode
+/.idea
+
+# --- python local artifacts ---
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/.pytest_cache
+**/.mypy_cache
+**/*.egg-info
+
+# --- node / build artifacts (npm ci and vite build happen inside the image) ---
+**/node_modules
+/frontend/dist
+/frontend/screenshots
+
+# --- run artifacts: regenerable, and may hold scraped data ---
+/.datagoblin-local
+/backend/.datagoblin-local
+/outputs
+
+# --- docs, tests, design and research: not needed to serve the app ---
+/docs
+/design
+/research
+/fixtures
+/inputs
+/prompts
+/skills
+/video
+/scripts
+/*.md
+/backend/tests
+/backend/selectors/*.local.json
+/frontend/e2e
+/frontend/test
+/skills-lock.json
+/start-dev.ps1
+/.pytest_cache
+
+# NOTE: Dockerfile, docker/ and docker-compose.yaml are deliberately NOT
+# ignored - docker/nginx.conf is copied into the web image.

@@ -1,0 +1,154 @@
+# DATAGOBLIN - one-command local setup.
+#
+# Requires Docker Desktop (or Docker Engine + Compose v2.24+).
+#
+#   1. copy .env.example .env      # only if he wants to change keys; optional
+#   2. docker compose up -d --build
+#   3. open http://localhost:8080
+#
+# That is the whole setup. No Python, no Node, no Postgres, no venv on the host.
+# Both images are built from the repo, so there is nothing to download but the
+# two base images and the pip/npm wheels the project already declares.
+#
+# He only needs API keys if he wants a run to actually produce data. The minimum
+# useful set is in .env.example (TAVILY_API_KEY for search, plus one LLM key -
+# GROQ_API_KEY or GEMINI_API_KEY). With no keys at all it still boots and
+# /api/health answers; runs just report that a provider is unconfigured.
+#
+# What is NOT here, on purpose:
+#   * no Postgres by default. PERSISTENCE=local writes JSONL into a named
+#     volume, which is the documented zero-infrastructure mode. A Postgres
+#     service is available behind the `db` profile - see the bottom of this file.
+#   * no opencode container. It is the local model server, it needs its own
+#     auth login, and it is the largest avoidable download. To use it, run
+#     `opencode serve` on the host yourself: OPENCODE_ENABLED is off here and
+#     host.docker.internal is already mapped for exactly that case.
+#   * no Playwright/Chromium. See the header in Dockerfile.
+#
+# Stop / clean up:
+#   docker compose down          # stop, keep data
+#   docker compose down -v       # stop and delete stored data
+#   docker builder prune         # free the build cache (~1-2 GB after a build)
+
+name: datagoblin
+
+services:
+  # ------------------------------------------------------------------ api --
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+      args:
+        # flip to true only if he needs JavaScript pages rendered:
+        #   docker compose build --build-arg INSTALL_BROWSERS=true
+        INSTALL_BROWSERS: ${INSTALL_BROWSERS:-false}
+    image: datagoblin-api:local
+    restart: unless-stopped
+
+    # .env is read here when it exists and skipped when it does not, so the
+    # default configuration works with no .env at all. Note the API reads its
+    # OWN .env too (core/config.py walks up for it) - env_file wins, and both
+    # end up with the same values.
+    env_file:
+      - path: .env
+        required: false
+
+    # Defaults, so an empty .env still yields a working local instance.
+    # Any of these can be overridden in .env.
+    environment:
+      # local = JSONL, no database to install or migrate.
+      # Switch to postgres (with DATABASE_URL set) when a real DB is wanted.
+      PERSISTENCE: ${PERSISTENCE:-local}
+      # The API key gate fails closed: with no API_KEY every request is
+      # refused. This instance is bound to 127.0.0.1 on the host, so an
+      # explicitly open local instance is safe here - and it means the friend
+      # is not asked to paste a key into the UI on first run. Set API_KEY in
+      # .env to require one; the Settings dialog in the app accepts it.
+      ALLOW_UNAUTHENTICATED: ${ALLOW_UNAUTHENTICATED:-true}
+      # Off: nothing serves :4096 inside this container by default.
+      OPENCODE_ENABLED: ${OPENCODE_ENABLED:-false}
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-http://host.docker.internal:4096}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_JSON: ${LOG_JSON:-false}
+      # Overridden below only when the db profile is in play.
+      DATABASE_URL: ${DATABASE_URL:-}
+
+    volumes:
+      # The JSONL store. A fresh named volume inherits the ownership set in
+      # the image, so the non-root user can write it.
+      - datagoblin-data:/app/.datagoblin-local
+
+    # Lets a host-run `opencode serve` be reached from the container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Bound to loopback on purpose: nothing here is exposed to the LAN.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # Caps, so a runaway run cannot take the machine with it.
+    mem_limit: 4g
+    cpus: 4.0
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------------ web --
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    image: datagoblin-web:local
+    restart: unless-stopped
+    depends_on:
+      api:
+        # The proxy returns 502 until the API is genuinely healthy, so waiting
+        # for it means a refresh during startup shows the app, not an error.
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------------- db --
+  # Optional Postgres. Not started by `docker compose up` - it needs the
+  # profile, because the default mode needs no database at all.
+  #
+  #   docker compose --profile db up -d
+  #   docker compose run --rm api python backend/scripts/db_migrate.py
+  #   # then in .env:  PERSISTENCE=postgres
+  #   #                  DATABASE_URL=postgresql://datagoblin:<password>@db:5432/datagoblin
+  #   docker compose up -d
+  #
+  # Get /api/health and confirm it reports {"persistence":{"adapter":"postgres"}}.
+  db:
+    image: postgres:17-alpine
+    profiles: ["db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-datagoblin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-datagoblin}
+      POSTGRES_DB: ${POSTGRES_DB:-datagoblin}
+    volumes:
+      - datagoblin-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-datagoblin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not published. Only the api container needs to reach it, over the
+    # compose network, by service name.
+    mem_limit: 1g
+
+volumes:
+  datagoblin-data:
+  datagoblin-db:

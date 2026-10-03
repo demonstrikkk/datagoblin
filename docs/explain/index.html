@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DataGoblin â€” what actually happens when you type a question</title>
+<link rel="stylesheet" href="./pipeline-motion.css" />
 <style>
   :root {
     --paper: #f6f3ee;
@@ -158,7 +159,6 @@
   table.kv td:first-child { color: var(--muted); width: 44%; }
   table.kv td:last-child { font-family: var(--mono); font-size: 11.5px; }
 
-  .mermaid-wrap { overflow: auto; background: #fff; border: 1px solid var(--rule); border-radius: 12px; padding: 14px; }
   .tabbar { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
   .tabbar button {
     font-family: var(--sans); font-size: 12.5px; padding: 6px 13px; border-radius: 8px;
@@ -167,6 +167,12 @@
   .tabbar button[aria-selected=true] { background: var(--ink); border-color: var(--ink); color: #fff; }
   .hidden { display: none !important; }
   footer { color: var(--muted); font-size: 12px; margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--rule); }
+
+  .vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stage-node .ring-fg, .input-icon .gl { transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -178,7 +184,7 @@
     <div class="sub">Type a question. Watch what the system actually does to answer it.</div>
   </div>
   <div class="spacer"></div>
-  <button id="mermaidToggle" class="ask button ghost" style="margin:0">Full architecture diagram</button>
+  <button id="motionToggle" class="ask button ghost" style="margin:0" aria-expanded="true" aria-controls="archPanel">Hide the run</button>
 </header>
 
 <div class="wrap">
@@ -201,10 +207,47 @@
     </div>
   </section>
 
-  <div id="archPanel" class="panel hidden" style="margin-bottom:20px">
-    <h2>Architecture as executed</h2>
-    <p class="hint">Every node is a real module in the repository. Green is where truth gets decided; red is where the system refuses to guess.</p>
-    <div class="mermaid-wrap"><pre class="mermaid" id="mmd"></pre></div>
+  <div id="archPanel" style="margin-bottom:20px">
+    <div class="stage-shell">
+      <div class="stage-top">
+        <h2>The run, as motion</h2>
+        <span class="sub">Your question, top to bottom. Nothing in the frame is labelled &mdash;
+          the shape and the colour are the explanation.</span>
+        <span class="spacer"></span>
+        <span class="sub" id="motionCounts"></span>
+      </div>
+
+      <div class="stage-frame">
+        <svg id="scene" role="img" aria-labelledby="sceneTitle sceneDesc"></svg>
+        <h2 id="sceneTitle" class="vh">How DataGoblin turns a question into a dataset</h2>
+        <p id="sceneDesc" class="vh">
+          Nine stages run down the centre column, top to bottom: planning, discovering, fetching,
+          reducing, extracting, validating, normalising, deduplicating and finalising. A query enters
+          at the top and travels the column. Tokens that leave the column are values segregated out
+          of the run: green tokens are accepted as proven, red tokens are discarded because their
+          citation is not on the page, amber tokens are kept but undecided and never turn green.
+          Blue cylinders on the right are persisted state, and fill as data lands in them. The small
+          rings at the validating stage mark values settled by a free check with no model call.
+        </p>
+        <p id="stageLive" class="vh" aria-live="polite" aria-atomic="true"></p>
+      </div>
+
+      <div class="transport">
+        <button id="playBtn" aria-pressed="false">Pause</button>
+        <button id="replayBtn">Replay</button>
+        <input id="scrub" type="range" min="0" max="1000" value="0" step="1"
+               aria-label="Scrub the run" />
+        <span class="t" id="clock">00:00</span>
+      </div>
+
+      <div class="key">
+        <span class="k"><span class="sw q"></span>in flight</span>
+        <span class="k"><span class="sw g"></span>proven &mdash; kept</span>
+        <span class="k"><span class="sw r"></span>discarded &mdash; torn citation</span>
+        <span class="k"><span class="sw a"></span>undecided &mdash; kept, never counted proven</span>
+        <span class="k"><span class="sw s"></span>persisted</span>
+      </div>
+    </div>
   </div>
 
   <div class="two">
@@ -258,7 +301,7 @@
   </footer>
 </div>
 
-<script src="./mermaid.min.js"></script>
+<script src="./pipeline-motion.js"></script>
 <script>
 // ---------------------------------------------------------------------------
 // A trace of the real pipeline, driven by the shape of the question.
@@ -621,9 +664,154 @@ function render(q){
     `Each stage below is a real call the pipeline makes, with the ceiling it runs under.`;
 }
 
+
+// --- the motion player ------------------------------------------------------
+//
+// The animation is not decorative and it is not a recording. `buildScene` is a
+// pure function of the shape of the question, driven by the same detectors the
+// panels above use. Change the question and the number of schema chips, records
+// and verdicts changes with it, because the run would.
+
+const STAGE_WORDS = ['Planning', 'Discovering', 'Fetching', 'Reducing', 'Extracting',
+                     'Validating', 'Normalising', 'Deduplicating', 'Finalising'];
+const STAGE_NOTES = [
+  'the question is cut into a fixed schema before any page exists',
+  'candidates are scored against that schema, and the ones that do not match leave before the page budget is spent',
+  'pages are fetched and written down, so they can be re-read later without asking again',
+  'each page is reduced to the text that may be quoted, and the surrounding markup is discarded',
+  'records are extracted, each carrying the sentence it was read from',
+  'the gate: most values are settled for free by checking the value appears inside its own quote, the rest are judged, and the uncertain ones are kept but never counted as proven',
+  'values are aligned to a common shape; alignment never invents a value',
+  'duplicates merge into one, and the pairs that disagree are parked rather than resolved',
+  'what survived is sealed, and the seal reads back to the pages its quotes point at'
+];
+
+const RUN_SECONDS = 16;
+const svg = document.getElementById('scene');
+const playBtn = document.getElementById('playBtn');
+const replayBtn = document.getElementById('replayBtn');
+const scrub = document.getElementById('scrub');
+const clock = document.getElementById('clock');
+const countsOut = document.getElementById('motionCounts');
+const stageLive = document.getElementById('stageLive');
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let lastStage = -1;
+
+function announceStage(t) {
+  const w = player.scene.windows.find(x => t >= x.a && t <= x.b);
+  const i = w ? w.i : -1;
+  if (i === lastStage) return;
+  lastStage = i;
+  stageLive.textContent = i < 0 ? '' :
+    `Stage ${i + 1} of 9. ${STAGE_WORDS[i]}: ${STAGE_NOTES[i]}.`;
+}
+
+function fmt(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+const player = new PipelineMotion.Player(svg, {
+  duration: RUN_SECONDS * 1000,
+  onTime(t) {
+    scrub.value = Math.round(t * 1000);
+    clock.textContent = fmt(t * RUN_SECONDS);
+    announceStage(t);
+  }
+});
+
+function setPlaying(on) {
+  playBtn.textContent = on ? 'Pause' : 'Play';
+  playBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+function buildMotion(q) {
+  const fields = detectFields(q);
+  const entity = detectEntity(q);
+  player.setScene(PipelineMotion.buildScene({
+    fieldCount: fields.length,
+    entity: entity.entity
+  }));
+  const c = player.scene.counts;
+  countsOut.textContent =
+    `${c.planFields} fields · ${c.pages} pages · ${c.records} records · ` +
+    `${c.green} proven · ${c.red} discarded · ${c.amber} undecided`;
+}
+
+playBtn.addEventListener('click', () => {
+  if (player.playing) { player.pause(); setPlaying(false); }
+  else { player.play(); setPlaying(true); }
+});
+
+replayBtn.addEventListener('click', () => {
+  player.t = 0;
+  lastStage = -1;
+  player.play();
+  setPlaying(true);
+});
+
+scrub.addEventListener('input', () => {
+  player.scrub(scrub.value / 1000);
+  setPlaying(false);
+});
+
+document.getElementById('motionToggle').addEventListener('click', (e) => {
+  const panel = document.getElementById('archPanel');
+  const opening = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden');
+  if (opening) {
+    player.play();
+    setPlaying(true);
+    panel.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
+  } else {
+    player.pause();
+    setPlaying(false);
+  }
+  e.currentTarget.setAttribute('aria-expanded', opening ? 'true' : 'false');
+});
+
+// Clicking a stage pins it. Pinned, every other stage's traffic drops to 18% so
+// that stage's own traffic is legible on its own. Clicking again releases it.
+svg.addEventListener('click', (e) => {
+  const node = e.target.closest('.stage-node');
+  if (node) player.holdStage(Number(node.dataset.stage));
+});
+svg.addEventListener('keydown', (e) => {
+  const node = e.target.closest('.stage-node');
+  if (!node) return;
+  const i = Number(node.dataset.stage);
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); player.holdStage(i); }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); player.holdStage(Math.min(8, i + 1)); focusStage(i + 1); }
+  else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); player.holdStage(Math.max(0, i - 1)); focusStage(i - 1); }
+});
+function focusStage(i) {
+  const n = svg.querySelector(`.stage-node[data-stage="${Math.max(0, Math.min(8, i))}"]`);
+  if (n) n.focus();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== ' ' || e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+  e.preventDefault();
+  playBtn.click();
+});
+
 // --- wiring ---------------------------------------------------------------
 const input = document.getElementById('q');
-function run(){ render(input.value.trim() || 'Find 15 AI startups in London'); }
+
+function run() {
+  const q = input.value.trim() || 'Find 15 AI startups in London';
+  render(q);
+  buildMotion(q);
+  if (reduceMotion) {
+    // Autoplay is the point of the panel, so under a reduced-motion preference
+    // it holds on the completed frame instead: the same information, no motion,
+    // and the scrubber and stage pinning still work.
+    player.scrub(1);
+    setPlaying(false);
+  }
+}
+
 document.getElementById('go').addEventListener('click', run);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
 document.getElementById('reset').addEventListener('click', () => {
@@ -634,25 +822,24 @@ document.querySelectorAll('.presets button').forEach(b => {
   b.addEventListener('click', () => { input.value = b.dataset.q; run(); });
 });
 
-document.getElementById('mermaidToggle').addEventListener('click', () => {
-  const p = document.getElementById('archPanel');
-  const open = p.classList.toggle('hidden');
-  if (!open && !p.dataset.rendered) { renderMermaid(); p.dataset.rendered = '1'; }
-});
-
-async function renderMermaid(){
-  const src = await fetch('./architecture.mmd').then(r => r.text());
-  document.getElementById('mmd').textContent = src;
-  try {
-    await mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
-    await mermaid.run({ nodes: [document.getElementById('mmd')] });
-  } catch (e) {
-    document.getElementById('mmd').textContent = 'Diagram could not render: ' + e;
-  }
+// A frame can be linked to. `#t=0.62` opens paused at that moment, which is how
+// you send someone the validating stage instead of the whole run, and how the
+// layout gets checked without waiting sixteen seconds for it.
+function readHash() {
+  const m = /(?:^|[#&])t=([0-9.]+)/.exec(location.hash);
+  return m ? Math.max(0, Math.min(1, parseFloat(m[1]))) : null;
 }
 
 run();
+
+const start = readHash();
+if (start != null) {
+  player.scrub(start);
+  setPlaying(false);
+} else if (!reduceMotion) {
+  player.play();
+  setPlaying(true);
+}
 </script>
 </body>
 </html>
-
