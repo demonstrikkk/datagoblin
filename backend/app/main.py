@@ -54,6 +54,8 @@ from app.services import planner as planner_svc
 # because they inject their own closure, so only the HTTP path exposed it.
 from app.services import politeness as politeness_svc
 from app.services import proposals as proposals_svc
+from app.services import readcache
+from app.services import reputation as reputation_svc
 from app.services import runner as runner_svc
 from app.services import selector_learn as selector_learn_svc
 from app.services import sqlq as sqlq_svc
@@ -370,6 +372,7 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         if ev["type"] in ("run.completed", "run.partial", "run.failed",
                           "run.cancelled"):
             dashboard_svc.invalidate()
+            readcache.invalidate()
         if data:
             if ev["type"] == "run.completed":
                 st.update(status="COMPLETED", dataset_id=data.get("dataset_id"),
@@ -573,8 +576,7 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         Best-effort by construction: an unreadable reputation table returns
         `{}`, and every consumer treats an empty prior as "cold start", which is
         the behaviour a new instance already has.
-        """
-        from app.services import reputation as reputation_svc
+"""
         try:
             rows = await asyncio.to_thread(r.get_source_reputation)
         except Exception as e:  # noqa: BLE001 (a cold start is a valid state)
@@ -796,6 +798,7 @@ async def delete_dataset(did: str, body: dict,
     if not deleted:
         raise not_found("dataset", did)
     dashboard_svc.invalidate()
+    readcache.invalidate()
     return {"data": {"dataset_id": did, "deleted": True},
             "error": None, "meta": {"correlation_id": cid}}
 
@@ -959,6 +962,7 @@ async def backfill_run(did: str, body: dict, cid: str = Depends(correlation_id))
         raise validation(str(exc))
     if apply_flag and out.get("written"):
         dashboard_svc.invalidate()
+        readcache.invalidate()
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -977,30 +981,50 @@ async def list_dataset_gaps(did: str, cid: str = Depends(correlation_id)) -> dic
     the obvious UI from spending a search on a question the run already answered.
     """
     r = repo()
+    # Existence before the cache, so an unknown id is a 404 rather than an
+    # empty answer that then gets cached for the TTL.
     if await asyncio.to_thread(r.get_dataset_schema, did) is None:
         raise not_found("dataset", did)
-    rows = (await asyncio.to_thread(r.get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
-    matrix = coverage_svc.field_coverage(
-        rows, await asyncio.to_thread(r.get_dataset_schema, did))
-    can_track = gaps_svc.tracked(r)
-    try:
-        gap_rows = await asyncio.to_thread(gaps_svc.sync, r, did, matrix) \
-            if can_track else gaps_svc.derive(matrix)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("gap sync failed for dataset %s: %s", did, exc)
-        can_track = False
-        gap_rows = gaps_svc.derive(matrix)
 
-    for row in gap_rows:
-        nxt = gaps_svc.next_phase(row) if can_track else None
-        row["next_phase"] = nxt
-        row["attemptable"] = bool(nxt)
-        allowed, why = (gaps_svc.can_attempt(row, phase=nxt) if nxt else (False, ""))
-        row["blocked_reason"] = "" if allowed else (why or "nothing left to try")
+    def _compute() -> dict:
+        """The whole derived read, as one synchronous unit.
 
-    return {"data": {"dataset_id": did, "gaps": gap_rows,
-                     "summary": gaps_svc.summary(gap_rows), "tracked": can_track},
-            "error": None, "meta": {"correlation_id": cid}}
+        Wrapped so it can be cached and single-flighted as a unit. Measured on
+        the live dataset this endpoint costs ~2.7s, and `SELECT 1` against this
+        database costs 177ms — six statements at that floor. The dataset page
+        opens several tabs at once, so the same answer was being recomputed once
+        per tab, and the identical cold compute was issued once per tab
+        simultaneously.
+        """
+        schema = r.get_dataset_schema(did)
+        rows = r.get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+        matrix = coverage_svc.field_coverage(rows, schema)
+        tracked = gaps_svc.tracked(r)
+        try:
+            gap_rows = gaps_svc.sync(r, did, matrix) if tracked \
+                else gaps_svc.derive(matrix)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("gap sync failed for dataset %s: %s", did, exc)
+            tracked = False
+            gap_rows = gaps_svc.derive(matrix)
+        for row in gap_rows:
+            nxt = gaps_svc.next_phase(row) if tracked else None
+            row["next_phase"] = nxt
+            row["attemptable"] = bool(nxt)
+            allowed, why = (gaps_svc.can_attempt(row, phase=nxt)
+                            if nxt else (False, ""))
+            row["blocked_reason"] = "" if allowed else (why or "nothing left to try")
+        return {"dataset_id": did, "gaps": gap_rows,
+                "summary": gaps_svc.summary(gap_rows), "tracked": tracked}
+
+    data, hit, shared = await asyncio.to_thread(
+        readcache.cached, f"gaps:{did}", _compute)
+    if shared:
+        log.info("gap read waited on an identical compute in flight",
+                 extra={"data": {"dataset_id": did}})
+    return {"data": data,
+            "error": None,
+            "meta": {"correlation_id": cid, "cached": hit}}
 
 
 @app.post("/api/datasets/{did}/gaps/fill", dependencies=[Depends(require_api_key)])
@@ -1085,6 +1109,7 @@ async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_
 
     if apply_flag and int(out.get("report", {}).get("written") or 0):
         dashboard_svc.invalidate()
+        readcache.invalidate()
         if gaps_svc.tracked(r):
             await asyncio.to_thread(r.upsert_gap, did, field, out["gap"])
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
@@ -1137,6 +1162,7 @@ async def rejudge_dataset(did: str, body: dict, cid: str = Depends(correlation_i
 
     if apply_flag and out.get("written"):
         dashboard_svc.invalidate()
+        readcache.invalidate()
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -1160,8 +1186,15 @@ async def dataset_profile(did: str,
     r = repo()
     if await asyncio.to_thread(r.get_dataset_schema, did) is None:
         raise not_found("dataset", did)
-    out = await asyncio.to_thread(profile_svc.profile, r, did, None, limit)
-    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+    # `limit` is part of the key, not an afterthought: it changes the answer, so
+    # keying on `did` alone would serve a 10-record profile to a caller that
+    # asked for 5000. Cached on `limit` only, not on `offset` — this route has no
+    # offset, and adding one later means adding it here too.
+    out, hit, _shared = await asyncio.to_thread(
+        readcache.cached, f"profile:{did}:{limit}",
+        lambda: profile_svc.profile(r, did, None, limit))
+    return {"data": out, "error": None,
+            "meta": {"correlation_id": cid, "cached": hit}}
 
 
 @app.get("/api/dashboard", dependencies=[Depends(require_api_key)])
@@ -1216,6 +1249,12 @@ async def add_column(did: str, body: dict, cid: str = Depends(correlation_id)) -
     schema = [*(current or []), entry]
     if not await asyncio.to_thread(r.update_dataset_schema, did, schema):
         raise not_found("dataset", did)
+    # A schema write changes what coverage, gaps and profile report — the new
+    # field would otherwise stay invisible to every cached read until the TTL
+    # expired. The dashboard aggregate was already stale here for the same
+    # reason; caching the per-dataset reads just made the window much wider.
+    dashboard_svc.invalidate()
+    readcache.invalidate()
     return {"data": {"dataset_id": did, "name": name, "added": True,
                      "entry": entry, "schema": schema,
                      "next": (f"POST /api/datasets/{did}/backfill with "
@@ -1332,6 +1371,7 @@ async def refresh_run(did: str, body: dict, cid: str = Depends(correlation_id)) 
         raise validation(str(exc))
     if bool(body.get("apply")) and out.get("written"):
         dashboard_svc.invalidate()
+        readcache.invalidate()
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -1346,8 +1386,15 @@ async def dataset_yield(did: str, cid: str = Depends(correlation_id)) -> dict:
     r = repo()
     if await asyncio.to_thread(r.get_dataset_schema, did) is None:
         raise not_found("dataset", did)
-    out = yieldmap_svc.build(r, did)
-    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+    # Measured, then cached, after the per-route benchmark: this was 3.4s warm
+    # and 20.4s for 6 concurrent callers — the worst amplifier in the dataset
+    # page's tab fan-out, and the one the gaps/coverage/profile cache did not
+    # touch. It is derived purely from stored evidence, so it caches on the same
+    # terms as the others and is invalidated by the same writes.
+    out, hit, _shared = await asyncio.to_thread(
+        readcache.cached, f"yield:{did}", lambda: yieldmap_svc.build(r, did))
+    return {"data": out, "error": None,
+            "meta": {"correlation_id": cid, "cached": hit}}
 
 
 @app.post("/api/datasets/{did}/query", dependencies=[Depends(require_api_key)])
@@ -1602,12 +1649,21 @@ async def list_conflicts(did: str, cid: str = Depends(correlation_id)) -> dict:
     schema = await asyncio.to_thread(repo().get_dataset_schema, did)
     if schema is None:
         raise not_found("dataset", did)
-    rows = (await asyncio.to_thread(repo().get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
+    # Same shape as coverage/gaps: a pure function of the stored records, and
+    # one of the tabs the dataset page opens at the same time as those. Measured
+    # at 1.9s warm before this, with no parameter to key on beyond `did`.
+    out, hit, _shared = await asyncio.to_thread(
+        readcache.cached, f"conflicts:{did}",
+        lambda: _conflicts_payload(did, schema))
+    return {"data": out, "error": None,
+            "meta": {"correlation_id": cid, "cached": hit}}
+
+
+def _conflicts_payload(did: str, schema: list) -> dict:
+    rows = repo().get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
     conflicts = coverage_svc.collect_conflicts(rows)
-    return {"data": {"dataset_id": did, "schema": schema,
-                     "conflicts": conflicts,
-                     "open": sum(1 for c in conflicts if not c["decided"])},
-            "error": None, "meta": {"correlation_id": cid}}
+    return {"dataset_id": did, "schema": schema, "conflicts": conflicts,
+            "open": sum(1 for c in conflicts if not c["decided"])}
 
 
 @app.post("/api/datasets/{did}/conflicts/resolve",
@@ -1641,6 +1697,12 @@ async def resolve_conflict(did: str, body: dict, cid: str = Depends(correlation_
         raise validation(str(exc))
     if not await asyncio.to_thread(repo().update_record_cell, did, record_id, field, updated):
         raise not_found("record", record_id)
+    # A cell write changes coverage, gaps and profile for this dataset. Same
+# reasoning as `add_column`: without this the resolved value stays invisible to
+    # every cached read until the TTL expires, so a conflict the user just
+    # resolved still appears open in the tab they resolved it from.
+    dashboard_svc.invalidate()
+    readcache.invalidate()
     return {"data": {"dataset_id": did, "record_id": record_id, "field": field,
                      "cell": updated},
             "error": None, "meta": {"correlation_id": cid}}
@@ -1665,28 +1727,39 @@ async def dataset_coverage(did: str, cid: str = Depends(correlation_id)) -> dict
     schema = await asyncio.to_thread(repo().get_dataset_schema, did)
     if schema is None:
         raise not_found("dataset", did)
-    rows = (await asyncio.to_thread(repo().get_records, did, "", settings.EXPORT_MAX_ROWS, 0)).get("records", [])
-    matrix = coverage_svc.field_coverage(rows, schema)
-    conflicts = coverage_svc.collect_conflicts(rows)
-    matrix["backlog"] = coverage_svc.build_backlog(matrix, conflicts)
-
     store = repo()
-    can_track = gaps_svc.tracked(store)
-    try:
-        gap_rows = await asyncio.to_thread(gaps_svc.sync, store, did, matrix) \
-            if can_track else gaps_svc.derive(matrix)
-    except Exception as exc:  # noqa: BLE001
-        # The derived answer is already computed and correct; losing the history
-        # is a degradation, not a failure, and reporting it as a 500 would hide a
-        # working coverage view behind a feature that is only additive.
-        log.warning("gap sync failed for dataset %s: %s", did, exc)
-        can_track = False
-        gap_rows = gaps_svc.derive(matrix)
 
-    matrix["gaps"] = gap_rows
-    matrix["gap_summary"] = gaps_svc.summary(gap_rows)
-    matrix["gaps_tracked"] = can_track
-    return {"data": matrix, "error": None, "meta": {"correlation_id": cid}}
+    def _compute() -> dict:
+        """Derived from stored records only, so it is cacheable.
+
+        Same reasoning as `/gaps`, which computes most of this: the matrix is a
+        pure function of the stored records and the schema, and this tab is
+        opened at the same time as `/gaps` on the dataset page — so without a
+        cache they issued two nearly identical cold computes at the same moment.
+        """
+        rows = store.get_records(did, "", settings.EXPORT_MAX_ROWS, 0).get("records", [])
+        m = coverage_svc.field_coverage(rows, schema)
+        m["backlog"] = coverage_svc.build_backlog(
+            m, coverage_svc.collect_conflicts(rows))
+        tracked = gaps_svc.tracked(store)
+        try:
+            gap_rows = gaps_svc.sync(store, did, m) if tracked else gaps_svc.derive(m)
+        except Exception as exc:  # noqa: BLE001
+            # The derived answer is already computed and correct; losing the
+            # history is a degradation, not a failure, and reporting it as a 500
+            # would hide a working coverage view behind an additive feature.
+            log.warning("gap sync failed for dataset %s: %s", did, exc)
+            tracked = False
+            gap_rows = gaps_svc.derive(m)
+        m["gaps"] = gap_rows
+        m["gap_summary"] = gaps_svc.summary(gap_rows)
+        m["gaps_tracked"] = tracked
+        return m
+
+    data, hit, _shared = await asyncio.to_thread(
+        readcache.cached, f"coverage:{did}", _compute)
+    return {"data": data, "error": None,
+            "meta": {"correlation_id": cid, "cached": hit}}
 
 
 @app.get("/api/sources", dependencies=[Depends(require_api_key)])
