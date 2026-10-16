@@ -25,6 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import proposals as proposals_svc  # noqa: E402
+from app.services.dataset_agent import _numeric, tool_records_where  # noqa: E402
 
 
 # --- layer 1: a field noun is not a request ---------------------------------
@@ -189,3 +190,180 @@ def test_the_panel_does_not_gate_the_answer_on_intent():
         "the answer must render whenever there is one, not only for a "
         "classifier the backend already answered")
     assert "{result && result.answer ?" in src
+
+
+# --- the filter tool the menu was missing -----------------------------------
+
+_RECS = [
+    {"record_id": "r1", "fields": {
+        "founders": {"value": "Noah Goodman", "verification_status": "verified"},
+        "funding_amount": {"value": "$1.1b"}, "name": {"value": "Humans&"}}},
+    {"record_id": "r2", "fields": {
+        "founders": {"value": "NA", "verification_status": "unverified"},
+        "funding_amount": {"value": "$200k"}, "name": {"value": "Tinyco"}}},
+    {"record_id": "r3", "fields": {
+        "founders": {}, "funding_amount": {"value": "3 million euro"},
+        "name": {"value": "Mid"}}},
+    {"record_id": "r4", "fields": {
+        "founders": {"value": "Jane"}, "funding_amount": {"value": "Series A undisclosed"},
+        "name": {"value": "X"}}},
+]
+
+_CTX = {"records": _RECS, "fields": ["founders", "funding_amount", "name"]}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("$1.1b", 1.1e9),
+    ("1,100,000,000", 1.1e9),
+    ("USD 2.5 million", 2.5e6),
+    ("3 million euro", 3e6),
+    ("12.5%", 12.5),
+    ("42", 42.0),
+    ("n/a", None),
+    ("", None),
+    ("unknown", None),
+])
+def test_numeric_reads_the_formats_stored_values_actually_use(text, expected):
+    assert _numeric(text) == expected
+
+
+def test_filled_uses_the_products_own_placeholder_rule():
+    """A cell holding the literal `NA` is not filled. Treating it as filled
+    would answer "companies whose founders column is filled" with 36 rows that
+    carry no founder at all."""
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "founders", "op": "filled"}], "limit": 5})
+    assert out["matched"] == 2, [r["record_id"] for r in out["records"]]
+    assert {r["record_id"] for r in out["records"]} == {"r1", "r4"}
+
+
+def test_empty_is_the_complement_of_filled():
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "founders", "op": "empty"}], "limit": 5})
+    assert {r["record_id"] for r in out["records"]} == {"r2", "r3"}
+
+
+def test_a_numeric_filter_works_over_currency_text():
+    """The question that was actually asked: founders where the funding is
+    above a million dollars."""
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1000000"}],
+        "limit": 5})
+    assert out["matched"] == 2
+    assert {r["record_id"] for r in out["records"]} == {"r1", "r3"}
+
+
+def test_unreadable_values_are_reported_not_treated_as_zero():
+    """A comparator that silently reads a non-number as 0 would match every row
+    against a million-dollar threshold. "Series A undisclosed" is a real value
+    that is not a number, so it must be reported rather than skipped quietly."""
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1"}], "limit": 5})
+    assert out.get("unreadable", {}).get("funding_amount") == 1
+    assert "undercounts" in out["note"]
+    assert "r4" not in {r["record_id"] for r in out["records"]}
+
+
+def test_a_placeholder_is_not_counted_as_unreadable():
+    """`unknown` is a placeholder in this product's own vocabulary, so a cell
+    holding it is absent — not a value that failed to parse. Counting it as
+    unreadable overstates how much of the dataset could not be read."""
+    from app.services import normalizer as norm
+    assert norm.is_placeholder("unknown")
+    ctx = {"records": [{"record_id": "r7", "fields": {
+        "funding_amount": {"value": "unknown"}}}], "fields": ["funding_amount"]}
+    out = tool_records_where(ctx, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1"}], "limit": 5})
+    assert out["matched"] == 0
+    assert "unreadable" not in out
+
+
+def test_conditions_combine_as_and():
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "founders", "op": "filled"},
+        {"field": "funding_amount", "op": "gt", "value": "1000000"}],
+        "limit": 5})
+    assert {r["record_id"] for r in out["records"]} == {"r1"}
+
+
+def test_the_filter_counts_every_match_even_when_the_list_is_capped():
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "founders", "op": "filled"}], "limit": 1})
+    assert out["matched"] == 2 and out["shown"] == 1 and out["truncated"] is True
+
+
+@pytest.mark.parametrize("bad", [
+    {}, {"conditions": []}, {"conditions": "founders"},
+    {"conditions": [{"field": "nope", "op": "filled"}]},
+    {"conditions": [{"field": "founders", "op": "between"}]},
+    {"conditions": [{"field": "funding_amount", "op": "gt", "value": "lots"}]},
+])
+def test_a_bad_filter_is_refused_with_a_reason(bad):
+    with pytest.raises(Exception) as exc:
+        tool_records_where(_CTX, bad)
+    assert str(exc.value), "a refusal must say what was wrong"
+
+
+def test_an_empty_cell_is_absent_not_unreadable():
+    """A live answer reported "7 values unreadable" when those 7 records simply
+    carried no figure at all. Absent is not unparseable, and saying otherwise
+    understates how much of the dataset was actually read."""
+    ctx = {"records": [{"record_id": "r5", "fields": {"funding_amount": {}}}],
+           "fields": ["funding_amount"]}
+    out = tool_records_where(ctx, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1"}], "limit": 5})
+    assert out["matched"] == 0
+    assert "unreadable" not in out
+
+
+def test_a_non_numeric_value_is_still_reported():
+    ctx = {"records": [{"record_id": "r6", "fields": {
+        "funding_amount": {"value": "Series A undisclosed"}}}],
+        "fields": ["funding_amount"]}
+    out = tool_records_where(ctx, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1"}], "limit": 5})
+    assert out["unreadable"] == {"funding_amount": 1}
+
+
+def test_mixing_currencies_is_flagged_rather_than_silently_converted():
+    """`£6m` is greater than 1000000 as a number and the dataset does not say
+    what that is in dollars. The comparison is honest arithmetic, but it must
+    not read as a dollar figure."""
+    ctx = {"records": [
+        {"record_id": "g1", "fields": {"funding_amount": {"value": "£6m"}}},
+        {"record_id": "g2", "fields": {"funding_amount": {"value": "€3 million"}}},
+        {"record_id": "g3", "fields": {"funding_amount": {"value": "$1.1b"}}}],
+        "fields": ["funding_amount"]}
+    out = tool_records_where(ctx, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1000000"}], "limit": 5})
+    assert out["matched"] == 3
+    assert out["currencies"] == ["£", "€"]
+    assert "not converted" in out["note"]
+
+
+def test_a_dollar_only_comparison_reports_no_currency_caveat():
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1000000"}],
+        "limit": 5})
+    assert "currencies" not in out
+
+
+def test_records_where_summarises_readably():
+    from app.services import dataset_agent as agent_svc
+    out = tool_records_where(_CTX, {"conditions": [
+        {"field": "founders", "op": "filled"}], "limit": 5})
+    line = agent_svc._summarise("records_where", out)
+    assert "2 records match" in line and "founders filled" in line
+    # An unreadable count must reach the trace, not just the payload.
+    out2 = tool_records_where(_CTX, {"conditions": [
+        {"field": "funding_amount", "op": "gt", "value": "1"}], "limit": 5})
+    assert "unreadable" in agent_svc._summarise("records_where", out2)
+
+
+def test_the_tool_is_offered_to_the_model():
+    from app.services import dataset_agent as agent_svc
+    assert "records_where" in agent_svc.TOOLS
+    menu = agent_svc._TOOL_MENU
+    assert "records_where" in menu
+    for op in ("filled", "empty", "equals", "contains", "gt", "lt"):
+        assert op in menu

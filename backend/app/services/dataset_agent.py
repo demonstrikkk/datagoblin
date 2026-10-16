@@ -55,10 +55,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from app.core.errors import AppError, validation
 from app.core.logging import log
+from app.services.normalizer import is_placeholder
 
 #: Never scan more than this many records for one question. The coverage and
 #: profile paths already read in bounded prefixes; the agent matches them.
@@ -216,9 +218,167 @@ def tool_sources(ctx: dict, args: dict) -> dict:
                       for h, r in ranked]}
 
 
+#: Money-ish magnitudes, longest suffix first so `billion` is not read as `b`.
+_MAGNITUDES = (
+    ("trillion", 1e12), ("tn", 1e12),
+    ("billion", 1e9), ("bn", 1e9), ("b", 1e9),
+    ("million", 1e6), ("mn", 1e6), ("m", 1e6),
+    ("thousand", 1e3), ("k", 1e3),
+)
+
+
+def _numeric(text: str) -> float | None:
+    """A number out of stored text, or None.
+
+    Handles `1,100,000,000`, `$1.1b`, `USD 2.5 million`, `12.5%`. Returns None
+    rather than guessing on anything else, because a comparator that silently
+    treats an unparseable value as zero will answer "above one million" with
+    every row in the dataset.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    low = raw.lower().replace("usd", "").replace("gbp", "").replace("eur", "")
+    factor = 1.0
+    for suffix, mult in _MAGNITUDES:
+        if suffix in low:
+            factor = mult
+            low = low.replace(suffix, " ")
+            break
+    pct = "%" in low
+    if pct:
+        low = low.replace("%", " ")
+    cleaned = re.sub(r"[^0-9.\-]", "", low)
+    if not cleaned or cleaned in {"-", ".", "-."}:
+        return None
+    try:
+        value = float(cleaned)
+    except ValueError:
+        return None
+    return value * factor
+
+
+def _currency(text: str) -> str:
+    """The currency symbol on a stored value, or `$` when none is stated."""
+    raw = str(text or "")
+    for sym in ("£", "€", "¥", "₹", "A$", "C$"):
+        if sym in raw:
+            return sym
+    return "$" if "$" in raw or "usd" in raw.lower() else ""
+
+
+def tool_records_where(ctx: dict, args: dict) -> dict:
+    """Rows matching conditions on their own field values. The filter primitive.
+
+    Without this, "the five companies whose founders column is filled" has no
+    honest route: the model reached for `search_records` and searched for
+    founder *names it had just read out of `value_counts`*, which is circular —
+    each such call found exactly the record it started from.
+
+    Numbers are compared as plain magnitudes, which is honest arithmetic but not
+    a currency conversion: `£6m` is greater than `1000000` as a number and the
+    dataset does not say what it is worth in dollars. Any non-dollar currency
+    seen in a numeric comparison is reported so the answer cannot quietly mix
+    them.
+    """
+    conditions = args.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        raise validation("records_where needs at least one condition")
+    if len(conditions) > 4:
+        raise validation("records_where takes at most four conditions")
+    parsed: list[tuple[str, str, Any]] = []
+    for cond in conditions:
+        if not isinstance(cond, dict):
+            raise validation("each condition must be an object")
+        field = str(cond.get("field") or "")
+        if field not in ctx["fields"]:
+            raise validation(f"unknown field '{field}'")
+        op = str(cond.get("op") or "equals").lower()
+        if op not in _CONDITION_OPS:
+            raise validation(f"unsupported op '{op}'; use one of "
+                             f"{', '.join(sorted(_CONDITION_OPS))}")
+        parsed.append((field, op, cond.get("value")))
+
+    limit = max(1, min(int(args.get("limit") or _SEARCH_LIMIT), _SEARCH_LIMIT))
+    matched: list[dict] = []
+    total = 0
+    # A numeric comparator that cannot read a value must say so rather than
+    # quietly treating it as zero, which would match every row.
+    unread: dict[str, int] = {}
+    currencies: set[str] = set()
+    for rec in ctx["records"]:
+        fields = rec.get("fields") or {}
+        keep = True
+        for field, op, want in parsed:
+            text = _cell_text(fields.get(field)).strip()
+            if op == "filled":
+                ok = bool(text) and not is_placeholder(text)
+            elif op == "empty":
+                ok = not text or is_placeholder(text)
+            elif op == "equals":
+                ok = text.casefold() == str(want or "").strip().casefold()
+            elif op == "contains":
+                ok = str(want or "").strip().casefold() in text.casefold()
+            else:
+                mine, theirs = _numeric(text), _numeric(str(want or ""))
+                if mine is None:
+                    # An empty cell is absent, not unparseable. Calling it
+                    # "unreadable" made a live answer report "7 values
+                    # unreadable" when those 7 records simply carry no figure.
+                    if text and not is_placeholder(text):
+                        unread[field] = unread.get(field, 0) + 1
+                    ok = False
+                elif theirs is None:
+                    raise validation(
+                        f"cannot compare '{want}' as a number for field '{field}'")
+                else:
+                    ok = mine > theirs if op == "gt" else mine < theirs
+                    if mine is not None and text:
+                        cur = _currency(text)
+                        if cur and cur != "$":
+                            currencies.add(cur)
+            if not ok:
+                keep = False
+                break
+        if not keep:
+            continue
+        total += 1
+        if len(matched) < limit:
+            matched.append({
+                "record_id": str(rec.get("record_id") or ""),
+                "fields": {k: _cell_text(v) for k, v in fields.items()},
+                "verified": sum(1 for v in fields.values()
+                                if isinstance(v, dict)
+                                and v.get("verification_status") == "verified"),
+            })
+    out = {
+        "conditions": [{"field": f, "op": o, "value": v} for f, o, v in parsed],
+        "matched": total,
+        "shown": len(matched),
+        "truncated": total > len(matched),
+        "records": matched,
+    }
+    if currencies:
+        out["currencies"] = sorted(currencies)
+        out["note"] = ("compared as plain magnitudes: values in "
+                       + ", ".join(sorted(currencies))
+                       + " were not converted, so this mixes currencies")
+    if unread:
+        out["unreadable"] = unread
+        out["note"] = ("values that are not numbers were skipped rather than "
+                       "treated as zero, so this undercounts")
+    return out
+
+
+_CONDITION_OPS = {"filled", "empty", "equals", "contains", "gt", "lt"}
+
+
 TOOLS = {
     "dataset_facts": (tool_facts, "records, fields, what the tools can see"),
     "value_counts": (tool_value_counts, "top values of a field: {field, limit?, filter?: {field, value}}"),
+    "records_where": (tool_records_where,
+                      "rows matching conditions: {conditions: [{field, op, value}], limit?} "
+                      "where op is filled|empty|equals|contains|gt|lt"),
     "search_records": (tool_search_records, "records containing a text: {q, limit?}"),
     "coverage": (tool_coverage, "per-field fill and verdict counts: {}"),
     "conflicts": (tool_conflicts, "open disagreements with both sides: {}"),
@@ -272,6 +432,18 @@ def _validate_plan(raw: Any, fields: list[str]) -> list[dict]:
         filt = args.get("filter")
         if isinstance(filt, dict) and str(filt.get("field") or "") not in fields + [""]:
             continue
+        if name == "records_where":
+            # Same rule as value_counts: a call naming a field this dataset does
+            # not have will be refused at the door, and it would have consumed a
+            # plan slot out of a four-call budget to be refused.
+            conds = args.get("conditions")
+            if not isinstance(conds, list) or not conds:
+                continue
+            if any(not isinstance(c, dict)
+                   or str(c.get("field") or "") not in fields
+                   or str(c.get("op") or "").lower() not in _CONDITION_OPS
+                   for c in conds):
+                continue
         calls.append({"tool": name, "args": args})
     # Facts first when the plan forgot them: an answer that cites figures
     # without saying what dataset they came from is unanchored.
@@ -295,7 +467,14 @@ def _plan_prompt(question: str, fields: list[str], total: int) -> str:
         "gaps for 'disputed/missing' questions, sources for 'where from' "
         "questions, search_records to show the rows behind a figure. "
         "A `filter` narrows value_counts to records where another field equals "
-        "a value.\n\n"
+        "a value.\n"
+        "Use records_where for any question that names rows to return: "
+        "'the five companies whose founders column is filled' is "
+        '{"conditions": [{"field": "founders", "op": "filled"}], "limit": 5}, '
+        "and 'companies above $1M' is a `gt` condition on the amount field. "
+        "Do NOT reach for search_records with a value you already read out of "
+        "value_counts — that finds only the row you started from. `filled` and "
+        "`empty` ignore cells holding a placeholder like NA.\n\n"
         f"Question: {question}"
     )
 
@@ -453,6 +632,17 @@ def _summarise(name: str, out: dict) -> str:
                 f"top is {top.get('value')} ({top.get('n')})")
     if name == "search_records":
         return f"{out.get('matched')} records contain the text"
+    if name == "records_where":
+        conds = ", ".join(
+            f"{c.get('field')} {c.get('op')}"
+            + (f" {c.get('value')}" if c.get("value") not in (None, "") else "")
+            for c in (out.get("conditions") or []))
+        line = f"{out.get('matched')} records match {conds or 'the conditions'}"
+        if out.get("unreadable"):
+            # The count is an undercount and the summary must say so, or the
+            # composing model will report it as the whole population.
+            line += f" ({sum(out['unreadable'].values())} value(s) unreadable)"
+        return line
     if name == "coverage":
         fields = out.get("fields") or []
         thin = min(fields, key=lambda f: (f.get("present") or 0)) if fields else {}
