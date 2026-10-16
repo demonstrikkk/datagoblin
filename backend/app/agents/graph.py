@@ -201,7 +201,52 @@ def _relevance_terms(text: Any, *, drop_generic: bool = False) -> set[str]:
     return {w for w in words if len(w) > 2}
 
 
-def _plan_relevance(candidate: dict, state: dict) -> float:
+#: How far a proven host may outrank a textually identical unknown one. Bounded
+#: rather than unbounded because the prior is a prior: a host that was excellent
+#: six months ago should not outrank the question itself.
+HOST_TRUST_WEIGHT = 1.5
+
+#: Penalty for a host known to have served cells and proven none of them. Below
+#: an unknown host, because knowing a source is useless is information and
+#: scoring it zero is not.
+HOST_BARREN_PENALTY = -0.5
+
+#: Trust at or below which a known host is treated as barren rather than merely
+#: unproven. A host with 300 cells and none of them verified scores 0.0 and must
+#: not be treated the same as a host we have never fetched.
+HOST_BARREN_TRUST = 0.05
+
+
+def _host_prior_bonus(candidate: dict, prior: dict) -> float:
+    """What past runs learned about this candidate's host.
+
+    A pure text heuristic cannot tell a host that has produced verified records
+    from one that has only ever produced headlines, because neither difference
+    appears in a URL or a title. `source_reputation` holds exactly that, and it
+    was computed and stored but never read here.
+
+    Deliberately small and bounded. The prior can break ties and reorder hosts
+    of similar textual relevance; it must not drag a textually irrelevant page
+    over the top of a relevant one, because relevance is the harder constraint
+    to recover from. An unknown host scores 0 and costs nothing.
+    """
+    host = (urlparse(str(candidate.get("url", "") or "")).hostname or "").lower()
+    if not host:
+        return 0.0
+    info = prior.get(host)
+    if not info or not info.get("known"):
+        return 0.0
+    # A host that has never proven anything is not merely unscored; it is
+    # actively known to be unproductive, so it should sit below an unknown host.
+    trust = float(info.get("trust") or 0.0)
+    if trust <= HOST_BARREN_TRUST:
+        # Seen before, proven nothing. Sitting level with a host we know
+        # nothing about would be the same as having no prior at all.
+        return HOST_BARREN_PENALTY
+    return HOST_TRUST_WEIGHT * trust
+
+
+def _plan_relevance(candidate: dict, state: dict, prior: dict | None = None) -> float:
     """How well one search result matches the plan. Higher is better.
 
     Read from the URL and title only, and on purpose: this runs before anything
@@ -233,6 +278,8 @@ def _plan_relevance(candidate: dict, state: dict) -> float:
     score += 0.5 * len(goal_terms & words)
     if any(s in hay for s in _EDITORIAL_SLUGS):
         score -= 2.5
+    if prior:
+        score += _host_prior_bonus(candidate, prior)
     return score
 
 
@@ -299,7 +346,8 @@ async def screen_node(state: dict, deps: Any) -> dict:
     # the two. "top 10" and "india" match both; the listicle is about products
     # and imports, and the word *stock* is simply absent from it. A scorer that
     # weighted goal words equally would rank it as highly as nseindia.
-    fresh.sort(key=lambda r: -_plan_relevance(r, state))
+    fresh.sort(key=lambda r: -_plan_relevance(r, state,
+                                             getattr(deps, "host_prior", None)))
     done = [r["url"] for r in fresh] + blocked
     accepted: list[dict] = []
     sem = asyncio.Semaphore(5)

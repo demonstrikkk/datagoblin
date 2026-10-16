@@ -15,7 +15,15 @@ class LocalRepo:
     def __init__(self, root: str = ".datagoblin-local") -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # Reentrant, and it must be. Every read-modify-write helper here takes
+        # the lock and then calls `_scan`, which takes it again:
+        # `note_source_outcome`, `note_source_cells` and `note_field_verified`
+        # all nest. A plain `threading.Lock` cannot be re-entered, so those
+        # three deadlocked on first call — permanently, not intermittently. It
+        # went unnoticed because the local adapter is the opt-in dev path and
+        # no test drove it with a real repository; the Postgres adapter, which
+        # is the default, has no lock at all and so never showed the bug.
+        self._lock = threading.RLock()
 
     def close(self) -> None:
         """Release resources.
@@ -123,6 +131,31 @@ class LocalRepo:
             if blocked:
                 merged["last_blocked_at"] = now
             self._append("source_reputation", merged)
+
+    def note_source_cells(self, host: str, *, cells: int = 0,
+                          verified_cells: int = 0) -> None:
+        """Attribute cells to a host without counting a fetch. Mirrors
+        PostgresRepo: a cell is not a request, so `visits` must not move."""
+        cells = max(0, int(cells))
+        verified_cells = max(0, int(verified_cells))
+        if not cells:
+            return
+        with self._lock:
+            rows = [r for r in self._scan("source_reputation")
+                    if r.get("host") == host]
+            now = datetime.datetime.now(datetime.UTC).isoformat()
+            merged = rows[-1] if rows else {
+                "host": host, "visits": 0, "successes": 0, "cells": 0,
+                "verified_cells": 0, "block_count": 0, "first_seen": now,
+            }
+            self._append("source_reputation", {
+                **merged,
+                "host": host,
+                "cells": int(merged.get("cells") or 0) + cells,
+                "verified_cells": (int(merged.get("verified_cells") or 0)
+                                   + verified_cells),
+                "last_seen": now,
+            })
 
     def get_source_reputation(self, hosts: list[str] | None = None) -> list[dict]:
         rows = self._scan("source_reputation")

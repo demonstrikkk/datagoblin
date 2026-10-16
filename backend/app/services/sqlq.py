@@ -107,12 +107,27 @@ def relation_sql(dataset_id: str, fields: list) -> tuple[str, list[str]]:
         # The scalar fallback is conditional on the cell actually being a
         # scalar. An unconditional COALESCE fell through to `->> 'field'` when
         # the value was null, and that read returns the whole cell object as
-        # text — so the most empty rows produced the longest strings, and
+        # text - so the most empty rows produced the longest strings, and
         # `GROUP BY` counted them separately instead of counting them as empty.
         scalar = (f"CASE WHEN jsonb_typeof(row_json -> '{lit}') = 'string' "
                   f"THEN row_json ->> '{lit}' END")
-        parts.append(f"COALESCE(row_json -> '{lit}' ->> 'value', {scalar}) AS \"{safe}\"")
+        value_expr = (f"COALESCE(row_json -> '{lit}' ->> 'value', {scalar})")
+        parts.append(f"{value_expr} AS \"{safe}\"")
         cols.append(n)
+        # A parallel boolean that agrees with `records_where`'s `filled`.
+        #
+        # Without it the two read paths answered one question differently: the
+        # Ask agent uses `is_placeholder`, so a cell holding the literal `NA`
+        # is not filled, while a model writing `founders IS NOT NULL AND
+        # founders <> ''` counted it as a founder. On the live dataset that was
+        # 14 against 50 for the same question.
+        #
+        # Built from `normalizer.absence_words()` so the two cannot drift again.
+        parts.append(f"({_filled_predicate(value_expr)}) AS \"{safe}__filled\"")
+        cols.append(f"{n}__filled")
+        parts.append(
+            f"({_numeric_predicate(value_expr)}) AS \"{safe}__num\"")
+        cols.append(f"{n}__num")
         parts.append(
             f"COALESCE(row_json -> '{lit}' ->> 'verification_status', '') "
             f"AS \"{safe}__status\"")
@@ -120,6 +135,38 @@ def relation_sql(dataset_id: str, fields: list) -> tuple[str, list[str]]:
     sql = ("SELECT " + ", ".join(parts)
            + " FROM dataset_records WHERE dataset_id = '" + dataset_id.replace("'", "") + "'")
     return sql, cols
+
+
+def _filled_predicate(expr: str) -> str:
+    """`expr` holds a value: filled, and not an absence word or punctuation.
+
+    Array fields arrive serialised. `founders` is stored as the list `["NA"]`
+    and this relation reads it as the text `'["NA"]'`, so a plain comparison
+    against the absence words does not fire: the brackets and quotes are not
+    part of the word. The agent gets the other end of the same row — it renders
+    the list by joining its elements, sees `NA`, and correctly refuses it. Two
+    representations of one value, so the inner text is compared as well.
+
+    That single case was the whole 14-versus-50 disagreement on the live
+    dataset: 36 of the 50 rows the SQL called filled held `["NA"]` and no
+    founder at all.
+    """
+    from app.services.normalizer import absence_words
+    words = ", ".join("'" + w.replace("'", "''") + "'"
+                      for w in sorted(absence_words()))
+    # Strip surrounding array and quote punctuation so `["NA"]` reads as `NA`.
+    # Built by concatenation because the character class contains both quote
+    # kinds: `"` needs no escaping inside a single-quoted SQL literal, but `'`
+    # does, and writing that inline is how this ended up a syntax error once.
+    # `btrim(string, chars)` trims any of the given characters from both ends,
+    # which is exactly the job and carries none of the escaping hazards of a
+    # regular expression containing `[`, `]` and both quote kinds.
+    trim_chars = "'[]()\"'' '"
+    inner = f"lower(btrim(btrim({expr}), {trim_chars}))"
+    return (f"({expr} IS NOT NULL AND btrim({expr}) <> '' "
+            f"AND lower(btrim({expr})) NOT IN ({words}) "
+            f"AND {inner} NOT IN ({words}) "
+            f"AND {expr} ~ '[A-Za-z0-9]')")
 
 
 def validate(sql: str, columns: list[str]) -> str:
@@ -195,32 +242,86 @@ def build_query(candidate_sql: str, relation: str, limit: int) -> str:
             f"ORDER BY 1 LIMIT {max(1, int(limit))}")
 
 
+def _numeric_predicate(expr: str) -> str:
+    """A nullable numeric reading of a text value, or NULL.
+
+    Money is stored as the source wrote it — `$1.1b`, `£374m`, `3 million
+    euro` — so `CAST("funding_amount" AS numeric)` does not fail loudly, it
+    fails at the *row*: `invalid input syntax for type numeric: "£374m"`,
+    which reaches the caller as a 503 with no query shown. That is the whole
+    class of funding questions.
+
+    NULL rather than 0 for anything unparseable, because a comparator that
+    silently reads `unknown` as zero will match every row against a positive
+    threshold. `Series B` is a round, not a number, and correctly yields NULL.
+    """
+    e = f"btrim({expr})"
+    digits = f"regexp_replace({e}, '[^0-9.]', '', 'g')"
+    return (
+        f"CASE WHEN {e} ~ '^[$£€¥₹A-Z]?[0-9][0-9,]*(\\.[0-9]+)?"
+        r"\s*(bn|b|million|mn|thousand|m|k|billion)?\s*$'"
+        f" THEN CAST({digits} AS numeric) * CASE"
+        f" WHEN {e} ~* '(billion|bn|b)' THEN 1e9"
+        f" WHEN {e} ~* '(million|mn|m)' THEN 1e6"
+        f" WHEN {e} ~* '(thousand|k)' THEN 1e3"
+        " ELSE 1 END"
+        " ELSE NULL END"
+    )
+
+
 def build_prompt(question: str, fields: list, row_count: int, examples: str = "") -> str:
     """Ask for one SELECT, and show the columns it is allowed to use."""
     cols = _normalise_columns(fields)
     listing = "\n".join(
-        f"  {c} (text)  |  {c}__status (text: verified/unverified/conflicting/judgment_unavailable)"
+        f"  {c} (text)  |  {c}__filled (boolean)  |  {c}__num (numeric or NULL)  |  "
+        f"{c}__status (text: verified/unverified/conflicting/judgment_unavailable)"
         for c in cols)
     return (
         "Write ONE PostgreSQL SELECT that answers the question using a single "
         f"table called `records` with {row_count} rows and exactly these columns:\n"
         f"{listing}\n\n"
         "Rules: SELECT only. No INSERT/UPDATE/DELETE/DDL. No other tables, no "
-        "schemas, no system catalogs. Every value is text, so cast when you "
-        "compare or aggregate numbers: CAST(\"batch_number\" AS integer). "
-        "Treat an empty string as missing, e.g. "
-        "\"company_name\" IS NOT NULL AND \"company_name\" <> ''. "
+        "schemas, no system catalogs.\n"
+        f"{_FILLED_RULE}{_NUMERIC_RULE}"
         "Return a `SELECT` with a useful column alias. No prose, no semicolon "
         "beyond the end.\n"
         + (f"\nExamples of accepted shape:\n{examples}\n" if examples else "")
         + f"\nQuestion: {question[:1000]}\n"
-        # The provider only ever returns JSON — it raises rather than hand back
-        # prose — so the reply shape is stated rather than assumed. A prompt
+        # The provider only ever returns JSON - it raises rather than hand back
+        # prose - so the reply shape is stated rather than assumed. A prompt
         # asking for bare SQL fails at the provider, not here, which is why the
         # first version reported "the model did not return a query".
         + 'Reply with a single JSON object only, no prose, no backticks: '
         + '{"sql": "<the SELECT statement>"}.'
     )
+
+
+#: How to ask "does this field have a value".
+#:
+#: The old wording told the model that an empty string is missing and to write
+#: `"field" IS NOT NULL AND "field" <> ''`. That is not what this product means
+#: by missing: a cell holding `NA`, `n/a`, `unknown`, `tbd` or an em dash carries
+#: no information either, and the extractor writes those. A model following the
+#: old rule counted all of them, so the same question returned 14 through the Ask
+#: tab (which uses `is_placeholder`) and 50 through Query.
+_FILLED_RULE = (
+    'Every field has a companion boolean column named "<field>__filled" which '
+    "is TRUE exactly when the cell carries real content. Use it rather than "
+    "comparing to the empty string: `\"founders\" IS NOT NULL AND "
+    "\"founders\" <> ''` also counts the literal NA as a value, and this "
+    "dataset contains 36 of those. For example, to count companies that have a "
+    'founder: SELECT count(*) FROM records WHERE "founders__filled" = true.\n'
+)
+
+#: Money is text here, and casting it fails at the row rather than at the query.
+_NUMERIC_RULE = (
+    'Amounts are text ("$1.1b", "£374m") and CASTing them to numeric raises an '
+    'error mid-scan, which reached the caller as a 503 naming no query. Each '
+    'field has a "<field>__num" column that is a real number, or NULL when the '
+    "value is not one. Compare with it: to find funding above a million, "
+    'WHERE "funding_amount__num" > 1000000. NULL rows never match, so nothing '
+    "unparseable is counted as zero.\n"
+)
 
 
 _SELECT_RE = re.compile(r"\b(select|with)\b", re.IGNORECASE)

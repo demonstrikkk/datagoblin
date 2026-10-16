@@ -26,6 +26,18 @@ _ABSENCE_WORDS = frozenset({
 })
 
 
+def absence_words() -> frozenset[str]:
+    """The absence-word vocabulary, for callers that must reproduce it.
+
+    Exposed so the SQL path can build the *same* predicate this module uses.
+    The two used to disagree: the agent asked `records_where`, which reads
+    `is_placeholder`, and the SQL path asked `IS NOT NULL AND <> ''`, which
+    counts a literal `NA` as a value. The same question therefore returned 14
+    on one tab and 50 on the other, and nothing on screen said which was right.
+    """
+    return _ABSENCE_WORDS
+
+
 def repair_mojibake(value: object) -> object:
     """Undo a UTF-8-bytes-read-as-cp1252 round trip, when that is what happened.
 

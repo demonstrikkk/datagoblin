@@ -80,7 +80,7 @@ def _run_with(providers, pages=None):
 
     orig_discover = discovery_svc.discover
 
-    async def _discover(run_id, plan, search_fn, llm, emit):
+    async def _discover(run_id, plan, search_fn, llm, emit, host_prior=None):
         # One real source, so the run reaches extraction rather than stopping
         # at "no page was fetched".
         return [{"url": "https://x.example/p", "title": "t", "route": "web:http"}]

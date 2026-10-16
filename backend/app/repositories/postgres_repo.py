@@ -324,6 +324,39 @@ class PostgresRepo:
              max(0, int(verified_cells)), 1 if blocked else 0,
              "now()" if ok else None, "now()" if blocked else None)))
 
+    def note_source_cells(self, host: str, *, cells: int = 0,
+                          verified_cells: int = 0) -> None:
+        """Attribute cells to a host without counting a fetch.
+
+        Separate from `note_source_outcome` because that method increments
+        `visits` unconditionally, and a visit means "a request was sent to this
+        host". A cell arrives from a page fetched minutes or runs ago; charging
+        the host another visit would inflate the denominator of
+        `proof = verified/cells` in `reputation.trust` and quietly shrink every
+        score, so the two are deliberately different statements about a host.
+
+        This is what makes `proof_ratio` non-zero at all. `note_source_outcome`
+        is called from the fetch path with no cell counts, so before this the
+        column stayed at 0 and `trust()` returned `0.3 * reachability` for every
+        host — the docstring's claim that proof is "the only thing that can make
+        a host good" was true of the formula and false of the data.
+        """
+        cells = max(0, int(cells))
+        verified_cells = max(0, int(verified_cells))
+        if not cells:
+            return
+        self._run("note_source_cells", lambda cur: cur.execute(
+            """INSERT INTO source_reputation
+                 (host, visits, successes, cells, verified_cells, block_count,
+                  last_seen)
+               VALUES (%s, 0, 0, %s, %s, 0, now())
+               ON CONFLICT (host) DO UPDATE SET
+                 cells          = source_reputation.cells + EXCLUDED.cells,
+                 verified_cells = source_reputation.verified_cells
+                                    + EXCLUDED.verified_cells,
+                 last_seen      = now()""",
+            (host, cells, verified_cells)))
+
     def get_source_reputation(self, hosts: list[str] | None = None) -> list[dict]:
         """Raw reputation rows, optionally restricted to `hosts`.
 

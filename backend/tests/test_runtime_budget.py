@@ -201,7 +201,7 @@ def test_hard_timeout_keeps_already_validated_records(monkeypatch):
     ctx, _ = _ctx(store=_store)
     ctx["fetch"] = _hang
 
-    async def _discover(run_id, plan, search_fn, llm, emit):
+    async def _discover(run_id, plan, search_fn, llm, emit, host_prior=None):
         return _seeds(2)
 
     monkeypatch.setattr(runner_svc.discovery_svc, "discover", _discover)

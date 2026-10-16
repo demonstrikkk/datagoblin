@@ -88,6 +88,9 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     fetch_fn = ctx.get("fetch")
     store = ctx["store"]
     cancelled = ctx.get("cancelled", lambda: False)
+    # What past runs learned about which hosts are worth crawling. Absent in
+    # tests and /api/map, where discovery simply runs cold.
+    host_prior = ctx.get("host_prior")
     budget = budget or _Budget(settings.RUN_MAX_RUNTIME_S)
     # Shared with execute_run so a hard timeout can still persist what was
     # produced. Written as each stage completes, never read from the pipeline.
@@ -195,7 +198,8 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     discovery_cap = max(60.0, budget.total * 0.25)
     try:
         sources = await asyncio.wait_for(
-            discovery_svc.discover(run_id, plan, search_fn, llm, _discover_emit),
+            discovery_svc.discover(run_id, plan, search_fn, llm, _discover_emit,
+                                   host_prior=host_prior),
             timeout=discovery_cap)
     except asyncio.TimeoutError:
         reason = (f"source discovery did not finish within "

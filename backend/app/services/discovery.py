@@ -32,6 +32,19 @@ class DiscoveryModelDown(RuntimeError):
 #: call costs its full timeout, so the count stays low on purpose.
 _MODEL_FAILURE_TRIP = 3
 
+#: When a previously-seen host is excluded outright for refusing us. All three
+#: must hold, and the hit-rate ceiling is the strictest of them: a host that
+#: blocks us but also serves us is having a bad day, not refusing us, and
+#: excluding it would discard a source that has produced records before.
+BLOCK_MIN_BLOCKS = 3
+BLOCK_MIN_VISITS = 4
+BLOCK_MAX_HIT_RATE = 0.25
+
+#: How much a known-good host can outrank a textually identical unknown one.
+#: Capped rather than unbounded because the prior is a prior: a host that was
+#: excellent six months ago should not outrank the question itself.
+HOST_TRUST_WEIGHT = 1.5
+
 
 def _domains(plan: dict) -> tuple[list[str], list[str]]:
     include = [str(d).strip().lstrip(".") for d in
@@ -112,10 +125,76 @@ async def _diversify(run_id: str, plan: dict, accepted: list[dict],
     return accepted[:max_pages]
 
 
-async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any) -> list[dict]:
+def blocked_hosts_from_prior(prior: dict[str, dict],
+                             already: set[str]) -> set[str]:
+    """Hosts this instance has learned to skip, from past runs.
+
+    A host that has blocked us repeatedly is excluded before it can cost a
+    search result, a robots fetch and a judge call. `blocked_domains` inside
+    the supervisor was per-run only and filled from robots failures observed
+    *within that run*, so nothing carried across runs: the same portal that
+    refused us last week was re-tried today.
+
+    All three conditions must hold, and the hit-rate ceiling is the strictest of
+    them. A host that blocks us but also serves us is having a bad day, not
+    refusing us, and excluding it would discard a source that has produced
+    verified records before. Only `visit >= ` matters for the floor: one
+    unlucky 403 must never write a host off.
+    """
+    out: set[str] = set()
+    for host, info in (prior or {}).items():
+        h = str(host or "").strip().lower()
+        if not h or h in already:
+            continue
+        visits = int(info.get("visits") or 0)
+        blocks = int(info.get("block_count") or 0)
+        hits = int(info.get("successes") or 0)
+        if (blocks >= BLOCK_MIN_BLOCKS and visits >= BLOCK_MIN_VISITS
+                and hits / max(1, visits) <= BLOCK_MAX_HIT_RATE):
+            out.add(h)
+            log.info("excluding host that has repeatedly refused us",
+                     extra={"data": {"host": h, "visits": visits,
+                                     "blocks": blocks, "successes": hits}})
+    return out
+
+
+async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any,
+                   host_prior: Any = None) -> list[dict]:
+    """Find candidate sources. `host_prior` is an optional `async () -> dict`
+    returning `{host: {trust, known, block_count, ...}}` from past runs.
+
+    Discovery used to hold no data handle at all, so `source_reputation` and
+    `yieldmap` existed and informed nothing here: the same host blocked last
+    week was re-tried today, and a host with a 0.95 verified-cell rate was
+    ranked the same as one with 0.02. The literature is clear that seed
+    quality predicts crawl yield, so this is the cheapest available accuracy.
+    """
     requested = max(1, int(plan.get("requested_count", plan.get("max_results", 15))))
     max_pages = min(int(plan.get("max_pages", 12)), settings.RUN_MAX_PAGES)
     include_domains, exclude_domains = _domains(plan)
+
+    prior: dict[str, dict] = {}
+    if callable(host_prior):
+        try:
+            prior = await host_prior() or {}
+        except Exception as e:  # noqa: BLE001 (cold start is a valid state)
+            log.info("host prior unavailable; discovery runs cold",
+                     extra={"data": {"error": str(e)[:120]}})
+            prior = {}
+    if prior:
+        log.info("discovery using host prior",
+                 extra={"data": {"hosts_known": len(prior)}})
+
+    # A host that has blocked us repeatedly is excluded before it can cost a
+    # search result, a robots fetch and a judge call. `blocked_domains` inside
+    # the supervisor was per-run only and filled from robots failures within
+    # that run, so nothing carried across runs. The threshold is deliberately
+    # high and requires a poor hit rate, so a host that 403s twice by accident
+    # is not written off.
+    already_excluded = {str(d).lower() for d in (exclude_domains or [])}
+    already_excluded |= blocked_hosts_from_prior(prior, already_excluded)
+    if already_excluded:
+        exclude_domains = sorted(already_excluded)[:150]
 
     # The provider died between the run preflight and this stage. The preflight
     # is a point check at run start; a server that dies a minute later leaves
@@ -219,6 +298,7 @@ async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any)
         max_pages=max_pages,
         max_queries=settings.SUPERVISOR_MAX_QUERIES,
         results_per_query=settings.RUN_MAX_RESULTS_PER_QUERY,
+        host_prior=prior,
     )
     # Explicit seeds: user-requested URLs skip Jev-A screening (they were not
     # discovered) but face identical triage, fetch, extract, and evidence validation.

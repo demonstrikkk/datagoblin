@@ -439,6 +439,46 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         for name, (verified, total) in tally.items():
             await asyncio.to_thread(r.note_field_verified,
                                     dataset_id, name, verified, total)
+        await _attribute_cells_to_hosts(rows)
+
+    async def _attribute_cells_to_hosts(rows: list[dict]) -> None:
+        """Credit each host with the cells it actually supplied.
+
+        This is the write side that makes `reputation.trust` meaningful.
+        `note_source_outcome` runs on the fetch path and carries no cell counts,
+        so `source_reputation.cells` stayed at 0 and `proof = verified/cells`
+        resolved to 0 for every host — the score collapsed to reachability and
+        the decay, block penalty and low-confidence handling never had anything
+        to act on.
+
+        Only `verified` counts as proof. `judgment_unavailable` is a fresh
+        *reading* and `field_freshness` deliberately counts it, but a host that
+        supplied unread values has not proven anything, and crediting it as if
+        it had would make the very signal meant to detect untrustworthy hosts
+        reward them.
+        """
+        per_host: dict[str, list[int]] = {}
+        for row in rows or []:
+            for cell in (row.get("fields") or {}).values():
+                if not isinstance(cell, dict):
+                    continue
+                src = cell.get("source") or {}
+                if not isinstance(src, dict):
+                    continue
+                host = urlparse(str(src.get("url", "") or "")).hostname or ""
+                if not host:
+                    continue
+                slot = per_host.setdefault(host.lower(), [0, 0])
+                slot[0] += 1
+                if cell.get("verification_status") == "verified":
+                    slot[1] += 1
+        for host, (cells, verified) in per_host.items():
+            try:
+                await asyncio.to_thread(r.note_source_cells, host,
+                                        cells=cells, verified_cells=verified)
+            except Exception as e:  # noqa: BLE001 (bookkeeping must not fail a run)
+                log.warning("source cell attribution failed",
+                            extra={"data": {"host": host, "error": str(e)[:150]}})
 
     async def _persist_source(source: dict) -> None:
         # Per settled page, on the crawl path: all three writes are blocking
@@ -520,10 +560,50 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         except Exception:  # noqa: BLE001 (never block a run on the check itself)
             return None
 
+    async def _host_prior() -> dict[str, dict]:
+        """What this instance has learned about each host, for discovery.
+
+        Injected rather than imported so discovery stays free of repository
+        knowledge, exactly as `reuse` and `persist_source` are injected into
+        the crawler. Discovery previously received no data handle at all, which
+        is the structural reason `source_reputation` and `yieldmap` could never
+        influence which sources a new run chose: the table existed, the formula
+        existed, and no code path connected them.
+
+        Best-effort by construction: an unreadable reputation table returns
+        `{}`, and every consumer treats an empty prior as "cold start", which is
+        the behaviour a new instance already has.
+        """
+        from app.services import reputation as reputation_svc
+        try:
+            rows = await asyncio.to_thread(r.get_source_reputation)
+        except Exception as e:  # noqa: BLE001 (a cold start is a valid state)
+            log.info("host prior unavailable; discovery runs cold",
+                     extra={"data": {"error": str(e)[:120]}})
+            return {}
+        out: dict[str, dict] = {}
+        for row in rows or []:
+            host = str(row.get("host") or "").strip().lower()
+            if not host:
+                continue
+            scored = reputation_svc.trust(row)
+            out[host] = {
+                "trust": float(scored.get("score") or 0.0),
+                "known": bool(scored.get("known")),
+                "terms": scored.get("terms") or {},
+                "visits": int(row.get("visits") or 0),
+                "successes": int(row.get("successes") or 0),
+                "cells": int(row.get("cells") or 0),
+                "verified_cells": int(row.get("verified_cells") or 0),
+                "block_count": int(row.get("block_count") or 0),
+            }
+        return out
+
     ctx = {"search": search_provider.search, "fetch": _fetch, "llm": _llm,
            "store": _store, "persist_source": _persist_source,
            "persist_page": _persist_page, "reuse": _reuse,
            "record_charge": _record_charge, "llm_preflight": _llm_preflight,
+           "host_prior": _host_prior,
            "cancelled": lambda: RUNS.get(run_id, {}).get("status") == "CANCELLED"}
     TASKS[run_id] = asyncio.create_task(runner_svc.execute_run(run_id, plan, ctx, _emit))
     _evict_registries()
