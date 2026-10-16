@@ -121,16 +121,17 @@ def repo() -> object:
 
 
 async def _fetch_method(url: str, method: str) -> dict:
-    """Single fetch dispatch shared by runs and map (same waterfall)."""
-    if method == "crawl4ai":
-        return await fetcher.crawl4ai_fetch(url)
-    if method == "impersonate":
-        return await impersonation_svc.impersonate_fetch(url)
-    if method == "jina":
-        return await fetcher.jina_fetch(url)
-    if method == "docling":
-        return await fetcher.docling_fetch(url)
-    return await fetcher.http_fetch(url)
+    """Single fetch dispatch shared by runs and map (same waterfall).
+
+    Delegates rather than repeating the waterfall. A second copy of this
+    dispatch lived here, identical to `crawler._default_fetch`, and runs used
+    *this* one -- which meant the per-rung timing added to the crawler was
+    instrumenting a path runs never take, and reported no samples for every
+    real run. Two identical dispatch points is not redundancy, it is how
+    instrumentation gets silently bypassed and nobody notices because the
+    un-instrumented copy looks correct.
+    """
+    return await crawler_svc._default_fetch(url, method)
 
 
 @app.on_event("startup")
