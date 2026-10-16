@@ -1,89 +1,132 @@
-"""Live scraping proof: every method against real public pages. No keys needed.
+"""One live run through the real HTTP API, measuring what came out.
 
-Targets are scrape-friendly by design (example.com, quotes.toscrape.com,
-wikipedia, w3.org test PDF). Prints a per-method verdict; exits nonzero on any
-unexpected failure. Jina anon path attempted (FEATURE_JINA forced on here only).
+Answers the question a route sweep cannot: is extraction producing *better* data
+now, or just more of it? Prints per-field verification, which route produced
+each value, and a sample record with its quote so the values can be judged
+rather than counted.
+
+    python scripts/live_scrape_check.py ["prompt"]
 """
-import asyncio
-import os
+from __future__ import annotations
+
+import json
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-os.environ["FEATURE_JINA"] = "true"
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "backend"))
-
-from app.providers.crawl import fetcher  # noqa: E402
-from app.services import reducer as reducer_mod  # noqa: E402
-
-RESULTS = []
+BASE = "http://127.0.0.1:8000"
+PROMPT = (sys.argv[1] if len(sys.argv) > 1 else
+          "Find 5 AI startups in London with their founders and latest funding round")
 
 
-def check(name, ok, detail=""):
-    RESULTS.append((name, ok, detail))
-    print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}")
-
-
-async def main():
-    # 1. Static HTTP
-    t0 = time.monotonic()
-    page = await fetcher.http_fetch("https://example.com")
-    dt = time.monotonic() - t0
-    check("http static", page["method"] == "http" and "Example Domain" in page.get("text", ""),
-          f"{len(page.get('html',''))}B html in {dt:.1f}s title={page.get('title','')!r}")
-
-    # 2. Robots verdict on a real host (either verdict is a working check)
-    allowed, delay = await fetcher.robots_allowed("https://en.wikipedia.org/wiki/Python_(programming_language)")
-    check("robots verdict", isinstance(allowed, bool) and delay >= 0,
-          f"wikipedia article allowed={allowed} delay={delay}")
-
-    # 3. Trafilatura reduce: smaller than HTML, keeps article text
-    md = reducer_mod.reduce_html(page["html"])
-    check("trafilatura reduce", 0 < len(md) < len(page["html"]) and "documentation examples" in md,
-          f"{len(page['html'])}B -> {len(md)}B (boilerplate stripped, body kept)")
-
-    # 4. Link extraction on a link-rich page
-    hn = await fetcher.http_fetch("https://news.ycombinator.com")
-    links = fetcher.extract_links(hn.get("html", ""), "https://news.ycombinator.com")
-    check("extract_links", len(links) >= 10, f"{len(links)} same-host links")
-
-    # 5. Dynamic JS rendering: HTTP sees ~nothing, Crawl4AI must see quotes
-    js = await fetcher.http_fetch("http://quotes.toscrape.com/js/")
-    http_has_quotes = "Albert Einstein" in js.get("text", "")
-    t0 = time.monotonic()
-    rendered = await fetcher.crawl4ai_fetch("http://quotes.toscrape.com/js/")
-    dt = time.monotonic() - t0
-    has_quotes = "Albert Einstein" in rendered.get("markdown", "")
-    check("crawl4ai dynamic", (not http_has_quotes) and has_quotes,
-          f"http_empty={not http_has_quotes} rendered={has_quotes} {len(rendered.get('markdown',''))}ch in {dt:.0f}s")
-
-    # 6. Content-type guard on a real PDF
-    pdf = await fetcher.http_fetch("https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf")
-    check("pdf skipped honestly", "skipped" in pdf and "non-html" in pdf["skipped"],
-          pdf.get("skipped", ""))
-
-    # 7. Throttle: back-to-back same-host fetches serialize >= ~1s
-    await fetcher.http_fetch("https://example.com")
-    t0 = time.monotonic()
-    await fetcher.http_fetch("https://example.com")
-    gap = time.monotonic() - t0
-    check("throttle floor", gap >= 0.75, f"gap={gap:.2f}s (floor=1.0s, timer granularity)")
-
-    # 8. Jina anon fallback (free tier, may rate-limit: 429 is an honest answer too)
+def call(method: str, path: str, body: dict | None = None, timeout: int = 900):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"{BASE}{path}", data=data, method=method,
+                                 headers={"Content-Type": "application/json",
+                                          "Accept": "application/json"})
     try:
-        j = await fetcher.jina_fetch("https://example.com")
-        check("jina anon", "Example Domain" in j.get("markdown", ""),
-              f"{len(j.get('markdown',''))}ch")
-    except Exception as e:  # noqa: BLE001
-        msg = getattr(e, "message", str(e))
-        check("jina anon", "429" in msg or "rate" in msg.lower(), f"rate-limited honestly: {msg[:80]}")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, {"raw": raw[:300]}
 
-    failed = [n for n, ok, _ in RESULTS if not ok]
-    print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} live checks passed")
-    if failed:
-        raise SystemExit(f"FAILED: {failed}")
+
+def main() -> int:
+    status, compiled = call("POST", "/api/workflows/compile", {"prompt": PROMPT}, 300)
+    if status != 200:
+        print(f"compile failed: {status} {json.dumps(compiled)[:300]}")
+        return 2
+    plan = compiled["data"]["plan"]
+    print(f"plan compiled ({compiled['data'].get('provider')})")
+    print(f"  entity  : {plan.get('entity')}")
+    print(f"  fields  : {[f['name'] for f in plan['fields']]}")
+    print(f"  queries : {plan.get('search_queries')}")
+
+    name = f"LIVE CHECK — {PROMPT[:60]}"
+    status, started = call("POST", "/api/runs", {
+        "plan_id": compiled["data"]["plan_id"],
+        "dataset_name": name,
+        "reuse_stored_pages": False,
+    }, 120)
+    if status != 200:
+        print(f"run rejected: {status} {json.dumps(started)[:300]}")
+        return 2
+    run_id = started["data"]["run"]["run_id"] if "run" in started.get("data", {}) \
+        else started["data"].get("run_id", "")
+    print(f"  run     : {run_id}")
+    print()
+    print("running…", flush=True)
+
+    t0 = time.monotonic()
+    st = run_id
+    while time.monotonic() - t0 < 900:
+        time.sleep(4)
+        _, snap = call("GET", f"/api/runs/{run_id}", timeout=60)
+        data = snap.get("data") or {}
+        st = data.get("status", "?")
+        cur = data.get("current_stage", "?")
+        if st in ("COMPLETED", "FAILED", "PARTIAL", "CANCELLED"):
+            break
+    print(f"finished in {time.monotonic() - t0:.0f}s: {st}")
+
+    _, snap = call("GET", f"/api/runs/{run_id}", timeout=60)
+    data = snap.get("data") or {}
+    counters = data.get("counters") or {}
+    print()
+    print("counters:")
+    for k in sorted(counters):
+        print(f"  {k:<28} {counters[k]}")
+
+    dataset_id = data.get("dataset_id")
+    if not dataset_id:
+        print(f"\nno dataset stored. reason: {data.get('no_yield_reason') or 'none given'}")
+        return 1
+
+    _, rec = call("GET", f"/api/datasets/{dataset_id}/records?limit=200", timeout=120)
+    rows = (rec.get("data") or {}).get("records") or []
+    _, prof = call("GET", f"/api/datasets/{dataset_id}/profile", timeout=180)
+
+    print()
+    print(f"records stored: {len(rows)}")
+    print()
+    print(f"{'field':<26} {'filled':>7} {'verified':>9}  routes")
+    for f in (prof.get("data") or {}).get("fields", []):
+        name_ = f.get("field")
+        cells = [r.get("fields", {}).get(name_) for r in rows]
+        filled = [c for c in cells if isinstance(c, dict) and c.get("value") not in (None, "")]
+        verified = [c for c in filled if c.get("verification_status") == "verified"]
+        routes: dict[str, int] = {}
+        for c in filled:
+            m = c.get("read_method") or "?"
+            routes[m] = routes.get(m, 0) + 1
+        route_txt = ", ".join(f"{k}×{v}" for k, v in sorted(routes.items(), key=lambda kv: -kv[1]))
+        print(f"{name_:<26} {len(filled):>7} {len(verified):>9}  {route_txt}")
+
+    if rows:
+        print()
+        print("first record, with proof:")
+        for name_, cell in (rows[0].get("fields") or {}).items():
+            if not isinstance(cell, dict):
+                continue
+            val = str(cell.get("value"))[:38]
+            quote = str((cell.get("source") or {}).get("quote") or "")[:66]
+            print(f"  {name_:<24} {val:<40} [{cell.get('verification_status')}]")
+            if quote:
+                print(f"  {'':<24} ↳ {quote}")
+
+    out = Path(__file__).resolve().parents[2] / "outputs" / "live_scrape_last.json"
+    out.write_text(json.dumps({"plan": plan, "status": st, "counters": counters,
+                               "records": rows}, default=str, indent=1), encoding="utf-8")
+    print()
+    print(f"written: {out}")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

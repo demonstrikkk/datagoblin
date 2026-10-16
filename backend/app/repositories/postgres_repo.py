@@ -33,7 +33,17 @@ from decimal import Decimal
 from typing import Any, Iterable
 
 from app.core.config import settings
-from app.core.errors import AppError, dependency
+from app.core.errors import AppError, dependency, validation
+
+
+def _is_bad_uuid_error(e: Exception) -> bool:
+    """Did Postgres reject a parameter as malformed UUID syntax?
+
+    Pure string match on the driver's message, so it is unit-testable without
+    a database. Narrow on purpose: only the invalid-syntax diagnostic matches,
+    never a connection or constraint failure.
+    """
+    return "invalid input syntax for type uuid" in str(e)
 from app.core.logging import log
 
 
@@ -108,13 +118,13 @@ class PostgresRepo:
             return self._pool
         with self._lock:
             if self._pool is None:
-                from psycopg.rows import dict_row
-                from psycopg_pool import ConnectionPool
                 try:
+                    from psycopg.rows import dict_row
+                    from psycopg_pool import ConnectionPool
                     self._pool = ConnectionPool(
                         conninfo=self._dsn,
-                        min_size=1,
-                        max_size=6,
+                        min_size=settings.DB_POOL_MIN,
+                        max_size=settings.DB_POOL_MAX,
                         max_lifetime=1800,   # don't hold a remote connection forever
                         open=True,
                         # dict_row belongs to the pool, not to each connect():
@@ -168,6 +178,15 @@ class PostgresRepo:
             # Already typed (pool open failure); don't wrap it twice.
             raise
         except Exception as e:  # noqa: BLE001 (mapped to a typed dependency error)
+            if _is_bad_uuid_error(e):
+                # A malformed id (hand-typed, pasted placeholder, truncated) is
+                # a client mistake, not a database outage. Mapping it to 503
+                # sent readers restarting a healthy server; 422 names the real
+                # problem. An unparseable UUID can never match a row, so
+                # nothing valid is refused.
+                raise validation(
+                    "not a valid id (expected a UUID): "
+                    f"{str(e)[:120]}")
             raise dependency(f"Postgres {op} failed: {str(e)[:200]}")
 
     def close(self) -> None:
@@ -272,6 +291,79 @@ class PostgresRepo:
              source.get("error", ""), source.get("reused_from_run_id") or None,
              source.get("reused_page_id") or None, source.get("retrieved_at") or None)))
 
+    # -- source reputation ----------------------------------------------------
+
+    def note_source_outcome(self, host: str, *, ok: bool, blocked: bool = False,
+                             verified_cells: int = 0, cells: int = 0) -> None:
+        """Record one fetch outcome against the host, across every run.
+
+        The counters are additive rather than assigned, so concurrent runs
+        reporting the same host cannot lose each other's contribution the way an
+        absolute write would. `visited` counts every attempt including the first,
+        which is why the column is incremented unconditionally.
+        """
+        self._run("note_source_outcome", lambda cur: cur.execute(
+            """INSERT INTO source_reputation
+                 (host, visits, successes, cells, verified_cells, block_count,
+                  last_seen, last_success_at, last_blocked_at)
+               VALUES (%s, 1, %s, %s, %s, %s, now(), %s, %s)
+               ON CONFLICT (host) DO UPDATE SET
+                 visits          = source_reputation.visits + 1,
+                 successes       = source_reputation.successes + EXCLUDED.successes,
+                 cells           = source_reputation.cells + EXCLUDED.cells,
+                 verified_cells  = source_reputation.verified_cells
+                                    + EXCLUDED.verified_cells,
+                 block_count     = source_reputation.block_count
+                                    + EXCLUDED.block_count,
+                 last_seen       = now(),
+                 last_success_at = COALESCE(EXCLUDED.last_success_at,
+                                            source_reputation.last_success_at),
+                 last_blocked_at = COALESCE(EXCLUDED.last_blocked_at,
+                                            source_reputation.last_blocked_at)""",
+            (host, 1 if ok else 0, max(0, int(cells)),
+             max(0, int(verified_cells)), 1 if blocked else 0,
+             "now()" if ok else None, "now()" if blocked else None)))
+
+    def get_source_reputation(self, hosts: list[str] | None = None) -> list[dict]:
+        """Raw reputation rows, optionally restricted to `hosts`.
+
+        Raw counters, not scores: `services.reputation.trust` derives the score,
+        so the decay policy can change without rewriting stored data.
+        """
+        if hosts:
+            rows = self._rows("get_source_reputation", (
+                "SELECT * FROM source_reputation WHERE host = ANY(%s) ORDER BY host",
+                (list(hosts),)))
+            return rows
+        return self._rows("get_source_reputation",
+                          "SELECT * FROM source_reputation ORDER BY host")
+
+    # -- field freshness ------------------------------------------------------
+
+    def note_field_verified(self, dataset_id: str, field: str,
+                            verified_cells: int = 1,
+                            total_cells: int = 1) -> None:
+        """Note that `field` was verified for `dataset_id` right now."""
+        self._run("note_field_verified", lambda cur: cur.execute(
+            """INSERT INTO field_freshness
+                 (dataset_id, field, last_verified_at, last_seen_at,
+                  verified_cells, total_cells)
+               VALUES (%s,%s, now(), now(), %s, %s)
+               ON CONFLICT (dataset_id, field) DO UPDATE SET
+                 last_verified_at = now(),
+                 last_seen_at     = now(),
+                 verified_cells   = field_freshness.verified_cells
+                                     + EXCLUDED.verified_cells,
+                 total_cells      = field_freshness.total_cells
+                                     + EXCLUDED.total_cells""",
+            (dataset_id, field, max(0, int(verified_cells)),
+             max(0, int(total_cells)))))
+
+    def get_field_freshness(self, dataset_id: str) -> list[dict]:
+        return self._rows("get_field_freshness",
+                          "SELECT * FROM field_freshness WHERE dataset_id=%s "
+                          "ORDER BY field", (dataset_id,))
+
     def find_page_by_url(self, url: str, include_html: bool = True) -> dict | None:
         """The stored page for `url` from any run, newest first.
 
@@ -336,12 +428,35 @@ class PostgresRepo:
         Events written before the column existed keep an empty type, which reads
         as "kind unknown" rather than as a wrong kind.
         """
-        self._run("append_event", lambda cur: cur.execute(
-            """INSERT INTO run_events (run_id,stage,type,message,metadata_json)
-                 VALUES (%s,%s,%s,%s,%s)""",
-            (run_id, event.get("stage", ""), str(event.get("type", ""))[:120],
-             str(event.get("message", ""))[:2000],
-             _jsonb(event.get("data", {}) or {}))))
+        payload = (run_id, event.get("stage", ""), str(event.get("type", ""))[:120],
+                   str(event.get("message", ""))[:2000],
+                   _jsonb(event.get("data", {}) or {}))
+
+        def _typed(cur):
+            cur.execute(
+                """INSERT INTO run_events (run_id,stage,type,message,metadata_json)
+                   VALUES (%s,%s,%s,%s,%s)""", payload)
+
+        def _legacy(cur):
+            cur.execute(
+                """INSERT INTO run_events (run_id,stage,message,metadata_json)
+                   VALUES (%s,%s,%s,%s)""",
+                (payload[0], payload[1], payload[3], payload[4]))
+
+        try:
+            self._run("append_event", _typed)
+        except AppError as e:
+            # A database that predates 006 has no `type` column. Dropping the
+            # event would erase the audit trail to protect it, so write the
+            # legacy shape once and say which migration is missing.
+            if "run_events" in str(e) and "type" in str(e) and (
+                    "does not exist" in str(e) or "UndefinedColumn" in str(e)):
+                log.warning("run_events.type column missing; wrote legacy event",
+                            extra={"data": {"run_id": run_id,
+                                            "migration": "006_run_event_type.sql"}})
+                self._run("append_event_legacy", _legacy)
+                return
+            raise
 
     def finalize_dataset(self, run_id: str, plan: dict, rows: list[dict],
                          counts: dict) -> str:
@@ -385,6 +500,21 @@ class PostgresRepo:
                  _jsonb({"counts": counts, "records": len(rows)}), run_id))
         self._run("finalize_dataset", _fn)
         return did
+
+    def delete_dataset(self, dataset_id: str) -> bool:
+        """Delete one dataset and everything that belongs to it alone.
+
+        `dataset_records`, `exports` and `dataset_gaps` all reference
+        `datasets(id) ON DELETE CASCADE`, so one statement removes the row,
+        its records, its gap history and its export ledger. Sources, pages
+        and runs belong to the *run*, not the dataset, and survive: the run
+        stays as the audit trail of work that happened, and its stored pages
+        stay reusable by future runs.
+        """
+        def _fn(cur):
+            cur.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
+            return cur.rowcount
+        return bool((self._run("delete_dataset", _fn) or 0) > 0)
 
     def save_export(self, dataset_id: str, fmt: str, byte_size: int) -> str:
         eid = str(uuid.uuid4())
@@ -455,6 +585,24 @@ class PostgresRepo:
            r["schema"] = r.pop("schema_json", None) or []
         return rows
 
+    def _run_counts(self, run_id: str) -> dict:
+        """Field-level counters for a run, from where `finalize_dataset` wrote
+        them. The datasets table has no counts column, so without this join
+        every dataset reads as "not counted" — including ones written minutes
+        ago by current code — while the local adapter reports them from its
+        row. One indexed read; additive, so a failure degrades to {} rather
+        than blocking the dataset read it annotates."""
+        if not run_id:
+            return {}
+        try:
+            run_rows = self._rows("get_dataset_counts",
+                                  "SELECT stats FROM runs WHERE id=%s",
+                                  (str(run_id),))
+            stats = (run_rows[0].get("stats") if run_rows else {}) or {}
+            return stats.get("counts") or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
     def get_dataset_row(self, dataset_id: str) -> dict | None:
         """The dataset's own columns, with no records attached.
 
@@ -467,6 +615,7 @@ class PostgresRepo:
         if not rows:
             return None
         rows[0]["schema"] = rows[0].pop("schema_json", None) or []
+        rows[0]["counts"] = self._run_counts(str(rows[0].get("run_id") or ""))
         return rows[0]
 
     def get_dataset(self, dataset_id: str) -> dict | None:
@@ -481,6 +630,7 @@ class PostgresRepo:
         # the configured export ceiling, which is where this list is consumed.
         ds["records"] = self._records(dataset_id, limit=settings.EXPORT_MAX_ROWS,
                                       offset=0)["records"]
+        ds["counts"] = self._run_counts(str(ds.get("run_id") or ""))
         return ds
 
     def run_readonly_sql(self, sql: str, params: tuple = ()) -> list[dict]:
@@ -494,7 +644,11 @@ class PostgresRepo:
         """
         def _fn(cur):
             cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute("SET LOCAL statement_timeout = '15s'")
+            # `SET LOCAL` does not take a bound parameter in Postgres, so the
+            # value is interpolated. It is an int() of a settings field with a
+            # numeric validator, so there is nothing to inject.
+            cur.execute("SET LOCAL statement_timeout = %d"
+                        % int(settings.DB_STATEMENT_TIMEOUT_MS))
             # No params unless there are some. Passing an empty tuple still
             # switches psycopg into placeholder interpolation, and it treats
             # every `%` in the statement as one — so a perfectly ordinary

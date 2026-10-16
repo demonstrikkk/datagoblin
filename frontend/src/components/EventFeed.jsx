@@ -116,6 +116,7 @@ export default function EventFeed({ events = [], connection, height = 380, empty
     <div className="flex min-h-0 flex-col">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <Segmented
+          label="Event type"
           options={FILTERS.map((f) => ({ ...f, count: counts[f.value] }))}
           value={filter}
           onChange={setFilter}

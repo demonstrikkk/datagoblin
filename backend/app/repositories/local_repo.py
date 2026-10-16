@@ -87,6 +87,85 @@ class LocalRepo:
     def upsert_source(self, run_id: str, source: dict) -> None:
         self._append("sources", {"run_id": run_id, **source})
 
+    # -- source reputation ----------------------------------------------------
+
+    def note_source_outcome(self, host: str, *, ok: bool, blocked: bool = False,
+                             verified_cells: int = 0, cells: int = 0) -> None:
+        """Record one fetch outcome. Mirrors PostgresRepo's additive counters.
+
+        JSONL has no upsert, so this folds the new row into the accumulated one
+        and appends the merged result. `_scan` returns rows oldest-first, so the
+        last match is the current state.
+        """
+        with self._lock:
+            rows = [r for r in self._scan("source_reputation")
+                    if r.get("host") == host]
+            now = datetime.datetime.now(datetime.UTC).isoformat()
+            merged = rows[-1] if rows else {
+                "host": host, "visits": 0, "successes": 0, "cells": 0,
+                "verified_cells": 0, "block_count": 0,
+                "first_seen": now,
+            }
+            merged = {
+                **merged,
+                "host": host,
+                "visits": int(merged.get("visits") or 0) + 1,
+                "successes": int(merged.get("successes") or 0) + (1 if ok else 0),
+                "cells": int(merged.get("cells") or 0) + max(0, int(cells)),
+                "verified_cells": (int(merged.get("verified_cells") or 0)
+                                   + max(0, int(verified_cells))),
+                "block_count": (int(merged.get("block_count") or 0)
+                                + (1 if blocked else 0)),
+                "last_seen": now,
+            }
+            if ok:
+                merged["last_success_at"] = now
+            if blocked:
+                merged["last_blocked_at"] = now
+            self._append("source_reputation", merged)
+
+    def get_source_reputation(self, hosts: list[str] | None = None) -> list[dict]:
+        rows = self._scan("source_reputation")
+        if hosts:
+            wanted = set(hosts)
+            rows = [r for r in rows if r.get("host") in wanted]
+        # Only the newest row per host: the file is an append log.
+        latest: dict[str, dict] = {}
+        for row in rows:
+            latest[row.get("host", "")] = row
+        return [latest[k] for k in sorted(latest)]
+
+    # -- field freshness ------------------------------------------------------
+
+    def note_field_verified(self, dataset_id: str, field: str,
+                            verified_cells: int = 1,
+                            total_cells: int = 1) -> None:
+        with self._lock:
+            rows = [r for r in self._scan("field_freshness")
+                    if r.get("dataset_id") == dataset_id and r.get("field") == field]
+            now = datetime.datetime.now(datetime.UTC).isoformat()
+            merged = rows[-1] if rows else {
+                "dataset_id": dataset_id, "field": field,
+                "last_verified_at": None, "verified_cells": 0, "total_cells": 0,
+            }
+            self._append("field_freshness", {
+                **merged,
+                "last_verified_at": now,
+                "last_seen_at": now,
+                "verified_cells": (int(merged.get("verified_cells") or 0)
+                                   + max(0, int(verified_cells))),
+                "total_cells": (int(merged.get("total_cells") or 0)
+                                + max(0, int(total_cells))),
+            })
+
+    def get_field_freshness(self, dataset_id: str) -> list[dict]:
+        rows = [r for r in self._scan("field_freshness")
+                if r.get("dataset_id") == dataset_id]
+        latest: dict[str, dict] = {}
+        for row in rows:
+            latest[row.get("field", "")] = row
+        return [latest[k] for k in sorted(latest)]
+
     def upsert_page(self, run_id: str, page: dict) -> str:
         """Store the evidence. Returns the page id records cite.
 
@@ -195,6 +274,40 @@ class LocalRepo:
             return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()
                     if line.strip()]
 
+    def _rewrite(self, name: str, keep: callable) -> int:
+        """Rewrite one JSONL file keeping only rows `keep(row)` accepts.
+
+        Append-only storage has no DELETE, so removal is a filtered rewrite
+        under the same lock the appends take. Written to a temp file and
+        renamed, so a crash mid-rewrite leaves the original intact rather than
+        a truncated store. Returns how many rows were dropped.
+        """
+        p = self._path(name)
+        if not p.exists():
+            return 0
+        with self._lock:
+            rows = [json.loads(line) for line in
+                    p.read_text(encoding="utf-8").splitlines() if line.strip()]
+            survivors = [r for r in rows if keep(r)]
+            tmp = p.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                for r in survivors:
+                    f.write(json.dumps(r, default=str) + "\n")
+            tmp.replace(p)
+            return len(rows) - len(survivors)
+
+    def delete_dataset(self, dataset_id: str) -> bool:
+        """Delete one dataset, its records and its gap history. Mirrors
+        PostgresRepo: sources, pages and runs belong to the run and survive."""
+        did = str(dataset_id or "")
+        if not did:
+            return False
+        dropped = self._rewrite(
+            "datasets", lambda r: str(r.get("id") or "") != did)
+        self._rewrite(
+            "dataset_gaps", lambda r: str(r.get("dataset_id") or "") != did)
+        return dropped > 0
+
     def get_run(self, run_id: str) -> dict | None:
         rows = [r for r in self._scan("runs") if r.get("id") == run_id]
         return rows[-1] if rows else None
@@ -257,6 +370,11 @@ class LocalRepo:
                 found = {"id": d["id"], "run_id": d.get("run_id", ""),
                          "name": d.get("name", ""), "schema": d.get("schema", []),
                          "record_count": len(d.get("records", [])),
+                         # Counts are persisted on the row by finalize; the row
+                         # variant used to drop them, so the one endpoint the
+                         # page actually reads reported "not counted" while the
+                         # full variant (and Postgres, once joined) measured.
+                         "counts": d.get("counts", {}),
                          "created_at": d.get("_ts", "")}
         return found
 

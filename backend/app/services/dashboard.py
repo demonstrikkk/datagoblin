@@ -340,6 +340,17 @@ def _compute(store, limit: int) -> dict:
         # already prove. The full yield also needs sources and pages, and those
         # two queries per dataset were the bulk of this aggregate's cost over a
         # remote database — for a rate the summary does not display.
+        #
+        # The ranking is computed from the documents, not from the aggregate,
+        # so the fast path — which deliberately reads no records — has to read
+        # a bounded sample here. Passing the empty `recs` list straight through
+        # would rank nothing: `build` only reads the store itself when it
+        # receives None, and an empty list reads as "there is nothing", which
+        # emptied the dashboard's host section on every dataset the aggregate
+        # answered.
+        if not recs:
+            recs = list(
+                (store.get_records(did, "", RECORD_SAMPLE, 0) or {}).get("records") or [])
         try:
             ym = yieldmap_svc.build(store, did, recs, light=True)
             for host, hrow in (ym.get("hosts") or {}).items():
@@ -358,7 +369,11 @@ def _compute(store, limit: int) -> dict:
             "run_id": str(row.get("run_id") or ""),
             "created_at": row.get("created_at") or "",
             "partial": partial,
-            "records": len(recs),
+            # The record count is the one the aggregate measured, not the
+            # length of the records read into this process. `recs` is only
+            # populated on the fallback path, so `len(recs)` was 0 on the fast
+            # path and every dashboard row read as "0 records".
+            "records": int((agg or {}).get("records") or len(recs) or 0),
             "declared_records": int(row.get("record_count") or 0),
             "sampled": sampled,
             "fields": v["fields"],

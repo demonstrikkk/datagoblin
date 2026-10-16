@@ -14,6 +14,7 @@ import {
   Stat,
 } from '../components/ui.jsx';
 import { num, truncate, when } from '../lib/format.js';
+import DeleteDatasetButton from '../components/dataset/DeleteDatasetButton.jsx';
 
 /**
  * Datasets are the product. Show quality, not just a count.
@@ -195,6 +196,20 @@ export default function Library() {
                             : 'schema not persisted'}
                           {x.verifiedRecords ? ` · ${num(x.verifiedRecords)} fully proven` : ''}
                         </span>
+                        {/*
+                          Inside the card link, so every press stops the
+                          navigation first — handled inside the button, which
+                          calls preventDefault and stopPropagation on both of
+                          its steps. A card that navigates away mid-confirm
+                          would be the button deleting something the reader can
+                          no longer see.
+                        */}
+                        <DeleteDatasetButton
+                          datasetId={d.id}
+                          recordCount={d.record_count ?? x.records}
+                          onDeleted={refetch}
+                          compact
+                        />
                       </footer>
                     </Link>
                   );
@@ -210,7 +225,7 @@ export default function Library() {
             title="The library is empty"
             hint="Datasets appear here once a run stores records. A run that finds nothing will tell you why instead of writing an empty dataset."
             action={
-              <Link to="/" className="btn-accent">
+              <Link to="/investigate" className="btn-accent">
                 Start a run
               </Link>
             }

@@ -54,8 +54,22 @@ def test_the_row_factory_is_still_set_on_the_pooled_connections(monkeypatch):
 
 
 def test_the_pool_stays_small_and_does_not_hold_a_remote_connection_forever(monkeypatch):
+    """Sized from settings, not a literal.
+
+    The pool used to hardcode `min_size=1, max_size=6` while `DB_POOL_MIN` and
+    `DB_POOL_MAX` sat in config being read by nothing — so an operator tuning the
+    pool for a bigger server changed a variable that had no effect. The default
+    `DB_POOL_MAX` is 5, which also happened to contradict the hardcoded 6, so the
+    test below is asserting the *configured* value now rather than a magic number.
+    """
     kw = _pool_kwargs(monkeypatch)
-    assert kw["max_size"] == 6
+    from app.core.config import settings
+
+    assert kw["max_size"] == settings.DB_POOL_MAX
+    assert kw["min_size"] == settings.DB_POOL_MIN
+    assert settings.DB_POOL_MAX <= 16, (
+        "a per-process pool this large will exhaust a small server's "
+        "connection limit across a few workers")
     assert kw["max_lifetime"] == 1800
 
 

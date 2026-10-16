@@ -55,12 +55,17 @@ export default function GapQueue({ datasetId, onChanged }) {
   const [proposal, setProposal] = useState(null);
   const [verdict, setVerdict] = useState(null);
   const [rejudging, setRejudging] = useState(null);
-  const [failure, setFailure] = useState('');
+  // Failures are kept per action, not in one shared string. They used to share
+  // `failure`, so an error from `gaps/fill` rendered in the same slot as the
+  // Rejudge button and read as a rejudge failure — which sent the investigation
+  // to the wrong endpoint. Two different actions, two different failure slots.
+  const [fillFailure, setFillFailure] = useState('');
+  const [rejudgeFailure, setRejudgeFailure] = useState('');
 
   const attempt = useCallback(
     async (gap, apply) => {
       setBusy(`${gap.field}:${apply ? 'apply' : 'dry'}`);
-      setFailure('');
+      setFillFailure('');
       try {
         const out = await api.fillGap(datasetId, {
           field: gap.field,
@@ -75,7 +80,7 @@ export default function GapQueue({ datasetId, onChanged }) {
           setProposal({ field: gap.field, ...out });
         }
       } catch (err) {
-        setFailure(String(err?.message || err));
+        setFillFailure(`${gap.field}: ${String(err?.message || err)}`);
       } finally {
         setBusy(null);
       }
@@ -86,7 +91,7 @@ export default function GapQueue({ datasetId, onChanged }) {
   const rejudge = useCallback(
     async (gap, apply) => {
       setRejudging(apply ? null : gap.field);
-      setFailure('');
+      setRejudgeFailure('');
       try {
         const out = await api.rejudge(datasetId, {
           field: gap.field,
@@ -98,7 +103,7 @@ export default function GapQueue({ datasetId, onChanged }) {
           onChanged?.();
         }
       } catch (err) {
-        setFailure(String(err?.message || err));
+        setRejudgeFailure(`${gap.field}: ${String(err?.message || err)}`);
       } finally {
         setRejudging(null);
       }
@@ -167,7 +172,16 @@ export default function GapQueue({ datasetId, onChanged }) {
         </Notice>
       ) : null}
 
-      {failure ? <Notice tone="warn">{failure}</Notice> : null}
+      {fillFailure ? (
+        <Notice tone="warn">
+          <strong>Fill gap failed.</strong> {fillFailure}
+        </Notice>
+      ) : null}
+      {rejudgeFailure ? (
+        <Notice tone="warn">
+          <strong>Rejudge failed.</strong> {rejudgeFailure}
+        </Notice>
+      ) : null}
 
       {queue.length ? (
         <div className="space-y-2">
@@ -307,8 +321,8 @@ function GapRow({ gap, busy, rejudging, onDryRun, onApply, onRejudge }) {
             <button
               type="button"
               className="btn-outline btn-xs"
-              disabled={Boolean(busy) || !gap.attemptable}
-              onClick={() => rejudge(gap, false)}
+              disabled={Boolean(busy) || Boolean(rejudging) || !gap.attemptable}
+              onClick={() => onRejudge(gap, false)}
             >
               {rejudging === gap.field ? 'Judging…' : 'Judge these cells'}
             </button>

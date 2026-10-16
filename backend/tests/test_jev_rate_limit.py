@@ -171,7 +171,11 @@ def test_stored_status_is_rate_limited(monkeypatch, real_judge):
         raise zen.JevRateLimited("429")
 
     monkeypatch.setattr(zen, "systemone", _throttled)
-    monkeypatch.setattr(validator_svc, "JUDGE_BUDGET", validator_svc.JudgeBudget(0))
+    # `unlimited=True` explicitly. `JudgeBudget(0)` now means zero judge calls,
+    # so passing it here would short-circuit before the throttled judge was ever
+    # consulted and the test would assert nothing about throttling.
+    monkeypatch.setattr(validator_svc, "JUDGE_BUDGET",
+                        validator_svc.JudgeBudget(0, unlimited=True))
     v, st = run(validator_svc.verify_field(
         NEEDS_JUDGE[0], NEEDS_JUDGE[1], PAGE, False, "string"))
     assert st == "rate_limited", "throttling must be its own stored status"

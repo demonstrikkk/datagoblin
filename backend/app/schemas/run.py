@@ -27,11 +27,12 @@ class Counters(BaseModel):
     and a run with 300 records and 5 proven fields reported `verified: 300`. The
     field-level figures are separate keys below and are never folded in.
 
-    Every key here is a key `main._emit` actually builds. The two the event
-    handler constructs that this model did not declare — `fields_verified`,
-    `records_fully_verified` and their siblings — were silently dropped by
-    pydantic, so `GET /api/runs/{id}` reported `verified: 0, needs_review: 0` for
-    every run in the database.
+    Every key here is a key `main._emit` actually builds, and `main._emit` copies
+    the full list rather than hand-enumerating it — that asymmetry is how
+    `fields_unverified` and `fields_conflicting` ended up computed by
+    `provenance.summarize` and then dropped by the handler, so
+    `GET /api/runs/{id}` reported 0 for both on every run. `test_run_counters`
+    now asserts the two sets are equal, so a thirteenth counter cannot repeat it.
     """
     attempted: int = Field(default=0, ge=0)
     successful: int = Field(default=0, ge=0)
@@ -43,6 +44,7 @@ class Counters(BaseModel):
     fields_verified: int = Field(default=0, ge=0)
     fields_unverified: int = Field(default=0, ge=0)
     fields_judgment_unavailable: int = Field(default=0, ge=0)
+    fields_conflicting: int = Field(default=0, ge=0)
     fields_rate_limited: int = Field(default=0, ge=0)
     records_fully_verified: int = Field(default=0, ge=0)
     records_needing_review: int = Field(default=0, ge=0)

@@ -23,6 +23,7 @@ are exact (tests assert sorted/counts, never order).
 
 _WORKERS = 4
 import asyncio
+import datetime
 import hashlib
 import re
 from typing import Any
@@ -31,6 +32,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 from app.core.config import settings
 from app.core.constants import RunStage
 from app.core.errors import AppError
+from app.core.logging import log
 from app.providers.crawl import fetcher
 from app.services import impersonation as impersonation_svc
 from app.services import politeness as politeness_svc
@@ -39,7 +41,11 @@ from app.services.source_router import triage_source
 
 _ORDER = {"web:http": ("http", "crawl4ai"),
           "web:crawl4ai": ("crawl4ai", "http"),
-          "document:docling": ("http", "crawl4ai"),  # Later: docling first (FEATURE_DOCLING)
+          # `document:docling` prefers the document rung first, but only when
+          # the flag is on; otherwise it keeps the old http->crawl4ai order so
+          # a PDF seed degrades to the honest `non-html` skip rather than to a
+          # rung that cannot run.
+          "document:docling": ("http", "crawl4ai"),
           "structured:api": ("http",)}
 
 # Traversal never follows data/binary assets (Scrapy IGNORED_EXTENSIONS spirit).
@@ -56,11 +62,22 @@ def _methods_for(route: str, url: str) -> tuple[str, ...]:
     Impersonation sits after plain httpx and before Crawl4AI (cheaper than a
     browser) — but ONLY for allowlisted hosts. Off-list URLs keep the exact
     MVP order; the rung can never fire without an explicit allowlist entry.
+
+    Two flag-gated rungs complete the order table: `docling` leads document
+    routes only when FEATURE_DOCLING is on (and installed; otherwise the rung
+    itself refuses with a named error), and `jina` trails web routes only when
+    FEATURE_JINA is on. Both default off, so default behavior is unchanged.
     """
-    methods = list(_ORDER.get(route, ("http", "crawl4ai")))
+    if route == "document:docling" and getattr(settings, "FEATURE_DOCLING", False):
+        methods = ["docling", "http", "crawl4ai"]
+    else:
+        methods = list(_ORDER.get(route, ("http", "crawl4ai")))
     if ("http" in methods and "impersonate" not in methods
             and impersonation_svc.is_allowlisted(url)):
         methods.insert(methods.index("http") + 1, "impersonate")
+    if (getattr(settings, "FEATURE_JINA", False) and route.startswith("web:")
+            and "jina" not in methods):
+        methods.append("jina")
     return tuple(methods)
 
 
@@ -155,10 +172,23 @@ media events sitemap feed rss share print wishlist returns shipping
 """.split())
 
 #: Query keys that are navigation state rather than a distinct resource. Two
-#: pages that differ only by `?page=2` are one resource twice, and
-#: `canonical_url` strips fragments but not these.
-_NAV_QUERY_KEYS = frozenset({"page", "offset", "start", "sort", "orderby", "order",
+#: pages that differ only by `?sort=name` or `?filter=active` are one resource
+#: shown two ways, and `canonical_url` strips fragments but not these.
+_NAV_QUERY_KEYS = frozenset({"sort", "orderby", "order",
                              "filter", "q", "search", "ref", "from", "view"})
+
+#: Offset-style pagination keys. These were in `_NAV_QUERY_KEYS` and that made
+#: pagination structurally unreachable: `?page=2` scored `-4.0` there, plus the
+#: usual penalties, landing below the `score >= 0` cut in `_rank_children`. A
+#: listing's second page is a *different set of records*, not a re-rendering of
+#: the first, so dropping it is exactly backwards — it is where the rest of the
+#: results are. They are no longer penalised as furniture; `rel="next"` and
+#: sequential offsets are positively rewarded in `score_link` instead.
+_PAGINATION_QUERY_KEYS = frozenset({"page", "offset", "start", "p", "pg"})
+
+#: Path segments that turn a following ordinal into a page number, for the
+#: path-style form (`/page/2`, `/p/12`) that carries no query string at all.
+_PAGINATION_PATH_SEGMENTS = frozenset({"page", "pages", "p", "pg"})
 
 #: Campaign and affiliate parameters. The destination is unchanged by them, so a
 #: link carrying them is the same page under a different label — and a real page
@@ -172,6 +202,14 @@ partner_category partner_medium partner_network cid icid
 """.split())
 
 _WORD = re.compile(r"[a-z0-9]+")
+
+#: The share of a run's page budget that may be spent on seeds.
+#:
+#: The remaining `1 - SEED_BUDGET_SHARE` is reserved for children, which is the
+#: only way to guarantee `max_depth` means anything. Discovery routinely offers
+#: as many seeds as there are page slots, so without a reserve the budget is gone
+#: before traversal begins and the crawl is flat — every seed fetched, no depth.
+SEED_BUDGET_SHARE = 0.4
 
 
 def _terms(text: object) -> set[str]:
@@ -197,6 +235,44 @@ def plan_terms(plan: dict | None) -> set[str]:
     for q in (plan.get("search_queries") or []):
         out |= _terms(q)
     return out
+
+
+def _query_keys(link: str) -> set[str]:
+    """Lowercased query keys of a URL. Empty when it cannot be parsed."""
+    try:
+        return {k.lower() for k, _v in
+                parse_qsl(urlparse(link).query or "", keep_blank_values=False)}
+    except (ValueError, TypeError):
+        return set()
+
+
+def _is_pagination(link: str, anchor: str, query_keys: set[str]) -> bool:
+    """Whether this link continues a listing rather than leaving it.
+
+    Three shapes cover essentially every real listing:
+
+    * `?page=2`, `?offset=40` — the key is in `_PAGINATION_QUERY_KEYS`;
+    * `/page/2`, `/companies?page=2` — a path segment that is a bare ordinal;
+    * anchor text saying so — `Next`, `Older posts`, `Next page`, and the `next`
+      marker this codebase hands back for `<link rel="next">`.
+
+    The anchor alone is trusted only for unambiguous continuations. `More` and
+    `View all` are deliberately excluded: they usually mean a different page
+    (`/archive`), not page two of this one.
+    """
+    if query_keys & _PAGINATION_QUERY_KEYS:
+        return True
+    text = re.sub(r"\s+", " ", anchor or "").strip().lower()
+    if re.fullmatch(r"(next( page)?|older( posts?)?|newer( posts?)?"
+                    r"|page \d+|next \d+|>\s*|»)", text):
+        return True
+    try:
+        segs = [s.lower() for s in (urlparse(link).path or "").strip("/").split("/") if s]
+    except ValueError:
+        return False
+    # A trailing bare ordinal: `/page/2`, `/companies/3`, `/p/12`.
+    return bool(segs) and len(segs) <= 2 and segs[-1].isdigit() and \
+        segs[-2] in _PAGINATION_PATH_SEGMENTS
 
 
 def score_link(link: str, anchor: str = "", plan: dict | None = None,
@@ -263,6 +339,20 @@ def score_link(link: str, anchor: str = "", plan: dict | None = None,
     tracking = len(qs & _TRACKING_QUERY_KEYS)
     if tracking:
         score -= min(4.0, 2.0 + 0.5 * tracking)
+
+    # --- pagination: a distinct set of records, so worth a fetch -------------
+    # These keys used to sit in `_NAV_QUERY_KEYS` for -4.0, which put every
+    # `?page=2` below the `score >= 0` cut. A listing's later pages hold the
+    # records the first page did not, so the penalty was spending the budget on
+    # the seed and discarding everything behind it.
+    #
+    # Path-style pagination (`/page/2/`, used by quotes.toscrape.com) carries no
+    # query key at all, so the anchor is the only signal. Both shapes are scored
+    # here, and `_rank_children` additionally guarantees the best one survives
+    # the per-parent trim — on a listing page of author links, `/page/2/` ties
+    # with every author and lost all eight slots.
+    if _is_pagination(link, anchor, qs):
+        score += 3.0
 
     # --- positives: things that look like the thing being asked for ----------
     if words:
@@ -361,7 +451,16 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                 sparse = politeness_svc.low_density_shell(html, len(clean),
                                                           len(page.get("html", "")))
                 if "crawl4ai" not in remaining or not (shell or hollow or sparse):
-                    return page
+                    # Either this page is genuinely readable, or it is the last
+                    # rung and still looks like a shell. Those are opposites, and
+                    # they used to share one `return page` — which handed an
+                    # unreadable shell straight to the extractor on the final
+                    # attempt, so `NA` values got stored as real records.
+                    if not (shell or hollow or sparse):
+                        return page
+                    if len(clean) > best_len:
+                        best, best_len = page, len(clean)
+                    break  # to the tail, which refuses to call a shell a page
                 if len(clean) > best_len:
                     best, best_len = page, len(clean)
                 politeness_svc.stats.note_retry(f"thin-escalate:{method}")
@@ -388,6 +487,26 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                     continue
                 break
     if best is not None:
+        # A page that stayed a JS shell through every rung is not a page we
+        # read — it is a page we failed to render, and returning it as `best`
+        # let the extractor mine `NA` out of an empty shell and record those as
+        # real records. `/api/intel/ask` already refuses this case; the run
+        # pipeline had no equivalent, so a broken renderer produced confident
+        # nonsense instead of a visible failure.
+        final_html = best.get("html", "")
+        final_clean = best.get("markdown") or await asyncio.to_thread(
+            reducer_svc.reduce_html, final_html)
+        final_len = len(final_clean)
+        if final_len < settings.FETCH_THIN_CHARS:
+            raise AppError("E_RENDER_FAILED",
+                           f"the page is still a JavaScript shell after "
+                           f"rendering ({final_len} chars of real text, needs "
+                           f"{settings.FETCH_THIN_CHARS}); nothing was readable, "
+                           f"so this page is recorded as unrenderable rather "
+                           f"than extracted from an empty shell",
+                           422, {"url": best.get("url", ""),
+                                 "chars": final_len,
+                                 "required": settings.FETCH_THIN_CHARS})
         return best
     raise last_err if last_err else RuntimeError("fetch failed")
 
@@ -422,7 +541,17 @@ def _child_links_with_text(page: dict) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         seen_urls: set[str] = set()
         for x in parsed:
-            if isinstance(x, (list, tuple)) and len(x) >= 2:
+            if isinstance(x, dict):
+                # What `fetcher._crawl_result_links` actually produces
+                # (`fetcher.py:485-487`): `{"url", "text", "internal"}`. This
+                # branch did not exist, so the `else: continue` below discarded
+                # every link the renderer had already parsed — including the
+                # post-JS links no static parse can see. Children survived only
+                # by accident, via a second parse of `rendered_html` capped at 50
+                # same-host links, so the renderer's 200 collected links bought
+                # nothing.
+                u, t = str(x.get("url") or ""), str(x.get("text") or "")
+            elif isinstance(x, (list, tuple)) and len(x) >= 2:
                 u, t = str(x[0]), str(x[1])
             elif isinstance(x, (str, bytes)):
                 u, t = (x.decode() if isinstance(x, bytes) else x), ""
@@ -459,6 +588,7 @@ def _rank_children(pairs: list[tuple[str, str]], plan: dict, terms: set[str],
     the other.
     """
     scored: list[tuple[float, str]] = []
+    paged: list[tuple[float, str]] = []
     added: set[str] = set()
     for raw, anchor in pairs:
         link = canonical_url(raw)
@@ -470,10 +600,26 @@ def _rank_children(pairs: list[tuple[str, str]], plan: dict, terms: set[str],
         if not traversal_allowed(link, plan):
             continue
         added.add(link)
-        scored.append((score_link(link, anchor, plan, terms), link))
+        score = score_link(link, anchor, plan, terms)
+        scored.append((score, link))
+        if _is_pagination(link, anchor, _query_keys(link)):
+            paged.append((score, link))
     # Best first, then by URL so the order is stable for a given page.
     scored.sort(key=lambda s: (-s[0], s[1]))
     out = [link for score, link in scored if score >= 0]
+    if len(out) > per_parent and paged:
+        # A listing's own next page must not be crowded out by the records that
+        # page happens to list. On a page of author links, `/page/2/` tied with
+        # every author at 1.0 and lost all eight per-parent slots to the
+        # alphabetical tiebreak — so the rest of the listing was never fetched.
+        # Reserve one slot for the best continuation.
+        best_paged = max(paged, key=lambda s: (-s[0], s[1]))[1]
+        kept = out[:per_parent - 1]
+        if best_paged in out:
+            kept.append(best_paged)
+            out = kept
+        else:
+            out = kept
     return out[:per_parent]
 
 
@@ -516,10 +662,24 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     per_parent_cap = max(2, min(int((plan.get("traversal", {}) or {}).get(
         "max_children_per_page", 8)), 40))
     traversal = plan.get("traversal", {}) or {}
-    per_domain_cap = max(1, min(int(traversal.get("max_pages_per_domain", 3)),
+    per_domain_cap = max(1, min(int(traversal.get("max_pages_per_domain", 10)),
                                 settings.RUN_MAX_DOMAIN_PAGES))
     max_depth = max(1, min(settings.RUN_MAX_DEPTH, 5))
     budget = min(int(plan.get("max_pages", settings.RUN_MAX_PAGES)), settings.RUN_MAX_PAGES)
+
+    # Seeds and traversal were drawing on one budget, and seeds won.
+    #
+    # `discovery` returns up to `max_pages` seeds, so a normal run entered the
+    # queue with seeds == budget. `_worker` counts every claim (seeds included)
+    # against that same number, so the queue drained without a single child ever
+    # being popped: `RUN_MAX_DEPTH` was real, and nothing ever went one level
+    # deep. Seeds also bypassed `per_domain_cap` entirely (it is checked at
+    # `depth > 0`), so the cap could not compensate either.
+    #
+    # The fix is to reserve traversal space up front rather than hope the budget
+    # has slack. `SEED_BUDGET_SHARE` of the budget may go to seeds; the rest is
+    # guaranteed to children.
+    seed_cap = max(1, int(budget * SEED_BUDGET_SHARE))
 
     sem = asyncio.Semaphore(4)
     pages: list[dict] = []
@@ -527,15 +687,78 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     reused = 0
     seen: set[str] = set()
     domain_count: dict[str, int] = {}
+    # Truncation causes, counted rather than swallowed. Every one of these used
+    # to be a silent `return` or a silent `break`, which is why a crawl that
+    # stopped at the seeds looked identical to one that had nothing to follow.
+    blocked_by_domain_cap = 0
+    blocked_by_budget = 0
+    seeds_dropped = 0
+    # Did the crawl actually go past its seeds? Tracked explicitly because
+    # "successfully fetched N pages" and "fetched N pages, none of them linked
+    # from anything it found" are different outcomes with the same counts.
+    traversed_pages = 0
+    depth_reached = 0
     # Seeds are canonicalised on entry so a seeded fragment variant cannot
     # spend a slot the base URL already occupies.
-    queue: list[tuple[dict, int]] = [
+    _seed_queue: list[tuple[dict, int]] = [
         ({**u, "url": canonical_url(u.get("url", ""))}, 0)
         for u in urls if canonical_url(u.get("url", ""))
     ]
+    queue: list[tuple[dict, int]] = _seed_queue[:seed_cap]
+    seeds_queued = len(queue)
+    seeds_dropped = max(0, len(_seed_queue) - len(queue))
+    del _seed_queue
+    if seeds_dropped:
+        log.warning(
+            "seeds truncated to reserve traversal budget",
+            extra={"data": {
+                "seeds_offered": len(urls), "seeds_queued": len(queue),
+                "seeds_dropped": seeds_dropped, "budget": budget,
+                "seed_cap": seed_cap, "max_depth": max_depth,
+                "reason": (f"a run that spends its whole budget on seeds never "
+                           f"traverses; {SEED_BUDGET_SHARE:.0%} of the budget is "
+                           f"reserved for children")}})
+
+    # Per-page failures that the optional hooks themselves caused. Kept apart from
+    # `fail` because they are our bug, not the site's: the page WAS fetched, so it
+    # is in `pages`, and counting it as a fetch failure would understate the yield.
+    hook_failures = 0
+
+    async def _record_source(row: dict) -> None:
+        """Persist one source row. Never raises.
+
+        `persist_source` is an optional injected hook. Calling it unguarded meant
+        a single `TypeError` from a hook — or a `None` passed for one — escaped
+        `_settle`, propagated out of `_worker`, and took down the entire crawl,
+        discarding every page already fetched. One bad bookkeeping row must cost
+        exactly one bookkeeping row.
+        """
+        nonlocal hook_failures
+        if persist_source is None:
+            return
+        try:
+            await persist_source(row)
+        except Exception as e:  # noqa: BLE001
+            hook_failures += 1
+            log.warning("source row not persisted",
+                        extra={"data": {"url": str(row.get("url", ""))[:120],
+                                        "error": str(e)[:200]}})
+
+    async def _notify(payload: dict) -> None:
+        """Emit a progress event. Never raises.
+
+        Same reasoning as `_record_source`: a broken SSE consumer must not be able
+        to destroy a crawl.
+        """
+        if emit is None:
+            return
+        try:
+            await emit(payload)
+        except Exception as e:  # noqa: BLE001
+            log.debug("emit failed", extra={"data": {"error": str(e)[:160]}})
 
     async def _settle(item: dict, depth: int) -> None:
-        nonlocal ok, fail, skipped, reused
+        nonlocal ok, fail, skipped, reused, traversed_pages, depth_reached
         # Canonical before anything keys off the URL: the seen set, the
         # per-domain cap, the stored row and the crawl all agree on one
         # identity per resource.
@@ -544,7 +767,16 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             return
         dom = _domain(url)
         if depth > 0 and domain_count.get(dom, 0) >= per_domain_cap:
-            return  # traversal cap (seeds always allowed); uncounted, unpersisted
+            # Counted, and reported, rather than dropped in silence. This used to
+            # be a bare `return`, so a run stopped at 3 pages of one host looked
+            # exactly like a run with no further links to follow — and the cap is
+            # the thing most likely to stop recursion into the best host.
+            nonlocal blocked_by_domain_cap
+            blocked_by_domain_cap += 1
+            return
+        if depth > 0:
+            traversed_pages += 1
+            depth_reached = max(depth_reached, depth)
         # Reserve the slot BEFORE the await, not after.
         #
         # The cap used to be read above and incremented below `await _one()`.
@@ -575,11 +807,22 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                 # A page shaped like one `_one` returns, so extraction and
                 # validation cannot tell it was reused. `page_id` points at the
                 # stored row, so every quote still resolves against real text.
+                #
+                # `html` carries the stored `raw_html` on purpose: this dict has
+                # no `links` key, so `_child_links_with_text` falls through to
+                # parsing `html`, and a stored page that arrived without it
+                # expanded to zero children — silently, one page per run. The
+                # repository's `find_page_by_url(url, include_html=True)` does
+                # return `raw_html`, so this is belt-and-braces for any store
+                # that omits it, and it keeps the reuse branch structurally
+                # identical to the fetched branch. `rendered_html` is mirrored
+                # too, since `_child_links_with_text` prefers either name.
                 page = {
                     "url": stored.get("url") or url,
                     "final_url": stored.get("final_url", ""),
                     "title": stored.get("title") or item.get("title", ""),
                     "html": stored.get("raw_html", "") or "",
+                    "rendered_html": stored.get("raw_html", "") or "",
                     "markdown": stored.get("markdown", ""),
                     "content_hash": stored.get("content_hash", ""),
                     "method": stored.get("method", "") or "reused",
@@ -590,7 +833,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                     "retrieved_at": stored.get("retrieved_at"),
                 }
                 pages.append(page)
-                await persist_source({
+                await _record_source({
                     "url": url, "title": page["title"], "status": "reused",
                     "method": page["method"], "error": "",
                     "content_hash": page["content_hash"],
@@ -600,17 +843,14 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                     "reused_page_id": page["page_id"],
                     "retrieved_at": page["retrieved_at"],
                     "fingerprint": politeness_svc.fingerprint("GET", url)})
-                if emit is not None:
-                    await emit({"type": "source.reused", "run_id": "",
-                                "message": f"reused stored page from an earlier run: {url[:90]}",
-                                "stage": RunStage.FETCHING,
-                                "data": {"url": url,
-                                         "page_id": page["page_id"],
-                                         "reused_from_run_id": page["reused_from_run_id"],
-                                         "retrieved_at": page["retrieved_at"]}})
-                # Traversal still proceeds: the stored page carries its links,
-                # and a reused page that stopped discovery would quietly shrink
-                # every subsequent run.
+                await _notify({"type": "source.reused", "run_id": "",
+                               "message": f"reused stored page from an earlier run: {url[:90]}",
+                               "stage": RunStage.FETCHING,
+                               "data": {"url": url,
+                                        "page_id": page["page_id"],
+                                        "reused_from_run_id": page["reused_from_run_id"],
+                                        "retrieved_at": page["retrieved_at"]}})
+                # Traversal proceeds from the stored HTML captured above.
                 if depth < max_depth:
                     for link in _rank_children(
                             _child_links_with_text(page), plan, terms, seen, depth,
@@ -626,7 +866,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             if dom:
                 domain_count[dom] = max(0, domain_count.get(dom, 0) - 1)
             err = getattr(e, "message", str(e))[:300]
-            await persist_source({"url": url, "title": item.get("title", ""),
+            await _record_source({"url": url, "title": item.get("title", ""),
                                   "status": "failed", "method": "", "error": err,
                                   "content_hash": "",
                                   "media": {"images": 0, "videos": 0, "links": 0},
@@ -637,7 +877,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             skipped += 1
             if dom:
                 domain_count[dom] = max(0, domain_count.get(dom, 0) - 1)
-            await persist_source({"url": url, "title": page.get("title", ""),
+            await _record_source({"url": url, "title": page.get("title", ""),
                                   "status": "skipped", "method": page.get("method", ""),
                                   "error": reason, "content_hash": "",
                                   "media": {"images": 0, "videos": 0, "links": 0},
@@ -672,7 +912,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             except Exception as e:  # noqa: BLE001
                 fail += 1
                 ok -= 1
-                await persist_source({"url": url, "title": page["title"],
+                await _record_source({"url": url, "title": page["title"],
                                       "status": "failed", "method": page.get("method", ""),
                                       "error": f"evidence not stored: {str(e)[:200]}",
                                       "content_hash": page.get("content_hash", ""),
@@ -681,13 +921,13 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                                       "fingerprint": politeness_svc.fingerprint("GET", url)})
                 return
         pages.append(page)
-        await persist_source({"url": url, "title": page["title"], "status": "ok",
+        await _record_source({"url": url, "title": page["title"], "status": "ok",
                               "method": page.get("method", ""), "error": "",
                               "content_hash": page.get("content_hash", ""),
                               "snapshot_chars": snapshot_chars,
                               "media": _media_counts(page, url),
                               "fingerprint": politeness_svc.fingerprint("GET", url)})
-        await emit_source(emit, url, True)
+        await _notify(_source_fetched_event(url))
         # Traversal reads `html`, which the rendered rungs never return: a
         # Crawl4AI page has markdown and rendered_html only. Gating on `html`
         # therefore dead-ended subpage discovery for exactly the JS-heavy pages
@@ -712,7 +952,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     in_flight = 0
 
     async def _worker() -> None:
-        nonlocal in_flight
+        nonlocal in_flight, fail, blocked_by_budget
         while True:
             # Sync pick section (no awaits): claim is race-free on one loop.
             # Duplicates are skipped WITHOUT counting; budget counts every
@@ -730,6 +970,16 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                     in_flight += 1
                     pick = (item, depth)
             if pick is None:
+                # The queue still holds children but the budget is spent. This
+                # is the truncation the seed reserve exists to prevent, so it is
+                # counted and reported rather than looking like an empty queue.
+                if queue and in_flight == 0:
+                    blocked_by_budget += len(queue)
+                    queue.clear()
+                    log.warning(
+                        "traversal budget spent with pages still queued",
+                        extra={"data": {"queued_untouched": blocked_by_budget,
+                                        "budget": budget}})
                 if in_flight == 0:
                     return  # queue drained and nothing running: done
                 await asyncio.sleep(0.02)  # traversal may still append
@@ -737,12 +987,30 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             item, depth = pick
             try:
                 await _settle(item, depth)
+            except Exception as e:  # noqa: BLE001
+                # A worker that dies takes the whole crawl with it: the `gather`
+                # below would raise, `fetch_all` would return nothing, and every
+                # page already fetched would be lost — over a single bad URL. The
+                # page is counted as failed so the budget stays honest and the
+                # failure is visible in `counts` rather than silent.
+                fail += 1
+                log.warning("page settlement failed",
+                            extra={"data": {"url": str(item.get("url", ""))[:120],
+                                            "error": str(e)[:200]}})
             finally:
                 in_flight -= 1
                 host = _domain(item["url"])
                 settled[host] = settled.get(host, 0) + 1
 
-    await asyncio.gather(*(_worker() for _ in range(_WORKERS)))
+    # `return_exceptions=True` so one worker raising cannot cancel the others.
+    # The `except` in `_worker` is the primary defence; this is the backstop that
+    # turns any *future* unguarded path into a logged partial crawl instead of a
+    # total loss.
+    worker_errors = await asyncio.gather(
+        *(_worker() for _ in range(_WORKERS)), return_exceptions=True)
+    for err in worker_errors:
+        if isinstance(err, BaseException):
+            log.error("crawl worker died", extra={"data": {"error": str(err)[:200]}})
 
     # `fetched` is reported next to `reused` because the pair is the whole
     # point of reuse. `successful` alone could not show it: a reused page
@@ -751,19 +1019,50 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     counts = {"attempted": ok + fail + skipped, "successful": ok,
               "failed": fail, "skipped": skipped, "reused": reused,
               "fetched": max(0, ok - reused)}
+    if hook_failures:
+        # Our hooks failed, not the crawl. Reported separately so a caller never
+        # reads this as "N pages failed to fetch".
+        counts["hook_failures"] = hook_failures
+
+    # Why the crawl stopped where it did. A `coverage` gap attributed to
+    # "crawl-depth" is only actionable if the run can say it never got past the
+    # seeds, or hit a per-domain cap, or ran out of budget. All three were
+    # previously invisible, so a flat crawl reported the same numbers as a deep
+    # one and nothing downstream could tell them apart.
+    counts["traversal"] = {
+        "seeds_queued": seeds_queued,
+        "seeds_dropped": seeds_dropped,
+        "traversed_pages": traversed_pages,
+        "blocked_by_domain_cap": blocked_by_domain_cap,
+        "blocked_by_budget": blocked_by_budget,
+        "max_depth": max_depth,
+        "depth_reached": depth_reached,
+        "per_domain_cap": per_domain_cap,
+        "budget": budget,
+    }
+    if blocked_by_domain_cap or blocked_by_budget or seeds_dropped:
+        log.info("crawl stopped early", extra={"data": counts["traversal"]})
     return pages, counts
 
 
-async def emit_source(emit: Any, url: str, ok_flag: bool) -> None:
-    import datetime
-    # `data` carries the url and the outcome structurally. It used to be absent
-    # and the url existed only inside the human-readable `message`, which meant
-    # any client wanting to build a list of what was actually fetched had to
-    # regex a sentence. `url` is already in scope here, so the field is free.
-    await emit({"type": "source.fetched", "run_id": "",
-                "stage": "FETCHING", "message": f"{'Fetched' if ok_flag else 'Skipped'} {url[:80]}",
-                "progress": 40, "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-                "data": {"url": url, "ok": bool(ok_flag)}})
+def _source_fetched_event(url: str, ok_flag: bool = True) -> dict[str, Any]:
+    """The `source.fetched` SSE frame, as data rather than an awaitable.
+
+    `data` carries the url and the outcome structurally. It used to be absent and
+    the url existed only inside the human-readable `message`, which meant any
+    client wanting to build a list of what was actually fetched had to regex a
+    sentence.
+
+    A plain function, not an async one, because every emission now goes through
+    `_notify`, which owns the try/except. An `async def emit_source` that awaited
+    `emit` directly was the other unguarded path that could kill a crawl.
+    """
+    return {"type": "source.fetched", "run_id": "",
+            "stage": "FETCHING",
+            "message": f"{'Fetched' if ok_flag else 'Skipped'} {url[:80]}",
+            "progress": 40,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            "data": {"url": url, "ok": bool(ok_flag)}}
 
 
 async def _default_fetch(url: str, method: str) -> dict[str, Any]:
@@ -773,4 +1072,6 @@ async def _default_fetch(url: str, method: str) -> dict[str, Any]:
         return await impersonation_svc.impersonate_fetch(url)
     if method == "jina":
         return await fetcher.jina_fetch(url)
+    if method == "docling":
+        return await fetcher.docling_fetch(url)
     return await fetcher.http_fetch(url)

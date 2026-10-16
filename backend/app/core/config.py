@@ -138,15 +138,17 @@ class Settings(BaseSettings):
     JEV_MODEL: str = "~typesafe/jev-latest"
 
     # Budgets (env may only tighten below code maxima; Runner clamps)
-    RUN_MAX_SEARCH_QUERIES: int = Field(default=5, ge=1, le=8)
+    # NOTE: `RUN_MAX_SEARCH_QUERIES`, `RUN_MAX_REQUESTS` and
+    # `RUN_MAX_PAGES_PER_SOURCE` used to live here with zero readers anywhere in
+    # `app/` — knobs that turned nothing. They were removed rather than left to
+    # mislead; the live query budget is `SUPERVISOR_MAX_QUERIES`, the page
+    # budget is `RUN_MAX_PAGES`.
     RUN_MAX_RESULTS_PER_QUERY: int = Field(default=5, ge=1, le=20)
     # Deep-crawl ceilings raised for complete-site capture; defaults stay
     # conservative (12 pages / depth 2) — plans opt into more explicitly.
     RUN_MAX_PAGES: int = Field(default=12, ge=1, le=200)
     RUN_MAX_DEPTH: int = Field(default=2, ge=1, le=5)
     RUN_MAX_DOMAIN_PAGES: int = Field(default=10, ge=1, le=50)
-    RUN_MAX_REQUESTS: int = Field(default=50, ge=1, le=200)
-    RUN_MAX_PAGES_PER_SOURCE: int = Field(default=5, ge=1, le=10)
     RUN_RETRY_COUNT: int = Field(default=1, ge=0, le=3)
     RUN_MAX_RUNTIME_S: int = Field(default=1200, ge=30, le=3600)
     # Pacing between extraction pages: free-tier LLM quotas are per-minute, so
@@ -205,17 +207,16 @@ class Settings(BaseSettings):
     # Phase-3 item pipeline: max concurrent per-record validations (Jev calls).
     ITEM_CONCURRENCY: int = Field(default=8, ge=1, le=32)
 
-    # Feature gates
+    # Feature gates. Only flags with a wired rung live here: `FEATURE_DOCLING`
+    # leads document routes and `FEATURE_JINA` trails web routes (see
+    # `crawler._methods_for`); `FEATURE_SEMANTIC_DEDUP` fails fast with a named
+    # error until a provider exists. The rest of the roadmap flags
+    # (`FEATURE_BROWSER`, `FEATURE_MCP`) and the Qdrant store settings were
+    # removed with zero readers — a flag that gates nothing is a promise the
+    # code does not keep.
     FEATURE_DOCLING: bool = False
     FEATURE_JINA: bool = False
     FEATURE_SEMANTIC_DEDUP: bool = False
-    FEATURE_BROWSER: bool = False
-    FEATURE_MCP: bool = False
-
-    # Later stores
-    QDRANT_URL: str = ""
-    QDRANT_API_KEY: str = ""
-    QDRANT_COLLECTION: str = "datagoblin_l3"
 
     # Observability
     LOG_LEVEL: str = "INFO"

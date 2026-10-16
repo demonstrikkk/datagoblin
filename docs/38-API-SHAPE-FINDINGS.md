@@ -3,10 +3,10 @@
 Discovered 2026-09-27 while building the frontend against a live backend
 (commit under test: the `main.py` revision with `003_evidence.sql` applied).
 
-These are **not** fixed. They are recorded because the frontend currently
-compensates for each one, and a future backend fix must not silently break the
-UI that is working around it. Every item states what the frontend does today so
-the compensation can be removed deliberately rather than by accident.
+These were **not** fixed when recorded. Items 1, 2, 4, 6 and 8 have since
+been fixed server-side (see each item); the frontend compensations still stand
+and are harmless, but can now be removed deliberately. Items 3, 5, 7 and 9 are
+partly fixed — see each item for what remains.
 
 ---
 
@@ -35,6 +35,11 @@ returns `{}` rather than `null` — see finding 6.
 `GET /runs/{id}` prefer the rich shape. The frontend comparison can then be
 collapsed to a single source.
 
+**Update:** fixed. Stored rows are now normalised through `_stored_run_view`
+(`main.py`) into the same `RunView` shape as live runs — `run_id`, full
+`Counters`, `partial`, `no_yield_reason`. The frontend compensation can be
+simplified when convenient; it is not wrong, just redundant.
+
 ---
 
 ## 2. `GET /runs/{id}` drops `partial` and `no_yield_reason` for live runs
@@ -50,6 +55,9 @@ flag alone misclassify it.
 **Frontend today:** `isPartialRun()` accepts `partial === true`, `status ===
 'PARTIAL'`, or `counters.partial`, and `RunView` reads the run's `error`
 string, which does carry the reason.
+
+**Update:** fixed. `RunView` now carries `partial` and `no_yield_reason`, and
+`_run_view` fills both on every terminal event.
 
 ---
 
@@ -67,6 +75,9 @@ a run that has already finished.
 **Frontend today:** `useRunStream` treats a terminal status received over the
 stream as terminal and closes the socket itself. This is a client-side patch
 for a server-side leak; the connection is not released on the server.
+
+**Update:** fixed server-side (`PARTIAL` is in the terminal tuple alongside the
+other three). The client self-close is now redundant but harmless.
 
 ---
 
@@ -90,6 +101,10 @@ numbers are surfaced at all.
 **Note:** this is a *good* shape — `total` is what makes server-side pagination
 possible. Only the empty-array 404 is questionable.
 
+**Update:** fixed. Both endpoints now check dataset existence first: unknown id
+→ 404, existing-but-empty → 200 with the empty shape. The frontend's envelope
+reading is unchanged and correct.
+
 ---
 
 ## 5. Dataset `schema` and `counts` are inconsistently persisted
@@ -109,6 +124,12 @@ fields are largely verified — an unearned negative.
 shows a quality bar only when counters exist, with a single explanatory notice
 rather than the same caveat repeated on every card.
 
+**Update:** still open. `list_datasets` selects no counts column, so the list
+shape still cannot carry verification totals; the detail endpoint and the
+frontend's counted-vs-not-counted distinction remain the correct behaviour.
+Fixing it means either a counts column on `datasets` or a join the list query
+does not currently pay for — deliberately deferred, not overlooked.
+
 ---
 
 ## 6. `GET /api/models/free` has no `reachable` field
@@ -126,6 +147,10 @@ including the ones known to be gated. `opencode` is
 
 **Frontend today:** derives state from `observed` and `transport`; green only
 when `observed` starts with `ok`, amber for `transport: "opencode"`.
+
+**Update:** fixed. Each `text_models[]` entry now carries `reachable` plus
+`reachable_reason` (direct → observed-ok; opencode → server probe). The
+frontend derivation still works and can migrate to the boolean.
 
 ---
 
@@ -160,6 +185,13 @@ the SSE stream is still the source of truth for the event log.
 plausible explanation for the "the app hangs" reports that prompted the UI
 rebuild in the first place.
 
+**Update:** partly fixed. Every sync repository write on the run path
+(`append_event`, `upsert_source`, fingerprints, charges, `finalize_dataset`,
+history reads) is now offloaded via `asyncio.to_thread`, and event persistence
+failure is logged rather than thrown into the run. What remains is proof under
+a real judging burst — the suspected `time.sleep`-in-async-`def` was not found;
+all sleeps audited are `asyncio.sleep` — plus the simultaneous-death forensics.
+
 ---
 
 ## 8. Minor: run identity is spelled two ways
@@ -169,6 +201,10 @@ row return `id`. Reading only one produced blank identifiers and a run list with
 no working links.
 
 **Frontend today:** `runId(run)` accepts either.
+
+**Update:** fixed. `GET /history` now returns stored rows normalised to
+`run_id` (plus counters, partial, and the produced `dataset_id`). `runId(run)`
+can stay as a defensive helper.
 
 ---
 
@@ -180,3 +216,9 @@ uniformly requests a Blob receives `{"data":…}` bytes for JSON.
 
 **Frontend today:** `api.exportDataset` branches on format and returns
 `{blob, format}` for the attachment formats and parsed data for JSON.
+
+**Update:** partly fixed. CSV/MD downloads still return the file bytes (they
+must — the bytes are the file), but now carry `X-Datagoblin-Export-Id`,
+`X-Datagoblin-Persisted`, `X-Datagoblin-Credits-Used` and
+`X-Datagoblin-Correlation-Id` headers as the envelope-equivalent receipt. JSON
+keeps the enveloped body.

@@ -11,7 +11,7 @@ import { useInspector } from '../lib/inspector.jsx';
 import { RunContextProvider, useRunContext } from '../lib/run-context.jsx';
 
 const TITLES = [
-  [/^\/$/, 'Investigate'],
+  [/^\/investigate/, 'Investigate'],
   [/^\/dashboard$/, 'Provenance'],
   [/^\/runs\/?$/, 'Runs'],
   [/^\/runs\//, 'Run'],
@@ -47,7 +47,7 @@ function Frame() {
       close();
     },
     'mod+b': () => setMobileNav((v) => !v),
-    1: () => navigate('/'),
+    1: () => navigate('/investigate'),
     2: () => navigate('/dashboard'),
     3: () => navigate('/runs'),
     4: () => navigate('/library'),
@@ -98,7 +98,7 @@ function Frame() {
         {mobileNav ? (
           <div className="fixed inset-x-0 bottom-0 z-40 flex justify-around border-t border-rule bg-paper-2/95 py-1.5 backdrop-blur sm:hidden animate-slide-left">
             {[
-              ['/', 'Investigate'],
+              ['/investigate', 'Investigate'],
               ['/dashboard', 'Provenance'],
               ['/runs', 'Runs'],
               ['/library', 'Datasets'],

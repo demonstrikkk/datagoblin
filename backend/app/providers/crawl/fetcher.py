@@ -42,6 +42,64 @@ _MAX_TEXT = 100_000
 _MIN_INTERVAL_S = 1.0
 _ROBOTS_TTL_S = 3600
 
+#: How many reveal-clicks one rendered page is allowed.
+#:
+#: Each click is a real round trip against a third party, so this is bounded and
+#: small. It is a safety rail against a page whose "load more" never disables
+#: itself, not a tuning knob.
+_MAX_EXPAND_CLICKS = 4
+
+#: Clicks that reveal content instead of navigating away.
+#:
+#: Every selector here is a *reveal* control: it mutates the DOM in place. A
+#: selector that navigates (a plain link to another page) would throw away the
+#: page being read, which is the opposite of the intent, so `href` links are
+#: excluded and only non-navigating controls are clicked. Run before extraction
+#: so a card grid's detail pane is in the DOM when the markdown is generated.
+_EXPAND_JS = """
+(async () => {
+  const MAX = %d;
+  const SEL = [
+    'button', '[role="button"]', 'a[onclick]', 'a[href="#"]', 'a[href="javascript:void(0)"]',
+    '[aria-expanded="false"]', '[data-toggle]', '[aria-controls]'
+  ];
+  const BAD = /(cookie|consent|gdpr|subscribe|newsletter|sign ?up|log ?in|accept)/i;
+  const TEXT = /(load more|show more|read more|see more|view more|expand|next|more results|show all)/i;
+  let clicks = 0;
+  for (let round = 0; round < MAX; round++) {
+    let target = null;
+    for (const sel of SEL) {
+      let nodes;
+      try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) { continue; }
+      for (const n of nodes) {
+        const label = ((n.innerText || n.value || n.getAttribute('aria-label') || '')
+                       .trim().slice(0, 80));
+        if (!label) continue;
+        // Consent/cookie dialogs and sign-up prompts sit in the same visual
+        // layer as reveal controls and must never be clicked.
+        if (BAD.test(label)) continue;
+        if (!TEXT.test(label) && n.getAttribute('aria-expanded') !== 'false'
+            && !n.hasAttribute('data-toggle')) continue;
+        // A real href navigates. Only reveal controls are clicked.
+        const href = n.getAttribute && n.getAttribute('href');
+        if (href && href !== '#' && !href.startsWith('javascript:')
+            && !href.startsWith('#')) continue;
+        const vis = (n.offsetWidth || n.offsetHeight || n.getClientRects().length);
+        if (!vis) continue;
+        target = n; break;
+      }
+      if (target) break;
+    }
+    if (!target) break;
+    try { target.click(); } catch (e) { break; }
+    clicks++;
+    await new Promise(r => setTimeout(r, 700));
+    try { window.scrollTo(0, document.body.scrollHeight); } catch (e) {}
+  }
+  return clicks;
+})()
+""" % _MAX_EXPAND_CLICKS
+
 _client: httpx.AsyncClient | None = None
 _robots: dict[str, tuple[urllib.robotparser.RobotFileParser, float, bool]] = {}
 _last_hit: dict[str, float] = {}
@@ -240,6 +298,60 @@ def extract_links_with_text(html: str, base_url: str, limit: int = 50) -> list[t
             out.append((abs_url, re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()))
             if len(out) >= limit:
                 break
+        # `<link rel="next">` is the site's own declaration that more results
+        # exist at this URL. It is not an `<a>`, so `find_all("a", href=True)`
+        # above never saw it — which is one reason the rest of a paginated
+        # listing stayed unfetched even before scoring rejected `?page=2`.
+        for link in soup.find_all("link", href=True):
+            try:
+                rel = link.get("rel") or []
+                rel = [str(r).lower() for r in (rel if isinstance(rel, list) else [rel])]
+                if not ({"next", "alternate", "canonical"} & set(rel)):
+                    continue
+                abs_url = urljoin(base_url, str(link["href"]).strip())
+            except Exception:
+                continue
+            p = urlparse(abs_url)
+            if p.scheme not in ("http", "https"):
+                continue
+            host = (p.hostname or "").lower()
+            if host != base_host and not host.endswith("." + base_host):
+                continue
+            if abs_url in seen:
+                continue
+            seen.add(abs_url)
+            out.append((abs_url, "next"))
+        # JS-only navigation. An `<a>` with no `href` — only `onclick`, or a
+        # `data-href`/`data-url` the router reads — is invisible to
+        # `href=True`. These carry the destination in an attribute instead, and
+        # on a card grid they are most of the links on the page.
+        for a in soup.find_all(["a", "button", "div", "span", "li"]):
+            raw = None
+            for attr in ("data-href", "data-url", "data-link", "data-next"):
+                if a.get(attr):
+                    raw = str(a[attr])
+                    break
+            if not raw and a.get("onclick"):
+                m = re.search(r"""['"]([^'"]*(?:/|\.html|\.aspx)[^'"]*)['"]""",
+                              str(a["onclick"]))
+                raw = m.group(1) if m else None
+            if not raw or raw.startswith(("javascript:", "#", "mailto:")):
+                continue
+            try:
+                abs_url = urljoin(base_url, raw.strip())
+            except Exception:
+                continue
+            p = urlparse(abs_url)
+            if p.scheme not in ("http", "https"):
+                continue
+            host = (p.hostname or "").lower()
+            if host != base_host and not host.endswith("." + base_host):
+                continue
+            if abs_url in seen:
+                continue
+            seen.add(abs_url)
+            text = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+            out.append((abs_url, text or "next"))
     except Exception:  # noqa: BLE001 (malformed markup must not kill the crawl)
         return []
     return out
@@ -396,6 +508,26 @@ async def http_fetch(url: str, timeout: int = 0) -> dict[str, Any]:
         politeness.observe(host, -1, time.monotonic() - t0)
         raise provider_transient(f"HTTP error: {str(e)[:150]}")
     ctype = r.headers.get("content-type", "").lower()
+
+    # A JSON endpoint is data, not a page. It used to fall through to the same
+    # "non-html, skipped" branch as a PDF, so `triage_source` could return
+    # `structured:api` for a URL and the fetch then discarded the body — the
+    # structured route existed and could never be taken.
+    #
+    # It is returned as `json_text` rather than as `html`, because the reducer's
+    # markdown rendering would corrupt it and the quote a cell carries has to
+    # resolve against the stored body exactly as it arrived.
+    if "json" in ctype or "javascript" in ctype:
+        body = await r.aread()
+        politeness.observe(host, 200, elapsed, len(body))
+        text = body[:_MAX_BYTES].decode("utf-8", errors="replace")
+        if not text.lstrip()[:1] in ("{", "["):
+            return {"url": target, "final_url": str(r.url)[:2000],
+                    "skipped": "json-without-object", "method": "http"}
+        return {"url": target, "final_url": str(r.url)[:2000],
+                "title": "", "json_text": text, "text": text[:_MAX_TEXT],
+                "images": 0, "videos": 0, "method": "http"}
+
     if "html" not in ctype and "text" not in ctype:
         kind = ctype.split(";")[0].strip() or "unknown"
         return {"url": target, "final_url": str(r.url)[:2000], "skipped": f"non-html:{kind}",
@@ -513,8 +645,14 @@ def _sync_crawl(url: str, timeout_s: int) -> dict:
         # Phase-6 bench finding: infinite-scroll pages (quotes.toscrape.com/scroll)
         # render thin without a full-page scan. scan_full_page costs seconds on
         # an already-expensive fallback path and rescues them deterministically.
+        #
+        # `scan_full_page` is the ONLY lazy-load trigger that existed, and one
+        # scroll pass cannot reach content behind a click: a card grid's detail
+        # pane, a "load more" button, an accordion, a bio hidden behind "Read
+        # more". `js_code` below clicks those a bounded number of times.
         cfg = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, markdown_generator=gen,
-                               scan_full_page=True, scroll_delay=0.5)
+                               scan_full_page=True, scroll_delay=0.5,
+                               js_code=_EXPAND_JS, wait_for="css body")
         async with AsyncWebCrawler() as crawler:
             res = await _aio.wait_for(crawler.arun(url, config=cfg), timeout=timeout_s)
             if not res.success:
@@ -545,6 +683,61 @@ async def crawl4ai_fetch(url: str) -> dict[str, Any]:
         raise
     except Exception as e:
         raise provider_transient(f"Crawl4AI error: {str(e)[:150]}")
+
+
+async def docling_fetch(url: str) -> dict[str, Any]:
+    """Document rung (FEATURE_DOCLING): PDF/office bytes to markdown, locally.
+
+    Downloads the bytes ourselves (guard + robots + throttle, same as `http`)
+    and converts with the optional Docling dependency on a worker thread. When
+    the package is absent the rung refuses with a named error rather than
+    returning an empty page — an empty page would extract `NA` records, while
+    a refusal records why the document was skipped.
+    """
+    from app.providers.crawl import docling as docling_mod
+
+    if not settings.FEATURE_DOCLING:
+        raise provider_fatal("Docling rung disabled (FEATURE_DOCLING=false)")
+    target = await aguard_url(url)
+    host = (urlparse(target).hostname or "").lower()
+    allowed, delay = await robots_allowed(target)
+    if not allowed:
+        politeness.stats.note_blocked()
+        return {"url": target, "skipped": "robots-disallowed", "method": "docling"}
+    await throttle(host, delay)
+    try:
+        r = await _client_pool().get(target, timeout=90)
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (401, 403, 402, 451):
+            raise provider_fatal(f"HTTP {e.response.status_code} (no bypass): {target[:100]}")
+        raise provider_transient(f"HTTP {e.response.status_code}: {target[:100]}")
+    except Exception as e:
+        raise provider_transient(f"Docling download error: {str(e)[:150]}")
+    ctype = r.headers.get("content-type", "").lower()
+    filename = (urlparse(target).path or "/document").rsplit("/", 1)[-1] or "document"
+    body = await r.aread()
+    if len(body) > _MAX_BYTES:
+        return {"url": target, "final_url": str(r.url)[:2000],
+                "skipped": f"document-too-large:{len(body)}", "method": "docling"}
+    if not any(k in ctype for k in ("pdf", "officedocument", "msword",
+                                    "presentation", "spreadsheet", "octet-stream")):
+        return {"url": target, "final_url": str(r.url)[:2000],
+                "skipped": f"non-document:{ctype.split(';')[0].strip() or 'unknown'}",
+                "method": "docling"}
+    try:
+        text = await asyncio.to_thread(docling_mod.extract_document, body, filename)
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise provider_transient(f"Docling convert error: {str(e)[:150]}")
+    if not (text or "").strip():
+        return {"url": target, "final_url": str(r.url)[:2000],
+                "skipped": "docling-empty", "method": "docling"}
+    text = text[:_MAX_TEXT]
+    return {"url": target, "final_url": str(r.url)[:2000], "title": filename,
+            "markdown": text, "text": text, "images": 0, "videos": 0,
+            "method": "docling"}
 
 
 async def jina_fetch(url: str) -> dict[str, Any]:

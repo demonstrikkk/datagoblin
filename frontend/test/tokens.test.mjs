@@ -44,6 +44,16 @@ const NOT_A_COLOUR = new Set([
   'accent-ring',
   'paper-2',
   'paper-3',
+  // The landing page's own measure. `--lg-max: 1400px` in src/landing/Landing.css
+  // is a page width, not an RGB triplet, so `max-width: var(--lg-max)` is correct
+  // unwrapped. It was flagged because it was added to the landing stylesheet
+  // without being registered here, which made `npm test` fail on every run
+  // regardless of what else changed.
+  'lg-max',
+  // Carries a quoted glyph for the dataset rail's `content: var(--glyph)`. A
+  // character, not a colour — wrapping it in rgb() would produce an invalid
+  // declaration and drop the mark.
+  'glyph',
 ]);
 
 function walk(dir, out = []) {

@@ -39,6 +39,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.errors import AppError, provider_fatal, provider_transient
+from app.core.logging import log
 
 #: Idle session pool (LIFO). Bounded by _SESSION_POOL_MAX; entries are retired
 #: after _SESSION_MAX_USES or _SESSION_TTL_S.
@@ -317,25 +318,66 @@ async def available() -> dict[str, Any]:
     return out
 
 
+def explain_unusable(state: dict[str, Any]) -> str:
+    """One sentence naming what is wrong and how to fix it.
+
+    Split out of `preflight` so `scripts/preflight.py` can print the same text a
+    run would refuse with. Two descriptions of the same fault is how they drift.
+    """
+    error = state.get("error") or "unreachable"
+    base = state.get("base_url") or "(unset)"
+
+    if error == "disabled":
+        return ("OPENCODE_ENABLED is false, so no local reader is configured; "
+                "set it to true and start the server with `opencode serve`")
+    if error == "unconfigured":
+        return ("OPENCODE_BASE_URL is not set, so there is no server to ask; "
+                f"set it (currently {base})")
+    if state.get("auth_failed"):
+        why = state.get("error") or "the server rejected this process's credentials"
+        return f"{why}; check OPENCODE_PASSWORD"
+    return (f"{state.get('error') or 'unreachable'} at {base}; start it with "
+            f"`opencode serve` on {base}, or point OPENCODE_BASE_URL at the "
+            f"right address")
+
+
 async def preflight() -> str | None:
     """Can this process actually extract? Returns a reason, or None if it can.
 
     Deliberately the same question the first extraction call would ask, asked
     before the run spends anything. Run start-up calls it so an unusable provider
-    is a refusal in under a second rather than a completed run with zero
-    records three minutes later.
+    is a refusal in under a second rather than a completed run with zero records
+    three minutes later.
 
-    A provider that is switched OFF is not a fault and does not block. Disabling
-    it is a deliberate configuration, another provider may be serving the run,
-    and refusing every run on the strength of a setting the user chose would be
-    a much worse failure than the one this check exists to prevent.
+    Under `OPENCODE_STRICT` this provider is the *only* reader, so an unusable
+    one is fatal. The normal reason for tolerating an unusable primary — "another
+    provider may serve this run" — is exactly what strict mode forbids, so
+    tolerating it there produces the failure this function exists to prevent: a
+    run that searches, crawls, extracts nothing and reports success. Strict mode
+    therefore fails closed on every unusable state, including `disabled` and
+    `unconfigured`.
     """
     state = await available()
     if state.get("reachable"):
         return None
-    if state.get("auth_failed"):
-        return state.get("error") or "the LLM server rejected this process's credentials"
+
+    detail = explain_unusable(state)
+
+    if settings.OPENCODE_STRICT:
+        return (f"{detail}; OPENCODE_STRICT means there is no fallback provider "
+                f"to try after it, so this run cannot extract. Set "
+                f"OPENCODE_STRICT=false to let a cloud provider serve it.")
+
     if state.get("error") in ("disabled", "unconfigured"):
+        # A deliberate configuration, and a cloud fallback may serve this run.
+        # Refusing every run because the user turned the primary off would be a
+        # worse failure than the one this check exists to prevent.
+        log.warning("primary reader switched off; a cloud provider will serve the run",
+                    extra={"data": {"error": detail}})
         return None
-    return (f"the LLM provider at {state.get('base_url')} is not usable: "
-            f"{state.get('error') or 'unreachable'}")
+
+    # Unreachable, or answering with an auth failure, is a fault rather than a
+    # choice — and a cloud fallback is only a *fallback* if a cloud key is
+    # actually configured. Reported either way, because a run that silently
+    # starts paying a different provider is the thing to avoid.
+    return detail

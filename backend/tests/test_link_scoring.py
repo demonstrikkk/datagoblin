@@ -44,11 +44,41 @@ def test_a_bare_root_scores_negative():
     assert _s("https://x.example/", "Home") < 0
 
 
-def test_pagination_scores_negative_because_it_is_not_a_new_resource():
-    """`canonical_url` collapses fragments but not `?page=2`. Two pages differing
-    only by that key are one resource fetched twice."""
-    assert _s("https://x.example/companies?page=2", "Next") < 0
+def test_sorting_is_furniture_but_pagination_is_a_different_set_of_records():
+    """These two were once one rule, and it was wrong for one of them.
+
+    `?sort=name` is the same records in a different order — genuinely furniture,
+    and still penalised. `?page=2` is the *records the first page did not have*:
+    treating it as furniture put it at -4.0, which landed it below the `score >= 0`
+    cut in `_rank_children`, so a paginated listing was fetched once and the rest
+    of its results were discarded. That is the opposite of what pagination is.
+    """
+    # Unchanged: sorting and filtering re-render what is already there.
     assert _s("https://x.example/companies?sort=name", "Sort") < 0
+    assert _s("https://x.example/companies?filter=active", "Filter") < 0
+
+    # Changed: the next page is a resource worth a fetch.
+    assert _s("https://x.example/companies?page=2", "Next") > 0
+    # Both the query form and the path form are continuations, and both are
+    # recognised by anchor text alone — `?page=2` cannot always be told from a
+    # filter by key alone, and `/page/2` carries no key at all.
+    assert _s("https://x.example/page/2", "Next") > 0
+    assert _s("https://x.example/companies", "All companies") < \
+        _s("https://x.example/companies?page=2", "Next")
+
+
+def test_an_ambiguous_anchor_is_not_treated_as_pagination():
+    """`More` and `View all` usually mean a different page (`/archive`), not page
+    two of this one. Rewarding them would follow the crawl out of the listing."""
+    for anchor in ("More", "View all", "Show more", "See all"):
+        assert _s("https://x.example/companies", anchor) < 4.0, anchor
+
+
+def test_first_page_is_not_rewarded_so_hard_that_it_starves_the_list():
+    """`?page=1` is the page already held. The offset must not out-score the
+    listing itself, or a crawl would prefer `?page=2` over the index it came from."""
+    assert _s("https://x.example/companies?page=2", "Next") < \
+        _s("https://x.example/companies", "All companies") + 6.0
 
 
 def test_campaign_parameters_are_not_a_scoring_penalty_but_an_identity_fix():

@@ -55,7 +55,7 @@ async def main() -> int:
 
         # ---- 1. Collect: expand every disclosure --------------------------
         print("=== Collect / constraints panel ===")
-        await p.goto(f"{BASE}/", wait_until="domcontentloaded")
+        await p.goto(f"{BASE}/investigate", wait_until="domcontentloaded")
         await p.wait_for_selector("textarea", timeout=20000)
         await p.wait_for_timeout(600)
 
@@ -116,7 +116,7 @@ async def main() -> int:
         # ---- 2. Settings dialog ------------------------------------------
         print("\n=== settings dialog ===")
         errs.clear()
-        await p.goto(f"{BASE}/", wait_until="domcontentloaded")
+        await p.goto(f"{BASE}/investigate", wait_until="domcontentloaded")
         await p.wait_for_timeout(700)
         # Selected by its visible label, not an aria-label. The nav rail used to
         # be icon-only and needed `aria-label="Settings"` to be nameable; it now

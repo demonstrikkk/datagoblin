@@ -82,7 +82,9 @@ async def main():
             p.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
             p.on("pageerror", lambda e: errors.append(str(e)))
 
-            await p.goto(f"{BASE}/welcome", wait_until="networkidle")
+            # The landing surface is the front door: it lives at / now
+            # (the old /welcome route is gone), outside the app shell.
+            await p.goto(f"{BASE}/", wait_until="networkidle")
             await settle(p)
 
             # 1. the first viewport — the thesis

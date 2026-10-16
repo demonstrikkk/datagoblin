@@ -5,8 +5,12 @@ from app.core.errors import provider_fatal
 
 
 def triage_source(url: str, content_type: str = "", llm_hint: str = "") -> str:
-    """MVP: web:http default, web:crawl4ai on js-heavy hint. document:docling / web:jina /
-    browser:* resolve to Later adapters (not implemented in MVP).
+    """Route by content kind. Flags decide which rungs may run.
+
+    `document:docling` leads only when FEATURE_DOCLING is on (and the optional
+    package is installed); `web:jina` trails web routes only when FEATURE_JINA
+    is on. Both default off, and the rungs themselves refuse with a named error
+    when disabled — a route is never sent to a rung that cannot run.
 
     Pure scheme allowlist here (no DNS); full SSRF private-host denial happens in
     providers.crawl.fetcher.guard_url at fetch time.

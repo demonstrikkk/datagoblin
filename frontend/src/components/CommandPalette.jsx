@@ -5,7 +5,7 @@ import { Kbd, Spinner } from './ui.jsx';
 import { when } from '../lib/format.js';
 
 const DESTINATIONS = [
-  { id: 'nav-collect', label: 'Investigate', hint: 'Start a new research run', go: '/' },
+  { id: 'nav-collect', label: 'Investigate', hint: 'Start a new research run', go: '/investigate' },
   { id: 'nav-dashboard', label: 'Provenance', hint: 'Provenance across every dataset', go: '/dashboard' },
   { id: 'nav-runs', label: 'Runs', hint: 'Browse run history', go: '/runs' },
   { id: 'nav-library', label: 'Datasets', hint: 'Browse verified datasets', go: '/library' },

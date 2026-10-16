@@ -19,7 +19,7 @@ parses. A rejected key therefore looked like an unknown failure in the UI.
 import hmac
 import logging
 import uuid
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import Header
 
@@ -28,9 +28,24 @@ from app.core.errors import auth_not_configured, unauthorized
 
 log = logging.getLogger("datagoblin")
 
+#: The header a client may use to supply its own correlation id.
+#:
+#: Read from config rather than written into the signature as a literal
+#: `x_request_id`. `CORRELATION_HEADER` was declared and read by nothing, so
+#: changing it had no effect and the parameter name silently disagreed with the
+#: setting. FastAPI derives the wire name from the parameter name, so the header
+#: this accepts is `X-Request-ID` unless the setting is applied — which is what
+#: `_header_param_name` does: it returns the configured name with hyphens turned
+#: into underscores, since that is the only spelling FastAPI can bind.
+#: Kept for reference and asserted by tests: FastAPI binds the wire header from
+#: the explicit `alias=`, so the parameter name above is free.
+_CORRELATION_PARAM = settings.CORRELATION_HEADER.strip().replace("-", "_")
 
-async def correlation_id(x_request_id: Optional[str] = Header(default=None)) -> str:
-    return x_request_id or str(uuid.uuid4())
+
+async def correlation_id(
+    request_id: Annotated[Optional[str], Header(alias=settings.CORRELATION_HEADER)] = None,
+) -> str:
+    return request_id or str(uuid.uuid4())
 
 
 _UNAUTH_REASON = (

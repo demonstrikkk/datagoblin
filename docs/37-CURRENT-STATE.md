@@ -98,34 +98,53 @@ Stated plainly, because "it works" was the claim that hid the most damage:
 2. **One known flaky test.** `test_markdown_report_renders_evidence` failed once
    in ~6 full-suite runs. Never reproduced in isolation or in three subsequent
    full runs; cause not established. Not fixed, only observed.
-3. **PDF and JSON sources are always skipped.** `document:docling` and
-   `structured:api` resolve to methods that hit the non-HTML guard; Docling has
-   zero callers. (docs/09)
-4. **Jina is unreachable.** Implemented, gated, but absent from the crawl order
-   table, so no dispatch can select it. (docs/09)
-5. **No cross-run dedup**, and `dataset_records` has no unique index. (docs/13)
-6. **The dedupe-key fallback is weak** — an empty `dedupe_keys` degrades to
-   "every field name sorted", and the planner often emits none. (docs/13)
-7. **`REDUCING` / `FINALIZING` stages are never emitted**, though the enum and
-   transition table publish them. (docs/16)
-8. **Dead config that reads like a feature:** `QDRANT_*`,
-   `FEATURE_BROWSER`, `FEATURE_MCP`, `FEATURE_DOCLING`, `RUN_MAX_REQUESTS`,
-   `RUN_MAX_PAGES_PER_SOURCE`, `RUN_MAX_SEARCH_QUERIES`, `DB_POOL_*`.
-9. **The API blocks while a run is in flight.** Measured 2026-09-27: with a run
+3. **PDF and JSON sources are always skipped** unless their flags are on.
+   `document:docling` leads only with `FEATURE_DOCLING` (plus the optional
+   package); `web:jina` trails only with `FEATURE_JINA`. JSON endpoints were
+   already served via the HTTP `json_text` path plus the deterministic
+   `jsonrung`. (docs/09)
+4. **Jina is flag-gated, not unreachable.** Wired into the crawl order as the
+   last web rung when `FEATURE_JINA` is on; the rung refuses by name when off.
+   (docs/09)
+5. **No cross-run merging**, by decision: datasets are separate artifacts and
+   auto-merging across them would fold one question into another. What exists
+   is detection — `GET /api/datasets/{id}/duplicates` names records elsewhere
+   carrying this dataset's identities, bounded and write-free — plus the same
+   no-keys refusal as backfill/gapfill/refresh. `dataset_records` deliberately
+   has no cross-dataset unique index. (docs/13)
+6. **The dedupe-key fallback is narrowed** — empty `dedupe_keys` now matches on
+   identity-like fields instead of every field, so near-duplicates differing in
+   one decoration merge; the shared `_sig` helper is untouched so the
+   backfill/gapfill/refresh no-keys refusals still hold. (docs/13)
+7. ~~**`REDUCING` / `FINALIZING` stages are never emitted**~~ — fixed: the
+   runner emits both (`runner.py`), and the event contract already listed them.
+   (docs/16)
+8. **Dead config removed.** `QDRANT_*`, `FEATURE_BROWSER`, `FEATURE_MCP`,
+   `RUN_MAX_REQUESTS`, `RUN_MAX_PAGES_PER_SOURCE` and `RUN_MAX_SEARCH_QUERIES`
+   had zero readers and were deleted from `config.py` and `.env`;
+   `FEATURE_DOCLING`/`FEATURE_JINA` are now wired rungs (docs/09). `DB_POOL_*`
+   were never dead — they size the psycopg pool (`postgres_repo.py:126`).
+9. **The API blocked while a run is in flight.** Measured 2026-09-27: with a run
    running, `GET /api/health` stopped responding for over two minutes and
    `/api/history` hung to a 120s client timeout, recovering only after judging
    finished (Jev calls 169 → 216). Suspected blocking `time.sleep` in a retry
-   path, or sync psycopg/HTTP on the event loop. The UI degrades honestly but
-   cannot mask an unresponsive API. Ranked causes and evidence:
-   `38-API-SHAPE-FINDINGS.md` §7. **This is the most likely reason the product
-   read as "hanging" before the rebuild.**
-10. **The same run reports three different counter shapes** depending on the
-    endpoint, so a finished run's quality breakdown can disappear entirely.
-    Seven further API shape mismatches are catalogued with what the frontend
-    does about each: `38-API-SHAPE-FINDINGS.md`.
-11. **`.env` is committed-readable with live secrets** (Supabase password,
-    Tavily, Gemini, Groq, OpenRouter, Jina, Zen). `.gitignore` is proposed, not
-    present. Out of scope here, but it is the largest outstanding risk.
+   path, or sync psycopg/HTTP on the event loop. **Update:** every sync
+   repository write on the run path is now offloaded via `asyncio.to_thread`,
+   and the suspected `time.sleep`-in-async-`def` was audited and not found (all
+   sleeps are `asyncio.sleep`). What remains is proof under a real judging
+   burst, plus the simultaneous-death forensics. Ranked causes and evidence:
+   `38-API-SHAPE-FINDINGS.md` §7.
+10. ~~**The same run reports three different counter shapes** depending on the
+    endpoint~~ — fixed: stored runs are normalised to the live `RunView` shape
+    (`main._stored_run_view`), and history rows carry `run_id`, counters,
+    partial state and the produced dataset id.
+    Remaining shape notes live in `38-API-SHAPE-FINDINGS.md`.
+11. **Secrets posture.** `.env` is untracked (`.gitignore:1`) and was never
+    committed to this repo's history as far as `git ls-files` can tell — the
+    earlier claim that it was "committed-readable" no longer holds. It still
+    holds live keys on this machine, so the remaining risk is local handling,
+    not the repo: keep it out of screenshots, backups and pasted logs, and
+    rotate a key the moment it leaves this box.
 
 ## Performance note
 

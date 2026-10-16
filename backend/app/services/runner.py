@@ -6,12 +6,14 @@ Partial-safe, cancel-aware, runtime-capped. Emits the 14 SSE event types.
 """
 import asyncio
 import datetime
+import inspect
 import time
 
 from app.core.config import settings
 from app.core.constants import RunStage
 from app.services import crawler as crawler_svc
 from app.services import deduper as deduper_svc
+from app.services import entity_gate as entity_gate_svc
 from app.services import discovery as discovery_svc
 from app.services import extractor as extractor_svc
 from app.services import item_pipeline as pipeline_svc
@@ -132,7 +134,12 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         if entry is None or record_charge is None:
             return
         try:
-            record_charge(entry)
+            # `record_charge` may be sync (tests) or async (live offloaded
+            # persistence). Awaiting a sync result would TypeError; calling an
+            # async one without awaiting would leave the write unexecuted.
+            res = record_charge(entry)
+            if inspect.isawaitable(res):
+                await res
         except Exception as e:  # noqa: BLE001 (ledger best-effort; meter is truth)
             await _emit(emit, {"type": "stage.progress", "run_id": run_id,
                                "stage": RunStage.DISCOVERING,
@@ -240,10 +247,13 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         return await _finish_partial(emit, run_id, plan, store, progress, budget,
                                      "runtime budget exhausted after fetching")
 
+    await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.REDUCING,
+                       "message": f"Reducing {len(pages)} pages to quotable text",
+                       "progress": 52, "timestamp": _now()})
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.EXTRACTING,
-                        "message": f"Extracting ({counts['successful']} ok, {counts['failed']} failed, "
-                                   f"{counts.get('skipped', 0)} skipped)",
-                        "progress": 55, "timestamp": _now()})
+                       "message": f"Extracting ({counts['successful']} ok, {counts['failed']} failed, "
+                                  f"{counts.get('skipped', 0)} skipped)",
+                       "progress": 55, "timestamp": _now()})
     if meter.exhausted() and pages:
         await _emit(emit, {"type": "stage.progress", "run_id": run_id,
                            "stage": RunStage.EXTRACTING,
@@ -319,8 +329,18 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         # Stop waiting as soon as the budget is gone, but let the in-flight pages
         # finish so their records are not thrown away.
         while not task.done():
-            if await asyncio.wait({task}, timeout=2.0) and budget.soft_expired():
-                break
+            # `asyncio.wait` returns `(done, pending)`. The old expression tested
+            # the truthiness of the whole tuple, which is a non-empty tuple
+            # whenever `done` is a set — so it was truthy only on the iteration
+            # where the task had *already* finished, and the `soft_expired()`
+            # short-circuit below it could never fire. The soft budget stop was
+            # unreachable code: a run blew through its reserve for validation and
+            # then got killed at the hard wall, losing the window it needed.
+            done, _pending = await asyncio.wait({task}, timeout=2.0)
+            if done:
+                break  # nothing left to wait for
+            if budget.soft_expired():
+                break  # give the remaining time back to validation
             if cancelled():
                 task.cancel()
                 return {"status": "CANCELLED", "records": []}
@@ -412,9 +432,24 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
                                "timestamp": _now(),
                                "data": {"url": row.get("source_url", "")}})
 
+    # Entity-conformance gate: values that are observably not entities
+    # (headlines, questions, URLs in name fields) are dropped here, before
+    # dedupe can bless them as distinct records. Validation proves quotation;
+    # this proves the value is an instance of what the field asks for. Every
+    # drop is recorded with its reason — a dataset that kept 3 of 8 says so.
+    gated, gate_drops = entity_gate_svc.apply(verified, plan.get("fields", []))
+    progress["entity_drops"] = gate_drops
+    if gate_drops:
+        await _emit(emit, {"type": "stage.progress", "run_id": run_id,
+                           "stage": RunStage.DEDUPLICATING,
+                           "message": f"Entity gate dropped {len(gate_drops)} "
+                                      f"non-entity value(s) from {len(verified)} "
+                                      f"records",
+                           "progress": 84, "timestamp": _now(),
+                           "data": {"drops": gate_drops[:20]}})
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.DEDUPLICATING,
                        "message": "Deduplicating", "progress": 85, "timestamp": _now()})
-    canonical, merged = deduper_svc.dedupe_records(verified, plan.get("dedupe_keys", []))
+    canonical, merged = deduper_svc.dedupe_records(gated, plan.get("dedupe_keys", []))
     # Published before the slow conflict-adjudication step, which is the last
     # thing between here and a stored dataset.
     progress["verified"], progress["canonical"] = verified, canonical
@@ -446,6 +481,9 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     if not canonical:
         no_yield = progress.get("no_yield_reason", "") or _explain_zero_yield(
             pages, extract_providers)
+    await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.FINALIZING,
+                       "message": f"Finalizing {len(canonical)} records",
+                       "progress": 95, "timestamp": _now()})
     dataset_id = await store(run_id, plan, canonical,
                              {**counts, "records": len(canonical),
                               "partial": partial, "partial_reason": reason,
@@ -454,8 +492,15 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     if partial:
         headline = f"Partial: {len(canonical)} records kept. {reason}"
     elif canonical:
+        # Reuse is stated even when zero: a run that re-fetched everything the
+        # library already held should read as "0 reused", not as silence that
+        # leaves the reader wondering whether reuse was even attempted. Reuse
+        # matches exact URLs, so a new question over an old topic legitimately
+        # reports zero when search returned all-new pages.
+        reused = int(counts.get("reused", 0) or 0)
         headline = (f"Done: {len(canonical)} records "
-                    f"({counts['successful']}/{counts['attempted']} sources)")
+                    f"({counts['successful']}/{counts['attempted']} sources, "
+                    f"{reused} reused)")
     else:
         # "0 records" alone reads as a failure of the app. Saying WHY it found
         # nothing is the difference between "this is broken" and "these pages

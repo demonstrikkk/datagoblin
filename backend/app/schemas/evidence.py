@@ -45,14 +45,23 @@ def simplify_schema(fields_spec: list[dict]) -> dict[str, dict]:
     """LLM-facing schema view: {name: {type, description}}.
 
     Shows the model the simplified contract (transform_schema pattern), never a
-    raw Pydantic dump — smaller prompts, fewer schema-misread failures.
+    raw Pydantic dump - smaller prompts, fewer schema-misread failures.
+
+    A JSON field carrying `"description": null` yields an empty string, not the
+    four-letter literal "None". `dict.get(k, "")` does not help there: the default
+    only fires when the key is absent, and `str(None)` is "None". That string then
+    reached the extraction prompt as the field's own description, which reads to a
+    model as "emit the text None here".
     """
     out: dict[str, dict] = {}
     for f in fields_spec or []:
         if not isinstance(f, dict) or not f.get("name"):
             continue
-        out[str(f["name"])] = {"type": str(f.get("type", "string")),
-                               "description": str(f.get("description", "")),
+        desc = f.get("description")
+        if desc is None:
+            desc = ""
+        out[str(f["name"])] = {"type": str(f.get("type") or "string"),
+                               "description": str(desc),
                                "required": bool(f.get("required", False))}
     return out
 

@@ -21,6 +21,18 @@ def _now() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
+class DiscoveryModelDown(RuntimeError):
+    """The model server died mid-run. Raised, never swallowed, so the runner's
+    terminal guard turns it into a FAILED run naming the cause — instead of the
+    supervisor grinding through every iteration at full timeout cost each."""
+
+
+#: How many consecutive model-call *exceptions* (not empty results) trip the
+#: breaker. Two in a row is already a pattern — one is weather — and each dead
+#: call costs its full timeout, so the count stays low on purpose.
+_MODEL_FAILURE_TRIP = 3
+
+
 def _domains(plan: dict) -> tuple[list[str], list[str]]:
     include = [str(d).strip().lstrip(".") for d in
                (plan.get("seed_domains", []) + plan.get("allowed_sources", []))]
@@ -28,18 +40,128 @@ def _domains(plan: dict) -> tuple[list[str], list[str]]:
     return include, []
 
 
+#: Fewer distinct hosts than this in the accepted set triggers top-up searches.
+DIVERSITY_FLOOR_HOSTS = 4
+
+#: Top-up searches per discovery, hard cap. Each is one Tavily call plus
+#: screens — bounded and cheap next to a supervisor round.
+DIVERSITY_TOP_UPS = 2
+
+
+def _host_of(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower().replace("www.", "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _diversify(run_id: str, plan: dict, accepted: list[dict],
+                     max_pages: int, search_capped, robots_ok, emit) -> list[dict]:
+    """Top the accepted set up to the host-diversity floor, in place order."""
+    from urllib.parse import urlparse
+
+    def _hosts(rows):
+        return {h for h in (_host_of(r.get("url", "")) for r in rows) if h}
+
+    hosts = _hosts(accepted)
+    if len(hosts) >= DIVERSITY_FLOOR_HOSTS or len(accepted) >= max_pages:
+        return accepted
+    queries = list(plan.get("search_queries", [])[:5]) or [str(plan.get("goal", ""))]
+    tried = 0
+    for q in queries:
+        if len(hosts) >= DIVERSITY_FLOOR_HOSTS or len(accepted) >= max_pages:
+            break
+        if tried >= DIVERSITY_TOP_UPS:
+            break
+        tried += 1
+        try:
+            results = await search_capped(
+                q, settings.RUN_MAX_RESULTS_PER_QUERY, [], sorted(hosts))
+        except Exception:  # noqa: BLE001 (one dead search must not sink the set)
+            continue
+        fresh = 0
+        for r in results or []:
+            url = str((r or {}).get("url") or "")
+            h = _host_of(url)
+            if not url or not h or h in hosts:
+                continue
+            try:
+                if not await robots_ok(url):
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            accepted.append({"url": url,
+                             "title": str((r or {}).get("title") or "")[:300],
+                             "snippet": str((r or {}).get("snippet") or "")[:500],
+                             "route": triage_source(url)})
+            hosts.add(h)
+            fresh += 1
+            if len(hosts) >= DIVERSITY_FLOOR_HOSTS or len(accepted) >= max_pages:
+                break
+        try:
+            await emit({"type": "source.discovered", "run_id": run_id,
+                        "stage": "DISCOVERING",
+                        "message": f"Diversity top-up: {fresh} new host(s), "
+                                   f"{len(hosts)} hosts total",
+                        "progress": 25, "timestamp": _now(),
+                        "data": {"count": len(accepted),
+                                 "hosts": sorted(hosts)}})
+        except Exception:  # noqa: BLE001 (emit is best-effort)
+            pass
+    return accepted[:max_pages]
+
+
 async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any) -> list[dict]:
     requested = max(1, int(plan.get("requested_count", plan.get("max_results", 15))))
     max_pages = min(int(plan.get("max_pages", 12)), settings.RUN_MAX_PAGES)
     include_domains, exclude_domains = _domains(plan)
 
+    # The provider died between the run preflight and this stage. The preflight
+    # is a point check at run start; a server that dies a minute later leaves
+    # every discovery round-trip hanging on full timeouts with no error
+    # surfacing — the observed shape was minutes of spinner in DISCOVERING and
+    # then a user cancel. One cheap probe here fails the run in ~5s with the
+    # cause named, instead of burning the whole discovery budget finding out.
+    #
+    # Only when the chain has nowhere else to go: with OPENCODE_STRICT off,
+    # Groq/Gemini can still serve, and the per-call cascade already handles a
+    # dead primary by falling over to them.
+    if llm is not None and settings.OPENCODE_STRICT:
+        from app.providers.llm import opencode as opencode_llm
+        try:
+            state = await opencode_llm.available()
+        except Exception:  # noqa: BLE001 (a broken probe must not fail a run)
+            state = {}
+        if state and not state.get("reachable") and state.get("error") not in (
+                "disabled", "unconfigured"):
+            raise DiscoveryModelDown(
+                "the LLM server stopped responding before discovery "
+                f"({state.get('base_url')}: "
+                f"{state.get('error') or 'unreachable'}). Start it and re-run — "
+                "nothing was spent.")
+
+    # Consecutive model-call exceptions trip the breaker; empty-but-valid
+    # results do not. A dead provider mid-discovery otherwise costs its full
+    # timeout on every strategy call, every screen, every round — each round
+    # minutes long, with the only backstop a wall-clock cap set in minutes.
+    failures = 0
+
     async def _llm_strategy(prompt: str, schema: dict) -> dict:
+        nonlocal failures
         if llm is None:
             return {}
         try:
             out = await llm(prompt, schema)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            if failures >= _MODEL_FAILURE_TRIP:
+                raise DiscoveryModelDown(
+                    "the LLM server stopped responding during discovery "
+                    f"({failures} consecutive call failures). Start it and "
+                    "re-run — pages already stored are kept.") from exc
             return {}
+        failures = 0
         if isinstance(out, dict) and isinstance(out.get("data"), dict):
             return out["data"]
         return out if isinstance(out, dict) else {}
@@ -121,6 +243,21 @@ async def discover(run_id: str, plan: dict, search_fn: Any, llm: Any, emit: Any)
                "last_searched": 1, "decision": "", "decision_reason": ""}
     final = await run_supervisor(initial, deps, run_id)
     accepted = list(final.get("accepted_sources", []))[:max_pages]
+
+    # Host-diversity floor: caps alone cannot produce it. Twelve pages from two
+    # hosts is a "success" no cap prevents — and it is what a news-flavoured
+    # query plus robots-filtered alternatives produces. So when the accepted
+    # set spans fewer than four hosts, run up to two more searches that EXCLUDE
+    # the accepted hosts, forcing the engine off the dominant domains. Same
+    # robots gate and triage as the main loop; a top-up that surfaces nothing
+    # crawlable simply adds nothing.
+    try:
+        accepted = await _diversify(
+            run_id, plan, accepted, max_pages, _search_capped,
+            _robots_ok, emit)
+    except Exception:  # noqa: BLE001 (diversity is additive; never sink discovery)
+        log.info("diversity top-up failed; keeping supervisor sources",
+                 extra={"data": {"run_id": run_id}})
     # Surfaced, not swallowed: "every candidate was blocked and we re-queried
     # twice" is a materially different failure from "the web has nothing", and
     # the two call for different responses from the user.

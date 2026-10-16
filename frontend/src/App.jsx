@@ -74,7 +74,7 @@ function NotFound() {
       <p className="mt-1.5 max-w-sm text-[12.5px] text-muted">
         That address does not match anything in the workspace.
       </p>
-      <a href="/" className="btn-primary mt-5">
+      <a href="/investigate" className="btn-primary mt-5">
         Back to Collect
       </a>
     </div>
@@ -88,8 +88,12 @@ export default function App() {
         <Boundary>
           <Suspense fallback={<RouteFallback />}>
             <Routes>
+              {/* The landing surface is the front door: it sits outside the
+                  operator shell as a full-bleed page, and its Enter button
+                  leads into the workspace at /investigate. */}
+              <Route index element={<Landing />} />
               <Route element={<Shell />}>
-                <Route index element={<Collect />} />
+                <Route path="investigate" element={<Collect />} />
                 <Route path="dashboard" element={<Dashboard />} />
                 <Route path="runs" element={<Runs />} />
                 <Route path="runs/:id" element={<RunPage />} />
@@ -99,9 +103,6 @@ export default function App() {
                 <Route path="intel" element={<Intel />} />
                 <Route path="*" element={<NotFound />} />
               </Route>
-              {/* The landing surface sits outside the operator shell: it is a
-                  full-bleed page, not a view inside the workspace frame. */}
-              <Route path="/welcome" element={<Landing />} />
             </Routes>
           </Suspense>
         </Boundary>

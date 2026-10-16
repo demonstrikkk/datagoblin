@@ -82,7 +82,7 @@ const ICONS = {
  * Routes are unchanged; the width is the only other difference.
  */
 const ITEMS = [
-  { to: '/', label: 'Investigate', icon: 'collect', end: true, hint: 'Start a hunt' },
+  { to: '/investigate', label: 'Investigate', icon: 'collect', end: true, hint: 'Start a hunt' },
   { to: '/dashboard', label: 'Provenance', icon: 'runs', hint: 'Provenance across every dataset' },
   { to: '/runs', label: 'Runs', icon: 'runs', hint: 'Live and past hunts' },
   { to: '/library', label: 'Datasets', icon: 'library', hint: 'Collected results' },

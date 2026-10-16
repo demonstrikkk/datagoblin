@@ -188,11 +188,18 @@ def page_evidence_text_parts(page: dict) -> tuple[str, dict]:
     from app.services import selectors as selectors_svc  # local: avoids a cycle
     dom_source = page.get("html", "") or page.get("rendered_html", "")
     markdown = page.get("markdown") or ""
+    # A JSON response has neither DOM nor markdown. Without this the evidence
+    # text came back empty, and since every quote is located against that text,
+    # the `jsonrung` cells could never resolve and its records were discarded —
+    # the rung ran, filled correctly, and then vanished at the last step.
+    json_body = page.get("json_text") or ""
+    if not json_body and page.get("raw_html", "").lstrip()[:1] in ("{", "["):
+        json_body = page.get("raw_html", "")
     # media_block reads the page's own image/video lists, which vary with the
     # page and not with its markup, so it belongs in the key too.
     block = media_block(page)
     key = (len(dom_source), hash(dom_source), len(markdown), hash(markdown),
-           hash(block))
+           len(json_body), hash(json_body), hash(block))
     cached = _EVIDENCE_CACHE.get(key)
     if cached is not None:
         return cached[0], cached[1]
@@ -201,6 +208,12 @@ def page_evidence_text_parts(page: dict) -> tuple[str, dict]:
     # tables; for a static one it is the same reducer applied to the raw HTML.
     clean_md = markdown or (reduce_html(dom_source) if dom_source else "")
     parts: list[str] = [clean_md] if clean_md else []
+
+    # The raw JSON body, verbatim. Not reduced, not re-serialised: a quote must
+    # be a substring of what the server actually sent, so `"4200000"` has to
+    # appear as `4200000` in the stored text exactly as it arrived.
+    if json_body:
+        parts.append(json_body)
 
     dom_text = ""
     if dom_source:

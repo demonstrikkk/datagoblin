@@ -2,18 +2,9 @@ import { useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
-import {
-  Empty,
-  ErrorNote,
-  Histogram,
-  Loading,
-  Notice,
-  Pill,
-  StackedBar,
-  Timeline,
-  Treemap,
-} from '../components/ui.jsx';
-import { num, truncate, when } from '../lib/format.js';
+import DynamicVisual, { kindTone } from './dataset/DynamicVisual.jsx';
+import { Empty, ErrorNote, Loading, Notice, Pill, StackedBar, Treemap } from '../components/ui.jsx';
+import { num, when } from '../lib/format.js';
 
 /**
  * What is actually in this dataset, per field.
@@ -49,7 +40,7 @@ export default function FieldsView({ datasetId, records = 0, profile = null }) {
    *
    * Left able to fetch for itself so the component still works on its own.
    */
-  const own = useResource((o) => api.profile(datasetId, o), [datasetId], {
+  const own = useResource((o) => api.profile(datasetId, undefined, o), [datasetId], {
     enabled: !profile,
   });
   const data = profile ?? own.data;
@@ -156,6 +147,7 @@ function FieldCard({ field, onInspect }) {
     { key: 'conflicting', n: t.conflicting || 0, tone: 'judge', label: 'Disputed' },
     { key: 'missing', n: t.missing || 0, tone: 'muted', label: 'Empty' },
   ].filter((b) => b.n > 0);
+  const kind = kindTone(field);
 
   return (
     <article className="surface flex min-w-0 flex-col gap-2 p-3">
@@ -163,58 +155,18 @@ function FieldCard({ field, onInspect }) {
         <h4 className="truncate font-mono text-[12px] text-ink" title={field.field}>
           {field.field}
         </h4>
-        <Pill tone={field.kind === 'numeric' ? 'judge' : field.kind === 'categorical' ? 'info' : 'muted'}>
-          {field.kind === 'empty' ? 'never filled' : field.kind}
-        </Pill>
+        {kind ? (
+          <Pill tone={kind.tone} title="Detected by the profiler from this field's own values">
+            {kind.label}
+          </Pill>
+        ) : null}
       </header>
 
-      {field.kind === 'empty' ? (
-        /* Not a zero-height chart. A field the schema asks for and no record has
-           is a different problem from one that is partly filled, and it is worth
-           saying in words. */
-        <p className="text-[11.5px] leading-snug text-muted">
-          Declared by the schema, filled on no record. Re-reading these pages may
-          not help — the sources may simply not carry it.
-        </p>
-      ) : field.kind === 'scalar' ? (
-        <p className="text-[11.5px] leading-snug text-muted">
-          One distinct value across {num(field.values)} record
-          {field.values === 1 ? '' : 's'}, so there is no distribution to draw.
-        </p>
-      ) : field.kind === 'date' && field.shape?.by_year?.length > 1 ? (
-        /* Empty years stay visible. A gap in a date column is a finding, and
-           collapsing the gaps draws the same picture as having none. */
-        <Timeline
-          byYear={field.shape.by_year}
-          min={field.shape.min}
-          max={field.shape.max}
-        />
-      ) : field.kind === 'numeric' && field.shape?.buckets?.length > 1 ? (
-        <Histogram buckets={field.shape.buckets} median={field.shape.median} format={num} />
-      ) : field.shape?.values?.length > 1 ? (
-        <ul className="space-y-1">
-          {field.shape.values.slice(0, 6).map((v) => {
-            const max = field.shape.values[0].n || 1;
-            return (
-              <li key={v.value} className="grid grid-cols-[minmax(0,7rem)_1fr_auto] items-center gap-2">
-                <span className="truncate text-[11px] text-muted" title={v.value}>
-                  {truncate(v.value, 24)}
-                </span>
-                <span className="h-2 w-full overflow-hidden rounded-full bg-warm">
-                  <span
-                    className="block h-full rounded-full"
-                    style={{ width: `${Math.max(2, (v.n / max) * 100)}%`, background: 'rgb(var(--accent))' }}
-                  />
-                </span>
-                <span className="tnum shrink-0 text-[11px] text-ink-2">{v.n}</span>
-              </li>
-            );
-          })}
-          {field.shape.truncated ? (
-            <li className="text-[10.5px] text-muted">+ more distinct values</li>
-          ) : null}
-        </ul>
-      ) : null}
+      {/* One implementation of "what can this field be drawn as", shared with the
+          dataset overview, so the two can never disagree about a field. The
+          refusals — a constant gets a sentence, an unfilled field gets a
+          sentence — live in `shapeFor` and are covered by a unit test. */}
+      <DynamicVisual field={field} />
 
       <footer className="mt-auto space-y-1.5 pt-1">
         <StackedBar rows={bars} total={field.records} height={5} />

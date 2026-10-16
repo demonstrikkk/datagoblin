@@ -51,8 +51,6 @@ def _rule_plan(prompt: str) -> dict:
     m = re.search(r"\b(\d{1,3})\b", text)
     count = max(1, min(int(m.group(1)), 50)) if m else 15
 
-    entity = max(_ENTITY_HINTS, key=_key)[1] if any(words & h for h, _ in _ENTITY_HINTS) else "item"
-
     name = "company_name" if entity == "company" else f"{entity}_name"
     fields = [{"name": name, "type": "string", "description": f"{entity.title()} name",
                "required": True}]
@@ -76,7 +74,7 @@ def _rule_plan(prompt: str) -> dict:
             "max_results": count,
             "fields": fields, "search_queries": queries, "seed_domains": [],
             "seed_urls": [], "source_types": [],
-            "traversal": {"max_pages_per_domain": 3},
+            "traversal": {"max_pages_per_domain": 10},
             "validation_rules": [f"{name} must exist",
                                  "every non-null field must have evidence"],
             "dedupe_keys": [name], "allowed_sources": [], "max_pages": 12}
@@ -88,7 +86,7 @@ def _fallback_plan(prompt: str) -> dict:
             "fields": [{"name": "company_name", "type": "string",
                         "description": "Name", "required": True}],
             "search_queries": [words[:100] or "general"], "seed_domains": [],
-            "seed_urls": [], "source_types": [], "traversal": {"max_pages_per_domain": 3},
+            "seed_urls": [], "source_types": [], "traversal": {"max_pages_per_domain": 10},
             "validation_rules": ["company_name must exist"],
             "dedupe_keys": ["company_name"], "allowed_sources": [], "max_pages": 12}
 
@@ -128,12 +126,12 @@ MAX_TOTAL_FIELDS = 12
 
 
 def _cap_required(plan: dict) -> dict:
-    """Demote surplus equired\ flags, keeping the identifying ones.
+    r"""Demote surplus `required` flags, keeping the identifying ones.
 
     Applied to every rung, LLM and rule-based alike, so a plan can never be
     unpassable by construction. A measured run marked all 6 generated fields
     required and the validation gate then dropped all 24 extracted records,
-    almost all of them solely for a missing \website\. An empty dataset is a
+    almost all of them solely for a missing `website`. An empty dataset is a
     worse failure than a missing optional column.
     """
     fields = plan.get("fields") or []
@@ -149,12 +147,12 @@ def _cap_required(plan: dict) -> dict:
 
 
 def _cap_total_fields(plan: dict) -> dict:
-    """Cap the *total* field count, keeping the ones a dataset is identified by.
+    r"""Cap the *total* field count, keeping the ones a dataset is identified by.
 
     `_cap_required` bounds how many fields can be mandatory but nothing bounded
-    how many exist. A vague prompt about AI engineering jobs produced 22 fields -
-    \`contact_email\`, \`apply_deadline_status\`, \`company_revenue\`,
-    \`company_funding_stage\` - and every one of them is extracted and validated
+    how many exist. A vague prompt about AI engineering jobs produced 22 fields —
+    `contact_email`, `apply_deadline_status`, `company_revenue`,
+    `company_funding_stage` — and every one of them is extracted and validated
     against every page. That is the arithmetic behind a run that sat in planning
     for minutes and then overran its runtime: cost is fields x pages, so the
     planner's imagination sets the run's price.
@@ -199,16 +197,23 @@ def _identity_names(plan: dict) -> set:
 
 
 async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
-    """Returns (plan_dict, provider). Raises E_VALIDATION on empty prompt."""
+    """Returns (plan_dict, provider). Raises E_VALIDATION on empty prompt.
+
+    Rung order is: the injected `llm`, then the hardwired Gemini instructor, then
+    the rule-based compiler. The injected provider comes first because it is the
+    one the caller configured for this deployment — spending cloud quota on a
+    different provider before trying it spends money to produce a plan the caller
+    then has to pay a second model for anyway.
+
+    `OPENCODE_STRICT` removes the Gemini rung entirely. That is the setting's
+    whole purpose: a free local reader must not be able to quietly fall through
+    to a billed cloud model, so under strict mode the only model rung is the
+    injected `llm`.
+    """
     if not (prompt or "").strip():
         raise validation("Prompt must not be empty")
-    if not settings.OPENCODE_STRICT:
-        hit = await _instructor_plan(prompt)
-        if hit is not None:
-            return hit
-    # Strict reader mode: the injected llm (opencode) is the ONLY model rung —
-    # the hardwired Gemini instructor above never fires, so no cloud quota
-    # can burn during planning. Without an llm, straight to rule-based.
+
+    # Rung 1: the injected provider.
     if llm is not None:
         try:
             out = await llm(
@@ -233,7 +238,15 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
                 (out.get("provider", "llm")
                  if isinstance(out, dict) else "llm"))
         except Exception:
-            pass  # fall through to rule-based compiler (honest, marked)
+            pass  # fall through to the next rung (honest, marked)
+
+    # Rung 2: the hardwired Gemini instructor. Skipped entirely under strict mode.
+    if not settings.OPENCODE_STRICT:
+        hit = await _instructor_plan(prompt)
+        if hit is not None:
+            return hit
+
+    # Rung 3: rule-based, always available, no model involved.
     try:
         return (_cap_total_fields(_cap_required(
             WorkflowPlan(**_rule_plan(prompt)).model_dump())), "rule-based")

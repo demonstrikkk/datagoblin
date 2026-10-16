@@ -123,41 +123,38 @@ def main() -> int:
                 print(f"  - {f}")
             return 1
         body = page.inner_text("body")
-        if "read-only SQL path" not in body:
-            fails.append("the Ask panel did not explain what it does")
-        if "never writes to a dataset on its own" not in body:
-            fails.append("the Ask panel did not state that a model cannot write")
+        if "read tools" not in body:
+            fails.append("the Ask panel did not explain that it answers with read tools")
+        if "approve first" not in body:
+            fails.append("the Ask panel did not state that a change needs approval first")
+        if "cannot write" not in body:
+            fails.append("the Ask panel did not state that the model cannot write")
 
-        # A real question, through the real endpoint, into the real table. Asked
-        # about a column this dataset really populates — see a_column_with_values.
+        # A real question, through the agent endpoint, answered from the
+        # stored records. Asked about a column this dataset really populates
+        # — see a_column_with_values. The wait is for the answer the agent
+        # composed, not for any particular tool: which tools run is the
+        # model's choice, but an answer and its trace are the contract.
         column = a_column_with_values(did)
         print(f"  asking about       : {column or '(no populated column found)'}")
         if not column:
-            fails.append("no dataset column has values, so there is nothing to chart")
+            fails.append("no dataset column has values, so there is nothing to answer from")
         page.fill("input[aria-label='Question for this dataset']",
-                  f"which {column} appears most often?" if column else "list the records")
+                  f"which {column} appears most often?" if column else "what is in this dataset?")
         page.locator("button", has_text=re.compile("^Ask$")).last.click()
         try:
-            # Wait for the SQL it actually wrote, not for the word "SQL" — which
-            # appears in the panel's own explanatory copy, so the wait used to
-            # return instantly and then assert against a page with no result on
-            # it.
             page.wait_for_function(
-                "() => [...document.querySelectorAll('code')]"
-                ".some(c => /SELECT/i.test(c.textContent))",
+                "() => /how it found out/i.test(document.body.innerText)",
                 timeout=240_000)
             page.wait_for_timeout(1500)
             after = page.inner_text("body")
-            # Case-insensitive: the heading is uppercased in CSS, and
-            # inner_text returns what is rendered, so a literal "Charts" check
-            # failed against a chart that was plainly on screen.
-            if "charts" not in after.lower():
-                fails.append("the result carried no chart")
-            if not re.search(r"\d+ rows?", after):
-                fails.append("the result did not report how many rows it read")
+            if "answer" not in after.lower():
+                fails.append("the result carried no answer")
+            if not re.search(r"\d+ records?", after):
+                fails.append("the result did not say how many stored records it read")
         except Exception:
             fails.append(
-                "asking a question produced no query. The panel said: "
+                "asking a question produced no answer. The panel said: "
                 + repr(page.inner_text("body")[-220:]))
 
         # -- proposal: a change must never offer a backfill --------------------

@@ -23,21 +23,39 @@ CONTRACT = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "api.open
 
 
 def test_counters_declare_every_key_the_event_handler_builds():
-    """`main._emit` builds the source dict; the model is the consumer.
+    """`main._emit` builds the source keys; the model is the consumer.
 
-    Read from the code rather than a hand-copied list, so a new counter that the
-    emitter starts producing cannot be missing here without this failing.
+    Parsed as an AST assignment rather than sliced out of the source text. The
+    text search this replaced looked for the literal `counters = {"attempted"`,
+    so reformatting the assignment silently disabled the test — it was guarding a
+    string, not the code. Worse, it only checked `emitted <= declared`; it never
+    checked the other direction, which is why `provenance.summarize` could produce
+    `fields_unverified` and `fields_conflicting` with nobody copying them at all.
+    `test_run_counters` covers that direction; this one owns the model side.
     """
-    main_src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
-        encoding="utf-8")
-    start = main_src.find('counters = {"attempted"')
-    assert start > 0, "the counters dict in main._emit moved; update this test"
-    end = main_src.find("}", start)
-    block = main_src[start:end]
+    import ast
 
-    import re
-    emitted = set(re.findall(r'"([a-z_]+)"\s*:', block))
-    emitted -= {"attempted", "successful", "failed", "records"}  # appear twice
+    main_path = (pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py")
+    tree = ast.parse(main_path.read_text(encoding="utf-8"))
+
+    emitted: set[str] = set()
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "counters"
+                   for t in node.targets):
+            continue
+        found = True
+        if isinstance(node.value, ast.DictComp):
+            src = node.value.generators[0].iter
+            emitted = {e.value for e in getattr(src, "elts", [])
+                       if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+        elif isinstance(node.value, ast.Dict):
+            emitted = {k.value for k in node.value.keys
+                       if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+
+    assert found, "the `counters` assignment in main._emit was not found"
     declared = set(Counters.model_fields)
     assert emitted, "could not read the emitted counter keys from main.py"
     assert emitted <= declared, (

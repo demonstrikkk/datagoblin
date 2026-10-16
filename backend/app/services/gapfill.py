@@ -44,6 +44,7 @@ from app.core.errors import AppError
 from app.services import coverage as coverage_svc
 from app.services import extractor as extractor_svc
 from app.services import gaps as gaps_svc
+from app.services import rejudge as rejudge_svc
 from app.services import validator as validator_svc
 from app.services.deduper import _sig
 from app.services.reducer import page_evidence_text
@@ -200,10 +201,18 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
     if str(gap.get("category")) == "evidence_gap":
         # Checked after the ladder so the refusal names the more specific reason
         # when both apply, and refused rather than attempted.
+        #
+        # `rejudge.is_rejudgeable` owns this vocabulary. It is called rather than
+        # re-tested inline because the two used to encode the rule separately —
+        # this module hardcoded `category == "evidence_gap"` while rejudge
+        # documented that they "cannot disagree", which is only true if one of
+        # them asks the other. Asking is cheaper than finding out otherwise.
+        _rejudgeable, why = rejudge_svc.is_rejudgeable(gap)
         raise GapFillRefused(
-            "this is an evidence gap: the values exist but carry no verdict, or "
-            "two sources disagree. Fetching more cannot add a verdict, so this "
-            "needs the judge or a person — see the Conflicts and Review views")
+            why or ("this is an evidence gap: the values exist but carry no "
+                    "verdict, or two sources disagree. Fetching more cannot add "
+                    "a verdict, so this needs the judge or a person — see the "
+                    "Conflicts and Review views"))
 
     if phase == gaps_svc.PHASE_STORED:
         # Phase one already has an implementation, an allowlist of stored pages and

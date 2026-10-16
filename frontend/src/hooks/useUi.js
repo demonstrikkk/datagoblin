@@ -109,6 +109,37 @@ export function useLocalStore(key, initial) {
   return [value, set];
 }
 
+/**
+ * Row density, applied as an attribute on `<html>`.
+ *
+ * The Settings toggle persisted `dg_dense` and nothing read it, so it saved a
+ * preference that changed nothing — a control that looked actionable and was
+ * not. Applying it here, once, as `data-density`, lets `index.css` re-declare
+ * row metrics in one place instead of threading a prop through every table.
+ *
+ * Also exposed as `readDensity()` for non-React code.
+ */
+export function useDensity(enabled = false) {
+  useEffect(() => {
+    try {
+      const root = document.documentElement;
+      if (enabled) root.setAttribute('data-density', 'compact');
+      else root.removeAttribute('data-density');
+    } catch {
+      /* no DOM (tests) — nothing to apply */
+    }
+  }, [enabled]);
+}
+
+/** Current density preference, without subscribing. */
+export function readDensity() {
+  try {
+    return window.localStorage.getItem('dg_dense') === 'true';
+  } catch {
+    return false;
+  }
+}
+
 /** Tick a value on an interval — used for "12s ago" labels. */
 export function useTicker(ms = 1000, enabled = true) {
   const [, set] = useState(0);

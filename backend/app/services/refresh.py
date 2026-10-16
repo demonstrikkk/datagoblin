@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from app.core.logging import log
 from app.services import validator as validator_svc
 from app.services import yieldmap as yieldmap_svc
 from app.services.deduper import _sig
@@ -70,9 +71,17 @@ def pick_sources(store, dataset_id: str, wanted: list[str] | None = None,
     Explicitly named hosts win, and the naming is matched on host rather than
     full URL so "re-read techcrunch" selects that site without the user having to
     know which of its forty URLs the dataset used. Unnamed sources are ordered by
-    recorded yield, because if the user is spending refresh budget on five
-    fetches they should be the five that have historically produced verified
-    cells — not the five that happen to be alphabetically first.
+    cross-run trust first and per-dataset yield second.
+
+    `yieldmap` ranks by how much a host produced for *this* dataset, which is the
+    right question and the wrong ranking on its own: it knows nothing about
+    recency or about hosts that have since stopped answering. A site that
+    delivered perfectly a year ago and now returns 403 on every request ranks
+    beside one that answered this morning. `services.reputation` supplies the
+    cross-run half — proof, reachability and age — and yield breaks ties.
+
+    A host with no reputation history is not penalised. It simply has no claim
+    yet, so it falls back to yield ranking, which is the only evidence available.
     """
     block = store.get_sources(dataset_id) or {}
     sources = [s for s in (block.get("sources") or [])
@@ -95,13 +104,33 @@ def pick_sources(store, dataset_id: str, wanted: list[str] | None = None,
             return []
         return picked[:limit]
 
+    # Per-dataset yield, as before.
     try:
         ym = yieldmap_svc.build(store, dataset_id)
         rank = {h: i for i, h in enumerate(ym.get("ranking") or [])}
     except Exception:  # noqa: BLE001
         rank = {}
-    sources.sort(key=lambda s: (rank.get(yieldmap_svc.host_of(s.get("url")), 10**6),
-                                s.get("url", "")))
+
+    # Cross-run trust. Read once, for every host in this dataset, rather than
+    # per candidate.
+    hosts = {yieldmap_svc.host_of(s.get("url")) for s in sources}
+    hosts.discard("")
+    trust: dict[str, float] = {}
+    try:
+        from app.services import reputation as reputation_svc
+        rows = store.get_source_reputation(sorted(hosts)) or []
+        trust = {s["host"]: s["score"]
+                 for s in reputation_svc.rank_hosts(rows)}
+    except Exception:  # noqa: BLE001
+        # Reputation is an improvement to the ordering, never a precondition for
+        # it. If the table is missing or unreadable, fall back to pure yield.
+        log.info("reputation unavailable; ranking by yield alone",
+                 extra={"data": {"dataset_id": dataset_id}})
+
+    sources.sort(key=lambda s: (
+        -trust.get(yieldmap_svc.host_of(s.get("url")), 0.0),
+        rank.get(yieldmap_svc.host_of(s.get("url")), 10**6),
+        s.get("url", "")))
     return sources[:limit]
 
 

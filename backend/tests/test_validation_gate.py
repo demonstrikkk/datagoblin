@@ -127,13 +127,27 @@ def test_judge_budget_is_bounded_and_reported_honestly(monkeypatch):
     assert set(statuses[3:]) == {"judgment_unavailable"}
 
 
-def test_unlimited_judge_budget(monkeypatch):
-    monkeypatch.setattr(validator_svc, "JUDGE_BUDGET", validator_svc.JudgeBudget(0))
-    b = validator_svc.JudgeBudget(0)
-    assert b.exhausted is False
+def test_a_zero_budget_means_zero_calls_not_unlimited():
+    """`limit=0` means ZERO judge calls.
+
+    This test previously asserted the opposite ("0 must mean unlimited, not
+    nothing"), pinning the defect in place. That reading was never safe: on
+    `POST /api/datasets/{id}/rejudge` — a metered endpoint that validates
+    `judge_budget` as `0 <= n` and documents 0 as valid — asking for zero judge
+    calls produced unlimited calls and an unbounded bill.
+
+    Unbounded is still available, but only by asking for it explicitly.
+    """
+    zero = validator_svc.JudgeBudget(0)
+    assert zero.exhausted is True
+    assert zero.spend() is False
+    assert zero.used == 0
+
+    unlimited = validator_svc.JudgeBudget(0, unlimited=True)
+    assert unlimited.exhausted is False
     for _ in range(1000):
-        b.spend()
-    assert b.exhausted is False, "0 must mean unlimited, not nothing"
+        assert unlimited.spend() is True
+    assert unlimited.exhausted is False, "an explicit unlimited budget is unbounded"
 
 
 # --- required and type are actually enforced --------------------------------

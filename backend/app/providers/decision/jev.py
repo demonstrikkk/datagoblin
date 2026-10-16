@@ -260,6 +260,13 @@ async def _proxy_verdict(value: str, quote: str, *, throttled: bool) -> dict:
 
     A failure here is reported as `JUDGMENT_UNAVAILABLE`, never as support: two
     unavailable judges still do not make a claim verified.
+
+    The `throttled` flag is what separates "told to wait" from "answered
+    nonsense", and it used to be accepted and ignored. A throttled judge
+    therefore reported `JUDGMENT_UNAVAILABLE`, which is the one status an
+    operator must not confuse with throttling: the first says fix something, the
+    second says come back later. Three tests in `test_jev_rate_limit.py` were
+    already failing on this, and they were right to.
     """
     try:
         from app.providers.llm import generate as llm_generate
@@ -273,21 +280,38 @@ async def _proxy_verdict(value: str, quote: str, *, throttled: bool) -> dict:
             _PROXY_SCHEMA)
         node = out.get("data", out) if isinstance(out, dict) else {}
         if not isinstance(node, dict) or "supported" not in node:
-            return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
-                    "provider": "none"}
+            return _no_verdict(throttled)
         supported = bool(node.get("supported"))
         try:
-            confidence = float(node.get("confidence", 0.8 if supported else 0.8))
+            confidence = float(node.get("confidence", 0.8))
         except (TypeError, ValueError):
             confidence = 0.8
         # Kept below the dedicated judge's floor so a proxy ruling never outranks
         # a real one in any ordering that sorts on confidence.
         confidence = min(max(confidence, 0.0), 0.75)
         return {"judgment": "SUPPORTED" if supported else "NOT_SUPPORTED",
-                "confidence": confidence, "provider": "llm-proxy"}
+                "confidence": confidence,
+                # A proxy answering *because* the judge was throttled is a
+                # different fact from a proxy answering because the judge was
+                # broken, and the caller stores this string on the record.
+                "provider": "throttled" if throttled else "llm-proxy"}
     except Exception:  # noqa: BLE001
-        return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
-                "provider": "none"}
+        return _no_verdict(throttled)
+
+
+def _no_verdict(throttled: bool) -> dict:
+    """The verdict for "no judge could answer", distinguished by cause.
+
+    Two unavailable judges still do not make a claim verified, so this is never
+    SUPPORTED. What it must be depends on why they were unavailable: a rate limit
+    is a fact about the provider and is worth retrying, while an absent or
+    broken endpoint is a fault that needs fixing.
+    """
+    if throttled:
+        return {"judgment": "RATE_LIMITED", "confidence": 0.0,
+                "provider": "throttled"}
+    return {"judgment": "JUDGMENT_UNAVAILABLE", "confidence": 0.0,
+            "provider": "none"}
 
 
 async def conflict_triage(field: str, value_a: str, value_b: str,

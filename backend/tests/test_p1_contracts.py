@@ -229,7 +229,8 @@ def test_runview_counters_real(client):
     assert set(st["counters"]) == {
         "attempted", "successful", "failed", "records", "verified",
         "needs_review", "fields_verified", "fields_unverified",
-        "fields_judgment_unavailable", "fields_rate_limited",
+        "fields_judgment_unavailable", "fields_conflicting",
+        "fields_rate_limited",
         "records_fully_verified", "records_needing_review",
     }
     # A budget-stopped run must be distinguishable from a clean one. Both keys

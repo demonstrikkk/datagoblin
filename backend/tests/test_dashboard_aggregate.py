@@ -182,15 +182,73 @@ def test_conflicts_are_not_double_counted_as_unverified():
 
 # --- the aggregate is actually used -------------------------------------------
 
-def test_the_dashboard_does_not_read_records_when_the_aggregate_answers():
-    """The whole point. A per-dataset records read is 25 round trips of JSON."""
+def test_the_dashboard_reads_bounded_samples_not_full_dumps():
+    """The aggregate answers the coverage question with no records read at all —
+    but the host ranking is computed from the documents, not from the aggregate,
+    so each dataset gets one bounded sample read for the ranking rather than
+    zero reads and an empty ranking.
+
+    This used to assert zero reads outright, and the ranking it protected was
+    dead: the empty record list went straight into the yield builder, which only
+    reads the store itself on None, so every host section was empty. One capped
+    read per dataset (RECORD_SAMPLE, not the whole table) is the contract now —
+    the optimisation survives as a bound, not as an absence.
+    """
     records = [{"record_id": "1", "fields": {"a": _cell("x", "verified")}}]
+    limits = []
     store = _Store([{"id": f"d{i}", "run_id": "r1", "name": f"n{i}",
                      "schema": [{"name": "a"}], "record_count": 1} for i in range(5)],
                    {f"d{i}": records for i in range(5)})
-    dashboard_svc._compute(store, 25)
-    assert store.record_reads == 0, \
-        f"records were read {store.record_reads} times despite a working aggregate"
+    real = store.get_records
+
+    def _capped(dataset_id, q="", limit=100, offset=0):
+        limits.append(limit)
+        return real(dataset_id, q, limit, offset)
+
+    store.get_records = _capped
+    out = dashboard_svc._compute(store, 25)
+    assert store.record_reads <= 5, \
+        f"each dataset gets at most one sample read, got {store.record_reads} reads"
+    assert all(lm <= dashboard_svc.RECORD_SAMPLE for lm in limits), \
+        f"sample reads must stay bounded: {limits}"
+    assert out["top_hosts"], "the host ranking must survive the aggregate path"
+
+
+def test_the_row_reports_the_aggregate_record_count_not_zero():
+    """The row's `records` is what the aggregate measured, not what this
+    process read. The fast path deliberately avoids a per-dataset records read,
+    so the local `recs` list is empty there — and the row used to report
+    `len(recs)`, which meant every dashboard row read as "0 records" while the
+    real count sat measured and unused in the aggregate one call above."""
+    records = [{"record_id": "1", "fields": {"a": _cell("x", "verified")}},
+               {"record_id": "2", "fields": {"a": _cell("y", "verified")}}]
+    store = _Store([{"id": "d1", "run_id": "r1", "name": "n",
+                     "schema": [{"name": "a"}], "record_count": 2}], {"d1": records})
+    out = dashboard_svc._compute(store, 25)
+    # The row's count is the aggregate's measurement even though the ranking
+    # step takes one bounded sample read per dataset (see the test above).
+    assert store.record_reads <= 1, \
+        f"at most one bounded sample read for the ranking, got {store.record_reads}"
+    row = out["datasets"][0]
+    assert row["records"] == 2, \
+        f"the aggregate measured 2 records but the row reports {row['records']}"
+    assert out["totals"]["records"] == 2
+
+
+def test_the_host_ranking_survives_the_aggregate_path():
+    """The host ranking is computed from the documents, not from the aggregate —
+    and the aggregate path reads no records. Passing that empty list straight
+    into the yield builder ranked nothing, so the dashboard's host section was
+    empty on every dataset the aggregate answered. The compute step reads a
+    bounded sample for the ranking instead."""
+    records = [{"record_id": "1", "fields": {"a": _cell("x", "verified")}}]
+    store = _Store([{"id": "d1", "run_id": "r1", "name": "n",
+                     "schema": [{"name": "a"}], "record_count": 1}], {"d1": records})
+    out = dashboard_svc._compute(store, 25)
+    hosts = {h["host"]: h for h in out["top_hosts"]}
+    assert "x.test" in hosts, \
+        f"the proven host vanished from the ranking: {out['top_hosts']}"
+    assert hosts["x.test"]["verified"] == 1
 
 
 def test_a_failed_aggregate_falls_back_rather_than_emptying_the_page():

@@ -133,7 +133,7 @@ export default function Sources() {
         <VoiceEmpty
           state="noSources"
           action={
-            <Link to="/" className="btn-primary btn-xs">
+            <Link to="/investigate" className="btn-primary btn-xs">
               Start an investigation
             </Link>
           }

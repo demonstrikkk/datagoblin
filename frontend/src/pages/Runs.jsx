@@ -44,9 +44,29 @@ const matches = (r, f) => {
   return true;
 };
 
+/**
+ * A run that reads as a failure of the product rather than of a question.
+ *
+ * Errored/cancelled runs and runs that stored nothing are hidden by default —
+ * a history page that leads with red rows teaches a new reader the tool is
+ * broken, even when every one of those rows has an honest reason attached.
+ * Live runs are never hidden (zero records is their starting state, not their
+ * verdict), and picking the Failed filter explicitly always shows them: hiding
+ * applies to the default view only, never to a deliberate choice, and nothing
+ * is deleted — the runs, their reasons and their (empty) datasets all stay in
+ * storage and return the moment the toggle flips.
+ */
+const isBad = (r) => {
+  const s = r?.status;
+  if (s === 'RUNNING' || s === 'PLANNING') return false;
+  if ((s === 'FAILED' || s === 'CANCELLED') && !(Boolean(r?.partial) || s === 'PARTIAL')) return true;
+  return runRecordTotal(r) === 0;
+};
+
 export default function Runs() {
   const [filter, setFilter] = useState('all');
   const [q, setQ] = useState('');
+  const [hideBad, setHideBad] = useState(true);
   const { data, status, error, refetch, isStale } = useResource((o) => api.history(o), [], {
     pollMs: 8000,
   });
@@ -56,16 +76,22 @@ export default function Runs() {
 
   const runs = useMemo(() => (Array.isArray(data) ? data : []), [data]);
 
+  const hiddenBad = useMemo(() => runs.filter(isBad).length, [runs]);
+
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return runs.filter((r) => {
       if (!matches(r, filter)) return false;
+      // The default view hides failed and empty runs; any explicit filter —
+      // including Failed itself — shows what it says. Hiding is a property of
+      // the default view, not of the data.
+      if (hideBad && filter === 'all' && isBad(r)) return false;
       if (!needle) return true;
       return [runId(r), r.query, r.goal, r.status, r.current_stage, r.dataset_id]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(needle));
     });
-  }, [runs, filter, q]);
+  }, [runs, filter, q, hideBad]);
 
   const counts = useMemo(
     () => ({
@@ -108,7 +134,7 @@ export default function Runs() {
           <button type="button" onClick={refetch} className="btn-outline btn-xs">
             Refresh
           </button>
-          <button type="button" onClick={() => nav('/')} className="btn-accent btn-xs">
+          <button type="button" onClick={() => nav('/investigate')} className="btn-accent btn-xs">
             New run
           </button>
         </div>
@@ -147,12 +173,32 @@ export default function Runs() {
 
           <div className="surface overflow-hidden">
             <header className="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-3.5 py-2.5">
-              <Segmented
-                options={FILTERS.map((f) => ({ ...f, count: counts[f.value] }))}
-                value={filter}
-                onChange={setFilter}
-                size="xs"
-              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Segmented
+                  label="Run status filter"
+                  options={FILTERS.map((f) => ({ ...f, count: counts[f.value] }))}
+                  value={filter}
+                  onChange={setFilter}
+                  size="xs"
+                />
+                {hiddenBad > 0 && filter === 'all' ? (
+                  <button
+                    type="button"
+                    onClick={() => setHideBad((v) => !v)}
+                    aria-pressed={!hideBad}
+                    title={
+                      hideBad
+                        ? 'Failed, cancelled and empty runs are hidden. Show them.'
+                        : 'Showing everything, including failed and empty runs.'
+                    }
+                    className="focusable rounded-full border border-rule-2 px-2.5 py-0.5 text-[11px] text-muted transition-colors hover:border-ink hover:text-ink"
+                  >
+                    {hideBad
+                      ? `+ ${hiddenBad} failed or empty hidden`
+                      : 'showing everything'}
+                  </button>
+                ) : null}
+              </div>
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
@@ -173,7 +219,9 @@ export default function Runs() {
                 title="No runs match"
                 hint={
                   runs.length
-                    ? 'Try a different filter or clear the search.'
+                    ? hideBad && hiddenBad > 0
+                      ? `${hiddenBad} failed or empty run${hiddenBad === 1 ? ' is' : 's are'} hidden. Show ${hiddenBad === 1 ? 'it' : 'them'} from the toggle above, or pick the Failed filter.`
+                      : 'Try a different filter or clear the search.'
                     : 'Start one from the Collect view.'
                 }
                 action={
@@ -189,7 +237,7 @@ export default function Runs() {
                       Clear filters
                     </button>
                   ) : (
-                    <Link to="/" className="btn-accent btn-xs">
+                    <Link to="/investigate" className="btn-accent btn-xs">
                       Start a run
                     </Link>
                   )
@@ -291,7 +339,7 @@ export default function Runs() {
             title="No runs yet"
             hint="Describe what you need in plain English. The planner shows you the schema and source strategy before anything is fetched."
             action={
-              <Link to="/" className="btn-accent">
+              <Link to="/investigate" className="btn-accent">
                 Start your first run
               </Link>
             }

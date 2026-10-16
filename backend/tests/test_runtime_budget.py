@@ -99,7 +99,16 @@ def test_expired_budget_is_detected(monkeypatch):
 
 class _ScriptedBudget:
     """Expires after `n` checks, so the cut-off point is exact rather than a
-    race against the wall clock."""
+    race against the wall clock.
+
+    Implements the whole `_Budget` surface the runner actually calls. It previously
+    had only `remaining`/`expired`/`elapsed`, and that was enough — because the
+    runner's `soft_expired()` call sat behind `if await asyncio.wait(...)`, an
+    expression that was truthy only once the task had already finished. The
+    branch was unreachable, so an incomplete double passed. Fixing the poll made
+    the missing method fail loudly, which is the correct outcome: a test double
+    that does not implement the interface under test is testing the wrong thing.
+    """
 
     def __init__(self, expire_after: int) -> None:
         self.left = expire_after
@@ -112,6 +121,10 @@ class _ScriptedBudget:
     def expired(self):
         self.left -= 1
         return self.left <= 0
+
+    def soft_expired(self):
+        # Mirrors the real rule: true once `remaining` has fallen into the tail.
+        return self.remaining() <= self.total * (1.0 - 0.65)
 
     def elapsed(self):
         return 12.0

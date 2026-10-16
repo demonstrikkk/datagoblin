@@ -276,6 +276,25 @@ body {
   }
 }
 
+/* ============================================================================
+   GENERATED GLYPHS
+   The dataset rail marks each section with a character, and that character must
+   not be part of the button's text.
+
+   Text inside a button is what `inner_text()` returns and what the end-to-end
+   suites match against with `^Gaps$`. A decorative glyph in the markup turns the
+   accessible text into "◉Gaps", which matches nothing — and the tests are right
+   to insist: the glyph is decoration, so the control's name should be the
+   section name alone. `aria-hidden` does not help, because it removes the glyph
+   from the accessibility tree but not from the DOM text.
+
+   So the glyph is generated content, driven by a custom property set per item.
+   It paints, it is decorative, and the button's text stays exactly the label.
+   ========================================================================== */
+.rail-glyph::before {
+  content: var(--glyph);
+}
+
 /* stagger helper — inline index -> delay, no JS timers */
 .stagger > * {
   animation: rise-in 0.34s var(--e-swift) both;
@@ -449,4 +468,30 @@ mark.proof.context {
     inset 1px 1px 0 rgb(var(--ink) / 0.12),
     inset -1px -1px 0 rgb(var(--ink) / 0.06),
     0 0 0 1px rgb(var(--rule-2));
+}
+
+/* ========================================================================== */
+/* Compact density                                                            */
+/*                                                                           */
+/* Set as `data-density="compact"` on <html> by `useDensity`. Re-declaring row  */
+/* metrics here means one edit changes every table instead of a prop being     */
+/* threaded through each one. Only the vertical rhythm moves — type size,      */
+/* colour and contrast are untouched, because a density preference must never  */
+/* cost legibility.                                                            */
+/* ========================================================================== */
+[data-density='compact'] {
+  --row-y: 0.5rem;
+  --pad-y-tight: 0.4rem;
+}
+[data-density='compact'] tbody tr td,
+[data-density='compact'] tbody tr th {
+  padding-top: 0.4rem;
+  padding-bottom: 0.4rem;
+}
+[data-density='compact'] .surface.p-3\.5 {
+  padding: 0.7rem;
+}
+[data-density='compact'] .py-2\.5 {
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
 }

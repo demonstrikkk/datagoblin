@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { apiKey, setApiKey } from '../lib/api.js';
 import { Field, Kbd, Notice, Toggle } from './ui.jsx';
-import { useLocalStore, useMediaQuery } from '../hooks/useUi.js';
+import { useDensity, useLocalStore, useMediaQuery } from '../hooks/useUi.js';
 
 const SHORTCUTS = [
   ['⌘K', 'Command palette'],
@@ -24,6 +24,7 @@ export default function SettingsDialog({ onClose }) {
   const [key, setKey] = useState(() => apiKey());
   const [saved, setSaved] = useState(false);
   const [dense, setDense] = useLocalStore('dg_dense', false);
+  useDensity(dense);
   const reduced = useMediaQuery('(prefers-reduced-motion: reduce)');
 
   const base = import.meta.env.VITE_API_BASE || '/api (proxied)';
@@ -102,10 +103,12 @@ export default function SettingsDialog({ onClose }) {
                 hint="Tighter rows and reduced padding in tables and lists."
               />
               {/*
-                Reported, not offered. This used to be a Toggle whose onChange
-                was a no-op: a control that looked actionable and did nothing,
-                which is worse than not having it. Reduced motion is an OS
-                accessibility setting and deliberately not overridable here.
+                Reduced motion is an OS accessibility setting and is reported,
+                not offered. Compact density, by contrast, *is* ours to offer —
+                and it used to be a dead control: `setDense` persisted `dg_dense`
+                and nothing read it, so the toggle saved a preference that changed
+                no pixels. `useDensity` applies it as `data-density="compact"`
+                on <html>, and `index.css` keys the tighter row metrics off that.
               */}
               <div className="rounded-sm border border-rule bg-warm/40 px-3 py-2">
                 <p className="text-[12.5px] font-medium text-ink">Reduced motion</p>

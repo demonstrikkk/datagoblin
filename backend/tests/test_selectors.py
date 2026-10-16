@@ -176,7 +176,11 @@ def test_extract_page_deterministic_win_no_llm(sel_dir):
 
     page = {"url": "https://x.example/", "title": "Q", "html": LISTING_HTML}
     recs, provider = run(extractor_svc.extract_page({"fields": FIELDS}, page, _llm))
-    assert provider == "selectors:x.example" and len(recs) == 2
+    # The provider names the ladder and the rung that won, not the domain: the
+    # same extractor reports "ladder:<rungs> (incomplete)" for a partial win,
+    # and the two strings must stay comparable. ("selectors:x.example" was the
+    # pre-ladder convention.)
+    assert provider == "ladder:selectors" and len(recs) == 2
     # quotes gate against the preserved source text -> verified downstream
     wrapped = run(validator_svc.wrap_record(
         FIELDS, recs[0], recs[0]["source_text"], recs[0]["source_url"], "Q"))

@@ -9,7 +9,11 @@
  * header, and binary (export) responses.
  */
 
-const BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '');
+// `import.meta.env` is injected by Vite and is `undefined` under plain Node,
+// so this module could not be imported by a test runner at all. Optional
+// chaining keeps the default working outside a bundler instead of throwing on
+// module load.
+const BASE = ((import.meta.env && import.meta.env.VITE_API_BASE) || '/api').replace(/\/$/, '');
 const DEFAULT_TIMEOUT = 45_000;
 
 export class ApiError extends Error {
@@ -170,12 +174,122 @@ const qs = (params) => {
   return out ? `?${out}` : '';
 };
 
+/**
+ * Open an authenticated SSE stream.
+ *
+ * `EventSource` cannot send headers, and this API gates every route except
+ * `/api/health` on `X-API-Key`. Using EventSource therefore meant the stream
+ * 401'd on every keyed install while `run-context` — which polls with the key —
+ * reported the run as live, so the header showed progress and the rail showed
+ * nothing, forever.
+ *
+ * The obvious workaround, `?api_key=` in the query string, puts a credential in
+ * a URL: it lands in access logs, in `Referer`, and in browser history. So this
+ * reads the response body as a stream instead, which carries headers normally.
+ *
+ * Server frames look like:
+ *
+ *     event: stage.started
+ *     data: {...}
+ *
+ * and are parsed here into `{ event, data }` records. `onFrame` is called for
+ * each; a parse error or a frame the server did not label is passed through as
+ * `event: 'message'` rather than dropped, matching EventSource's behaviour.
+ *
+ * Returns an object with `close()`. The reader stops when `signal` aborts, when
+ * the stream ends, or when `close()` is called.
+ */
+export async function openStream(path, { signal, onFrame, onOpen, onError } = {}) {
+  const headers = { Accept: 'text/event-stream' };
+  const key = apiKey();
+  if (key) headers['X-API-Key'] = key;
+
+  const response = await fetch(`${BASE}${path}`, {
+    headers,
+    signal,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    // Surface the server's reason rather than a bare status. A 401 here almost
+    // always means the key is missing or wrong, which is worth saying outright.
+    let detail = `stream refused (HTTP ${response.status})`;
+    try {
+      const body = await response.json();
+      detail = body?.error?.message || body?.detail || detail;
+    } catch {
+      /* non-JSON body; the status is all we have */
+    }
+    throw new Error(detail);
+  }
+
+  onOpen?.();
+  return readEventStream(response.body, { onFrame, signal });
+}
+
+/** Parse an SSE body into frames. Exported so the parser can be tested alone. */
+export async function readEventStream(body, { onFrame, signal } = {}) {
+  if (!body) return;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const dispatch = (block) => {
+    let event = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith(':')) continue; // comment / keep-alive
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+    }
+    if (!dataLines.length && event === 'message') return;
+    const raw = dataLines.join('\n');
+    let parsed = raw;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      /* not JSON; pass the text through */
+    }
+    onFrame?.({ event, data: parsed });
+  };
+
+  try {
+    for (;;) {
+      if (signal?.aborted) break;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Frames are separated by a blank line. Normalise CRLF first, since a
+      // proxy may rewrite line endings and a lone \r would otherwise never match.
+      buffer = buffer.replace(/\r\n/g, '\n');
+      let index;
+      while ((index = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        if (block.trim()) dispatch(block);
+      }
+    }
+    if (buffer.trim()) dispatch(buffer);
+  } catch (err) {
+    if (!signal?.aborted) throw err;
+  } finally {
+    try {
+      reader.cancel();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 export const api = {
   /* --- system ---------------------------------------------------------- */
   health: (o) => request('/health', { ...o, timeout: o?.timeout ?? 10_000 }),
 
   /* --- planning / execution ------------------------------------------- */
-  compile: (body, o) => request('/workflows/compile', { ...o, method: 'POST', body }),
+  // Plan compilation calls the model (and cascades providers when the primary
+  // is cold or down), so the 45s default turns a slow compile into a UI
+  // timeout while the server is still working — the exact shape seen live.
+  compile: (body, o) => request('/workflows/compile', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
   createRun: (body, o) => request('/runs', { ...o, method: 'POST', body }),
   run: (id, o) => request(`/runs/${encodeURIComponent(id)}`, o),
   cancelRun: (id, o) => request(`/runs/${encodeURIComponent(id)}/cancel`, { ...o, method: 'POST' }),
@@ -211,6 +325,17 @@ export const api = {
   selectors: (o) => request('/selectors', o),
   queryDataset: (id, body, o) =>
     request(`/datasets/${encodeURIComponent(id)}/query`, { ...o, method: 'POST', body, timeout: o?.timeout ?? 300_000 }),
+  // The dataset agent. The model picks read tools, the server runs them, and
+  // the answer is composed from the results — no model-authored SQL, and
+  // nothing here writes. Two model calls at most, same budget as a query.
+  askAgent: (id, body, o) =>
+    request(`/datasets/${encodeURIComponent(id)}/agent`, { ...o, method: 'POST', body, timeout: o?.timeout ?? 300_000 }),
+  // Delete one dataset. The server requires an exact `confirm` equal to the
+  // id and refuses anything else, so a stray call deletes nothing — but the
+  // UI still asks twice, because the one destructive action in the product
+  // should feel destructive before it is one.
+  deleteDataset: (id, o) =>
+    request(`/datasets/${encodeURIComponent(id)}`, { ...o, method: 'DELETE', body: { confirm: id } }),
   refinePlan: (body, o) =>
     request('/workflows/refine', { ...o, method: 'POST', body, timeout: o?.timeout ?? 180_000 }),
   backfillProposal: (id, params, o) =>
@@ -258,7 +383,13 @@ export const api = {
     }),
   addColumn: (id, body, o) =>
     request(`/datasets/${encodeURIComponent(id)}/columns`, { ...o, method: 'POST', body }),
-  dashboard: (params, o) => request(`/dashboard${qs(params)}`, o),
+  dashboard: (params, o) =>
+    // Cold, this aggregate reads a bounded sample of every dataset's records
+    // for the host ranking (the coverage itself comes from one query). That is
+    // ~28s on the current library against a 300s server cache — inside 45s, but
+    // close enough that a bigger library would show a false timeout error.
+    // The call gets its own budget rather than raising the default for all.
+    request(`/dashboard${qs(params)}`, { ...o, timeout: o?.timeout ?? 120_000 }),
   proposeChange: (id, body, o) =>
     request(`/datasets/${encodeURIComponent(id)}/propose`, {
       ...o, method: 'POST', body, timeout: o?.timeout ?? 60_000,
@@ -269,29 +400,43 @@ export const api = {
     request('/selectors/save', { ...o, method: 'POST', body, timeout: o?.timeout ?? 30_000 }),
 
   /**
-   * Export. Deliberately asymmetric: `csv` and `md` come back as a raw
-   * attachment that bypasses the `{data,error,meta}` envelope entirely, while
-   * `json` is a normal enveloped response. Asking for a Blob on all three
-   * would hand the caller `{"data":…}` bytes for JSON, so the branch is here.
+   * Export a dataset.
+   *
+   * Every format comes back in the same envelope: `{data: {format, content}, …}`
+   * where `content` is the rendered text. This used to ask for a Blob for
+   * `csv` and `md` on the belief that they were raw attachments — they are not.
+   * The handler returns the envelope for every format, so `res.blob()` produced
+   * the JSON bytes `{"data":{"format":"csv","content":"…"}}` and the user
+   * downloaded it as `dataset-xxxxxxxx.csv`: an envelope containing a CSV,
+   * opened by a spreadsheet as a single broken cell.
+   *
+   * The blob is therefore built here, from `content`, and the filename comes from
+   * the format rather than being assumed by the caller.
    */
   async exportDataset(id, { format = 'json', fields } = {}, o = {}) {
     const body = { format };
     if (fields?.length) body.fields = fields;
-    if (format === 'json') {
-      return request(`/datasets/${encodeURIComponent(id)}/export`, {
-        ...o,
-        method: 'POST',
-        body,
-      });
-    }
+    const res = await request(`/datasets/${encodeURIComponent(id)}/export`, {
+      ...o,
+      method: 'POST',
+      body,
+    });
+    const actual = res?.format || format;
+    const content = res?.content ?? '';
     return {
-      blob: await request(`/datasets/${encodeURIComponent(id)}/export`, {
-        ...o,
-        method: 'POST',
-        body,
-        raw: true,
+      format: actual,
+      content,
+      rows: res?.rows,
+      bytes: res?.bytes,
+      exportId: res?.export_id,
+      blob: new Blob([content], {
+        type: actual === 'csv'
+          ? 'text/csv;charset=utf-8'
+          : actual === 'md'
+            ? 'text/markdown;charset=utf-8'
+            : 'application/json;charset=utf-8',
       }),
-      format,
+      filename: exportFilename(id, actual),
     };
   },
 
@@ -300,6 +445,12 @@ export const api = {
   freeModels: (o) => request('/models/free', { ...o, timeout: o?.timeout ?? 30_000 }),
   ask: (body, o) => request('/intel/ask', { ...o, method: 'POST', body, timeout: o?.timeout ?? 300_000 }),
 };
+
+/** Filename for an export, derived from the format the server actually used. */
+export function exportFilename(datasetId, format) {
+  const ext = { csv: 'csv', json: 'json', jsonl: 'jsonl', md: 'md' }[format] || 'txt';
+  return `dataset-${String(datasetId || 'export').slice(0, 8)}.${ext}`;
+}
 
 /** Trigger a browser download from a blob without leaking the object URL. */
 export function downloadBlob(blob, filename) {

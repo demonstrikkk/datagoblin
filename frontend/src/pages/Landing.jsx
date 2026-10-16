@@ -988,6 +988,12 @@ function Nav() {
           <a className="lg-cta lg-cta-primary" href="#run" style={{ marginLeft: 10, height: 32 }}>
             Run it
           </a>
+          {/* The front door into the workspace. A plain anchor (not router
+              navigation) because the landing surface lives outside the app's
+              router shell. */}
+          <a className="lg-cta lg-cta-ghost" href="/investigate" style={{ marginLeft: 8, height: 32 }}>
+            Enter →
+          </a>
         </nav>
       </div>
       <div className="lg-progress" style={{ transform: `scaleX(${pct})` }} aria-hidden="true" />
@@ -1019,7 +1025,10 @@ export default function Landing() {
               </Reveal>
               <Reveal delay={150}>
                 <div className="lg-hero-actions">
-                  <a className="lg-cta lg-cta-primary" href="#run">
+                  <a className="lg-cta lg-cta-primary" href="/investigate">
+                    Enter the workspace →
+                  </a>
+                  <a className="lg-cta lg-cta-ghost" href="#run">
                     Run it against the record
                   </a>
                   <a className="lg-cta lg-cta-ghost" href="#sufficiency">

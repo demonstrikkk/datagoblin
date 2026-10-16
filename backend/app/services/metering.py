@@ -20,6 +20,7 @@ max_pages to min(remaining, requested) and finalizes partial (never half-
 bills) when the budget runs dry mid-run.
 """
 import datetime
+import threading
 from typing import Any
 
 PRICES: dict[str, int] = {
@@ -55,42 +56,76 @@ def project_cost(plan: dict, max_queries: int = 8, max_pages_cap: int = 15) -> d
 
 
 class Ledger:
-    """In-memory idempotent charge store. Persistence is the repo's job."""
+    """In-memory idempotent charge store. Persistence is the repo's job.
+
+    Thread-safe: `bill` is called from `asyncio.to_thread` on the persistence
+    path and from request handlers concurrently, and a plain dict mutation is not
+    atomic across the check-then-insert pair. Two threads billing the same
+    `charge_id` would both miss the cache and both append, which is exactly the
+    double-charge the idempotency key exists to prevent.
+    """
 
     def __init__(self) -> None:
         self._entries: dict[str, dict] = {}
         self._order: list[str] = []
+        self._lock = threading.Lock()
 
     def bill(self, job_id: str, stage: str, units: int = 1,
              seq: int = 0) -> dict:
         """Charge units at stage price. Same charge_id twice = original entry."""
         cid = charge_id(job_id, stage, seq)
-        if cid in self._entries:
-            return {**self._entries[cid], "billed": False}
-        entry = {"job_id": job_id, "stage": stage, "units": max(0, int(units)),
-                 "credits": max(0, int(units)) * PRICES.get(stage, 1),
-                 "charge_id": cid, "at": _now(), "billed": True}
-        self._entries[cid] = entry
-        self._order.append(cid)
+        with self._lock:
+            existing = self._entries.get(cid)
+            if existing is not None:
+                return {**existing, "billed": False}
+            entry = {"job_id": job_id, "stage": stage,
+                     "units": max(0, int(units)),
+                     "credits": max(0, int(units)) * PRICES.get(stage, 1),
+                     "charge_id": cid, "at": _now(), "billed": True}
+            self._entries[cid] = entry
+            self._order.append(cid)
         return dict(entry)
 
     def total(self, job_id: str) -> int:
-        return sum(e["credits"] for e in self._entries.values()
-                   if e["job_id"] == job_id)
+        with self._lock:
+            return sum(e["credits"] for e in self._entries.values()
+                       if e["job_id"] == job_id)
 
     def for_job(self, job_id: str) -> list[dict]:
-        return [dict(self._entries[c]) for c in self._order
-                if self._entries[c]["job_id"] == job_id]
+        with self._lock:
+            return [dict(self._entries[c]) for c in self._order
+                    if self._entries[c]["job_id"] == job_id]
+
+
+#: Process-wide ledger.
+#:
+#: This exists so `charge_id` idempotency spans requests. `/map`, `/export` and
+#: `/intel/ask` each constructed their own `Ledger()` per call, so a retried
+#: request saw an empty cache and billed again - the module docstring's promise
+#: that "SSE retries and at-least-once workers can never double-charge" was true
+#: only for `/api/runs`, which is the one path that already shared an instance.
+#:
+#: Tests that need isolation construct their own `Ledger()`; nothing reaches for
+#: a fresh one to "start clean" any more, because doing so reintroduces the bug.
+SHARED_LEDGER = Ledger()
 
 
 class Meter:
-    """Per-run budget over a Ledger. spend() returns None when over budget."""
+    """Per-run budget over a Ledger. spend() returns None when over budget.
+
+    Gets a *private* Ledger, unlike the three non-run endpoints. A `Meter` is
+    created once per run and its `job_id` is the run id, which is unique, so
+    there is no cross-request duplicate for the shared cache to catch — and
+    sharing would make one run's totals depend on whatever else the process has
+    billed since it started, which is exactly the kind of coupling that made
+    `clamp_pages` return nonsense under concurrent tests.
+    """
 
     def __init__(self, job_id: str, budget_credits: int = 0,
                  ledger: Ledger | None = None) -> None:
         self.job_id = job_id
         self.budget = max(0, int(budget_credits or 0))
-        self.ledger = ledger or Ledger()
+        self.ledger = ledger if ledger is not None else Ledger()
         self.projected = 0
 
     def plan(self, projected_total: int) -> None:

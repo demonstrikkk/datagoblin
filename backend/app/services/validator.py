@@ -11,7 +11,10 @@ half of the proof-carrying record.
 import datetime
 import re
 
+from app.core.errors import AppError
+from app.core.logging import log
 from app.providers.decision import jev
+from app.providers.llm import zen
 from app.schemas.evidence import locate_quote
 from app.services.normalizer import is_placeholder
 
@@ -126,25 +129,63 @@ class JudgeBudget:
     spent the answer is JUDGMENT_UNAVAILABLE: the value is still kept, it is
     just never counted as verified, which is the honest description of a check
     that never ran.
+
+    `limit=0` means ZERO judge calls, not unlimited.
+
+    It used to mean unlimited, because `exhausted` was `self.limit > 0 and ...`.
+    That is the worst possible reading to get wrong on a metered endpoint:
+    `POST /api/datasets/{id}/rejudge` validates `judge_budget` as `0 <= n <= N`,
+    so `judge_budget: 0` was a documented, accepted request meaning "judge
+    nothing" - and it produced unlimited judge calls and an unbounded bill. A
+    caller asking for zero checks must get zero checks.
+
+    Genuinely unbounded callers pass `unlimited=True`, which is opt-in and
+    greppable. Exactly one caller wants it: the module-level `JUDGE_BUDGET`
+    fallback used by `verify_field` when no run has installed a real cap.
     """
 
-    def __init__(self, limit: int) -> None:
-        self.limit = max(0, int(limit or 0))
+    __slots__ = ("limit", "used", "unlimited")
+
+    def __init__(self, limit: int, *, unlimited: bool = False) -> None:
+        limit = int(limit or 0)
+        if limit < 0:
+            raise ValueError(f"judge budget must not be negative: {limit}")
+        self.limit = limit
         self.used = 0
+        self.unlimited = bool(unlimited)
 
     @property
     def exhausted(self) -> bool:
-        return self.limit > 0 and self.used >= self.limit
+        if self.unlimited:
+            return False
+        return self.used >= self.limit
 
     def spend(self) -> bool:
+        """Reserve one judge call. False means the cap is spent - do not call."""
         if self.exhausted:
             return False
         self.used += 1
         return True
 
+    @property
+    def remaining(self) -> int:
+        if self.unlimited:
+            return -1  # unbounded; -1 is the sentinel the run reports use
+        return max(0, self.limit - self.used)
 
-#: Per-run judge budget. Replaced by execute_run via reset_judge_budget().
-JUDGE_BUDGET = JudgeBudget(0)
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        bound = "unlimited" if self.unlimited else str(self.limit)
+        return f"JudgeBudget({bound}, used={self.used})"
+
+
+#: Per-run judge budget for callers that never install one. `execute_run` builds
+#: its own from `settings.RUN_MAX_JUDGE_CALLS` and passes it explicitly, so this
+#: only serves ad-hoc and test invocations of `verify_field`.
+#:
+#: Unbounded on purpose, and the only place that is so: a bare `verify_field`
+#: call with no budget should verify, not silently return JUDGMENT_UNAVAILABLE
+#: for every field. Every real path supplies a real cap.
+JUDGE_BUDGET = JudgeBudget(0, unlimited=True)
 
 
 #: Routes whose value is proved by the deterministic gates, not by a model.
@@ -266,7 +307,7 @@ async def verify_field(value: object, quote: str, source_text: str,
         return value, "judgment_unavailable"
     try:
         verdict = await jev.evidence_verification(str(value), quote, source_text)
-    except Exception as _exc:  # noqa: BLE001
+    except zen.JevRateLimited:
         # A throttled or unreachable judge must never end the run.
         #
         # `evidence_verification` raises `JevRateLimited` after its retries, and
@@ -275,6 +316,22 @@ async def verify_field(value: object, quote: str, source_text: str,
         # and extracted all of them. Throttling is a fact about the provider, not
         # about the evidence: the value stays, unproven, and the run continues.
         return value, "rate_limited"
+    except AppError as _exc:
+        # A typed provider or dependency failure is NOT throttling. Reporting it
+        # as `rate_limited` was the old behaviour, and it is a lie that costs
+        # money twice over: the run looks like it should be retried later rather
+        # than fixed now, and the real cause (a bad key, a dead endpoint, a
+        # malformed request) stays invisible in the counter.
+        log.error("judge call failed",
+                  extra={"data": {"code": _exc.code, "error": str(_exc)[:200]}})
+        return value, "judgment_unavailable"
+    except Exception as _exc:  # noqa: BLE001
+        # Genuinely unexpected. Same reasoning as the run must not die, but this
+        # is logged loudly because it means a code path we did not anticipate.
+        log.error("judge call raised unexpectedly",
+                  extra={"data": {"error": f"{type(_exc).__name__}: "
+                                           f"{str(_exc)[:200]}"}})
+        return value, "judgment_unavailable"
     judgment = verdict.get("judgment")
     if judgment == "NOT_SUPPORTED":
         return None, "unverified"

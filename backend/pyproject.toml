@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datagoblin-backend"
+version = "0.1.0"
+description = "DATAGOBLIN scrape-to-evidence pipeline: discover, fetch, extract, verify, store."
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+# `import app` has to resolve no matter where pytest is invoked from. Without
+# this, rootdir inference put the tests directory on sys.path and every test
+# file failed at `from app.services import ...` unless you happened to be
+# standing in backend/. `pythonpath` is honoured by pytest >= 7 and is the
+# supported way to say "this directory is on the import path".
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-p", "no:cacheprovider",
+]
+filterwarnings = [
+    # Invalid escape sequences in docstrings are SyntaxWarning on 3.12+ and a
+    # hard error after that. They are treated as errors here rather than left to
+    # print noise, because a docstring that mangles its own text is a docstring
+    # nobody can trust.
+    "error::DeprecationWarning:app.services.planner",
+    "error::DeprecationWarning:app.services.extractor",
+    "error::DeprecationWarning:app.services.crawler",
+    "error::DeprecationWarning:app.services.deduper",
+    "error::DeprecationWarning:app.services.dashboard",
+    "error::DeprecationWarning:app.services.discovery",
+    "error::DeprecationWarning:app.services.dataset_agent",
+    "error::DeprecationWarning:app.services.entity_gate",
+    "error::DeprecationWarning:app.services.rejudge",
+    "error::DeprecationWarning:app.services.runner",
+    "error::SyntaxWarning:app.services.planner",
+    "error::SyntaxWarning:app.services.extractor",
+    "error::SyntaxWarning:app.services.crawler",
+]

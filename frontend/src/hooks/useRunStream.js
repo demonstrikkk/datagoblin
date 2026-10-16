@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { openStream } from '../lib/api.js';
+
 /**
  * Live run stream over SSE.
  *
@@ -110,7 +112,7 @@ function mergeTerminalData(next, ev) {
 export default function useRunStream(runId, { enabled = true } = {}) {
   const [state, setState] = useState(initial);
   const seenRef = useRef(new Set());
-  const esRef = useRef(null);
+  const abortRef = useRef(null);
   const timerRef = useRef(null);
   const attemptRef = useRef(0);
   const closedRef = useRef(false);
@@ -131,10 +133,10 @@ export default function useRunStream(runId, { enabled = true } = {}) {
     let disposed = false;
 
     const close = () => {
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
-      }
+      // Abort, rather than close a socket: the stream is a fetch response body,
+      // and aborting is what stops the reader.
+      abortRef.current?.abort();
+      abortRef.current = null;
       if (timerRef.current) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
@@ -249,64 +251,57 @@ export default function useRunStream(runId, { enabled = true } = {}) {
 
     const open = () => {
       if (disposed || closedRef.current) return;
-      let es;
-      try {
-        es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
-      } catch {
-        setState((s) => ({ ...s, connection: 'error', error: 'Could not open the run stream.' }));
-        return;
-      }
-      esRef.current = es;
 
-      es.onopen = () => {
-        if (disposed) return;
-        attemptRef.current = 0;
-        setState((s) => ({ ...s, connection: 'open', attempt: 0, error: null }));
-      };
+      // `fetch`-based SSE rather than `EventSource`, because `EventSource` cannot
+      // send an `X-API-Key` header and this API refuses the stream without one.
+      // Every install that set `API_KEY` therefore saw a run stream that never
+      // connected while the header — which polls with the key — said the run was
+      // live. A `?api_key=` query parameter would fix the auth but put a
+      // credential in every access log and in browser history.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
 
-      es.onmessage = (ev) => apply(ev.data);
-
-      // named listeners for every declared event type, so a server that sets
-      // `event:` is handled identically to a bare message
-        const named = [
-          'run.partial',
-          'stage.started',
-          'stage.progress',
-          'source.discovered',
-          'source.fetched',
-          // Missing here, so the frame never reached this hook at all. The
-          // server names every frame `event: <type>`, and EventSource only routes
-          // *untyped* frames to onmessage, so an unlisted name is dropped before
-          // `apply` runs — the `case 'source.reused'` below was unreachable. A
-          // reused source was invisible in the run view while being counted in
-          // the sources panel.
-          'source.reused',
-          'record.extracted',
-          'record.verified',
-          'record.needs_review',
-          'record.rejected',
-          'duplicate.merged',
-          'run.completed',
-          'run.failed',
-          'run.cancelled',
-        ];
-      named.forEach((n) => es.addEventListener(n, (ev) => apply(ev.data)));
-
-      es.onerror = () => {
-        if (disposed || closedRef.current) return;
-        // EventSource retries on its own, but we drive it so the UI can be honest
-        // about state and stop the browser's opaque auto-retry.
-        es.close();
-        esRef.current = null;
-        if (closedRef.current) return;
-        scheduleReconnect();
-      };
+      openStream(`/runs/${encodeURIComponent(runId)}/stream`, {
+        signal: controller.signal,
+        onOpen: () => {
+          if (disposed) return;
+          attemptRef.current = 0;
+          setState((s) => ({ ...s, connection: 'open', attempt: 0, error: null }));
+        },
+        onFrame: ({ event, data }) => {
+          // The server names every frame `event: <type>`, and `apply` switches on
+          // that name. Anything unrecognised is still applied through the default
+          // branch, which is what makes a newly added event type work without a
+          // frontend change — the old per-name `addEventListener` list silently
+          // dropped anything not on it.
+          if (event === 'message') apply(data);
+          else apply({ ...data, type: event });
+        },
+      })
+        .then(() => {
+          // The body ended without a terminal frame: the run is still going but
+          // the connection dropped. Reconnect, same as a mid-stream failure.
+          if (disposed || closedRef.current) return;
+          setState((s) => ({ ...s, connection: 'reconnecting' }));
+          scheduleReconnect();
+        })
+        .catch((err) => {
+          if (disposed || closedRef.current || controller.signal.aborted) return;
+          abortRef.current = null;
+          setState((s) => ({
+            ...s,
+            connection: 'error',
+            error: err?.message || 'The run stream could not be opened.',
+          }));
+        });
     };
 
     open();
 
     return () => {
       disposed = true;
+      abortRef.current?.abort();
       close();
     };
   }, [runId, enabled, reset]);

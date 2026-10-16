@@ -52,7 +52,13 @@ export default function Dashboard() {
   const datasets = useMemo(() => {
     const rows = Array.isArray(data?.datasets) ? [...data.datasets] : [];
     const by = {
+      // Three different metrics, kept as three because they answer different
+      // questions: `coverage_pct` is how many cells hold any value,
+      // `proven_pct` is how many trace to a stored page, and `coverage.verified`
+      // is the raw count. Sorting "Proven values" by the percentage while
+      // displaying a different one made the control look broken.
       proven: (a, b) => (b?.coverage?.verified || 0) - (a?.coverage?.verified || 0),
+      pct_proven: (a, b) => (b?.proven_pct || 0) - (a?.proven_pct || 0),
       coverage: (a, b) => (b?.coverage_pct || 0) - (a?.coverage_pct || 0),
       records: (a, b) => (b?.records || 0) - (a?.records || 0),
       gaps: (a, b) => (b?.empty_fields || 0) - (a?.empty_fields || 0),
@@ -107,7 +113,7 @@ export default function Dashboard() {
       <VoiceEmpty
         state="noDatasets"
         action={
-          <Link to="/" className="btn-primary btn-xs">
+          <Link to="/investigate" className="btn-primary btn-xs">
             Start an investigation
           </Link>
         }
@@ -323,6 +329,7 @@ export default function Dashboard() {
           <div className="flex flex-wrap gap-1">
             {[
               { k: 'proven', l: 'Proven values' },
+              { k: 'pct_proven', l: 'Highest proof %' },
               { k: 'coverage', l: 'Most filled' },
               { k: 'records', l: 'Most records' },
               { k: 'gaps', l: 'Most never filled' },
@@ -480,9 +487,9 @@ export default function Dashboard() {
           <VoiceEmpty
             state="noDatasets"
             action={
-              <Link to="/" className="btn-primary btn-xs">
-                Start an investigation
-              </Link>
+            <Link to="/investigate" className="btn-primary btn-xs">
+              Start an investigation
+            </Link>
             }
           />
         )}

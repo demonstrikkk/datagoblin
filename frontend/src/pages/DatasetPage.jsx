@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, downloadBlob } from '../lib/api.js';
 import useResource from '../hooks/useResource.js';
 import { useInspector } from '../lib/inspector.jsx';
@@ -7,7 +7,12 @@ import FieldsView from '../components/FieldsView.jsx';
 import GapQueue from '../components/GapQueue.jsx';
 import SectorPanel from '../components/SectorPanel.jsx';
 import ReviewQueue from '../components/ReviewQueue.jsx';
-import { CellStatus, asField, evidenceDepth } from '../components/evidence.jsx';
+import DatasetRail from '../components/dataset/DatasetRail.jsx';
+import DatasetHeader from '../components/dataset/DatasetHeader.jsx';
+import DatasetHealth from '../components/dataset/DatasetHealth.jsx';
+import DatasetOverview from '../components/dataset/DatasetOverview.jsx';
+import RecordsTable from '../components/dataset/RecordsTable.jsx';
+import { datasetViewModel } from '../lib/datasetViewModel.js';
 import {
   CopyButton,
   Dot,
@@ -18,335 +23,18 @@ import {
   Pill,
   Segmented,
   Select,
-  Skeleton,
   Spinner,
   StackedBar,
   Stat,
-  Toggle,
 } from '../components/ui.jsx';
 import {
   bytes,
   host,
   num,
-  numericShare,
   toneVar,
-  topCategories,
   truncate,
   when,
 } from '../lib/format.js';
-
-const PAGE = 50;
-
-/* ---------------------------------------------------------------- records */
-
-/**
- * One cell in the ledger.
- *
- * A cell is a button, because a cell is a claim and the product's whole purpose
- * is to let a reader interrogate a claim. Clicking the cell opens the evidence
- * rail on that one field; clicking the row opens the record. Two targets, two
- * questions — "why is this value like that" and "what is on this record" — and
- * the cell wins the click when it is under the pointer.
- *
- * A cell with nothing behind it still renders, but is not a button. Offering to
- * open an evidence drawer that will report no evidence is worse than not
- * offering, because it teaches the reader that the affordance is unreliable.
- */
-function Cell({ name, prov, onOpen }) {
-  const pf = asField(prov);
-  const raw = pf.value;
-  const text =
-    raw === null || raw === undefined || raw === ''
-      ? '—'
-      : typeof raw === 'object'
-      ? Array.isArray(raw)
-        ? raw.join(', ')
-        : JSON.stringify(raw)
-      : String(raw);
-
-  const openable = evidenceDepth(pf.source) > 0;
-  const body = (
-    <>
-      <CellStatus status={pf.status} />
-      <span className="sr-only">{name}: </span>
-      <span className="truncate" title={text}>
-        {truncate(text, 120)}
-      </span>
-    </>
-  );
-
-  if (!openable) {
-    return (
-      <span className="flex min-w-0 items-start gap-1.5 text-muted">
-        <CellStatus status={pf.status} />
-        <span className="sr-only">{name}: </span>
-        <span className="truncate" title={text}>
-          {truncate(text, 120)}
-        </span>
-      </span>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        // The row is also clickable and this button is inside it.
-        e.stopPropagation();
-        onOpen();
-      }}
-      className="focusable group/cell -mx-1 flex min-w-0 max-w-full items-start gap-1.5 rounded-xs px-1 text-left transition-colors duration-150 ease-swift hover:bg-accent/10"
-      title={`${name} — show the evidence behind this value`}
-    >
-      {body}
-      {/* The rail affordance. Faint until the row is under the pointer, so a
-          dense table is not a field of arrows. */}
-      <span
-        aria-hidden="true"
-        className="mt-px shrink-0 text-[9px] text-accent opacity-0 transition-opacity duration-150 group-hover/cell:opacity-100 group-focus-visible/cell:opacity-100"
-      >
-        ⇥
-      </span>
-    </button>
-  );
-}
-
-function RecordsTable({ datasetId, schema, onPick, onCell }) {
-  const [page, setPage] = useState(0);
-  const [q, setQ] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
-
-  useEffect(() => {
-    const id = setTimeout(() => {
-      setDebounced(q);
-      setPage(0);
-    }, 300);
-    return () => clearTimeout(id);
-  }, [q]);
-
-  const { data, status, error, refetch, isStale } = useResource(
-    (o) => api.records(datasetId, { limit: PAGE, offset: page * PAGE, q: debounced }, o),
-    [datasetId, page, debounced]
-  );
-
-  // The endpoint returns `{dataset_id, total, records}` — not a bare array.
-  // `total` is the whole dataset, which is what makes real pagination possible.
-  const rows = useMemo(() => data?.records || [], [data]);
-  const total = data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / PAGE));
-
-  // The stored `schema` is empty on datasets written before it was persisted,
-  // so columns are derived from the rows themselves. That is the honest source:
-  // these are the fields that actually exist in storage.
-  const columns = useMemo(() => {
-    const fromSchema = (schema || []).map((f) => f.name || f.field || f).filter(Boolean);
-    if (fromSchema.length) return fromSchema;
-    const seen = new Set();
-    rows.forEach((r) => Object.keys(r?.fields || {}).forEach((k) => seen.add(k)));
-    return [...seen];
-  }, [schema, rows]);
-
-  const counts = useMemo(() => {
-    const c = {
-      all: rows.length,
-      verified: 0,
-      judgment_unavailable: 0,
-      rate_limited: 0,
-      conflicting: 0,
-    };
-    rows.forEach((r) => {
-      const fs = Object.values(r?.fields || {});
-      if (fs.length && fs.every((f) => f?.verification_status === 'verified')) c.verified += 1;
-      if (fs.some((f) => f?.verification_status === 'judgment_unavailable'))
-        c.judgment_unavailable += 1;
-      if (fs.some((f) => f?.verification_status === 'rate_limited')) c.rate_limited += 1;
-      if (fs.some((f) => f?.verification_status === 'conflicting')) c.conflicting += 1;
-    });
-    return c;
-  }, [rows]);
-
-  const shown = useMemo(() => {
-    if (statusFilter === 'all') return rows;
-    // Status filters run over the current page only — the API filters on `q`,
-    // not on verification status, so claiming a dataset-wide count here would
-    // be a lie. The footer says "filtered to N on this page" for that reason.
-    if (statusFilter === 'proven')
-      return rows.filter((r) => {
-        const fs = Object.values(r?.fields || {});
-        return fs.length && fs.every((f) => f?.verification_status === 'verified');
-      });
-    return rows.filter((r) =>
-      Object.values(r?.fields || {}).some((f) => f?.verification_status === statusFilter)
-    );
-  }, [rows, statusFilter]);
-
-  return (
-    <div className="space-y-3">
-<div className="flex flex-wrap items-center justify-between gap-2">
-        <Segmented
-          size="xs"
-          label="Record status filter"
-          value={statusFilter}
-          onChange={setStatusFilter}
-          options={[
-            { value: 'all', label: 'All', count: counts.all },
-            { value: 'proven', label: 'Fully proven', count: counts.verified },
-            { value: 'judgment_unavailable', label: 'Unjudged', count: counts.judgment_unavailable },
-            { value: 'rate_limited', label: 'Throttled', count: counts.rate_limited },
-            { value: 'conflicting', label: 'Conflicting', count: counts.conflicting },
-          ].filter((o) => o.value === 'all' || o.count > 0)}
-        />
-        <div className="flex items-center gap-1.5">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search records…"
-            aria-label="Search records"
-            className="input-sm input w-44"
-          />
-          <button type="button" onClick={refetch} className="btn-outline btn-xs">
-            Refresh
-          </button>
-        </div>
-      </div>
-
-      {error ? <ErrorNote error={error} onRetry={refetch} /> : null}
-
-      <div className="surface overflow-hidden">
-        {status === 'loading' && !rows.length ? (
-          <div className="space-y-2 p-3.5" aria-busy="true">
-            {Array.from({ length: 6 }, (_, i) => (
-              <div key={i} className="flex gap-3">
-                <Skeleton className="h-3 w-24" />
-                <Skeleton className="h-3 flex-1" />
-                <Skeleton className="h-3 w-16" />
-              </div>
-            ))}
-          </div>
-        ) : !shown.length ? (
-          // "No records stored" and "no records matched your search" are
-          // different facts, and conflating them told a user their run had
-          // failed when the run was fine and their query was simply too narrow.
-          <Empty
-            title={
-              rows.length
-                ? 'No records match this filter'
-                : debounced
-                ? `No record contains "${truncate(debounced, 40)}"`
-                : 'No records stored'
-            }
-            hint={
-              rows.length
-                ? 'Status filters apply to the rows on this page. Switch back to All to see every one.'
-                : debounced
-                ? 'The dataset has records, but none match that text. Clear the search to see them.'
-                : 'This dataset has no stored rows. Open the run view for the reason it produced none.'
-            }
-            action={
-              rows.length || debounced ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQ('');
-                    setDebounced('');
-                    setPage(0);
-                    setStatusFilter('all');
-                  }}
-                  className="btn-outline btn-xs"
-                >
-                  Clear search and filters
-                </button>
-              ) : null
-            }
-          />
-        ) : !columns.length ? (
-          <Empty title="Records have no fields" hint="Stored rows are empty payloads." />
-        ) : (
-          <>
-            <div className="scroll-y overflow-x-auto">
-              {/* The ledger. Thin rules, generous rows, and no card shadow — a
-                  research table is ruled paper, not a set of stacked panels.
-                  Row height is deliberately loose so a claim and the glyph that
-                  qualifies it are readable without zooming. */}
-              <table className="w-full min-w-max border-collapse text-left">
-                <thead className="sticky top-0 z-10 bg-paper-2/95 backdrop-blur">
-                  <tr className="border-b border-rule-2">
-                    {columns.map((c) => (
-                      <th
-                        key={c}
-                        className="eyebrow whitespace-nowrap px-3.5 py-2.5 font-semibold"
-                        scope="col"
-                      >
-                        {c}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-rule">
-                  {shown.map((r, i) => (
-                    <tr
-                      key={i}
-                      onClick={() => onPick(r, page * PAGE + rows.indexOf(r) + 1)}
-                      className="row cursor-pointer text-[12px] text-ink-2 hover:text-ink"
-                      style={{
-                        animation: `rise-in .3s var(--e-swift) both`,
-                        animationDelay: `${Math.min(i, 14) * 14}ms`,
-                      }}
-                    >
-                      {columns.map((c) => (
-                        <td key={c} className="max-w-[280px] px-3.5 py-2.5 align-top leading-snug">
-                          <Cell
-                            name={c}
-                            prov={r?.fields?.[c]}
-                            onOpen={() => onCell(r, c, page * PAGE + rows.indexOf(r) + 1)}
-                          />
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-rule px-3.5 py-2">
-              <span className="text-[11px] text-muted">
-                {isStale ? 'refreshing… · ' : ''}
-                showing {(page * PAGE + 1).toLocaleString()}–
-                {(page * PAGE + rows.length).toLocaleString()} of{' '}
-                <span className="font-mono tnum text-ink-2">{total.toLocaleString()}</span>
-                {statusFilter !== 'all' ? (
-                  <span className="text-warn"> · filtered to {shown.length} on this page</span>
-                ) : null}
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  disabled={page === 0}
-                  onClick={() => setPage((p) => Math.max(0, p - 1))}
-                  className="btn-outline btn-xs"
-                >
-                  ← Prev
-                </button>
-                <span className="px-1 font-mono text-[10.5px] text-muted">
-                  {page + 1}/{pages}
-                </span>
-                <button
-                  type="button"
-                  disabled={page + 1 >= pages}
-                  onClick={() => setPage((p) => p + 1)}
-                  className="btn-outline btn-xs"
-                >
-                  Next →
-                </button>
-              </div>
-            </footer>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
 
 /* ---------------------------------------------------------------- sources */
 
@@ -413,7 +101,8 @@ function BackfillPanel({ datasetId }) {
             ? `Nothing is entirely absent, but ${partialCount} field${
                 partialCount === 1 ? ' is' : 's are'
               } filled on some records and empty on others.`
-            : 'Nothing to backfill — every declared field already has a value on at least one record.'}
+            : 'Nothing to backfill — every declared field already has a value on at least one record.'}{' '}
+          A filled cell is never overwritten, in either mode: backfill only writes cells that are empty.
         </Notice>
         {partialCount > 0 && (
           <button
@@ -483,11 +172,18 @@ function BackfillPanel({ datasetId }) {
 
       {!p.backfillable && p.reason ? (
         <Notice tone="warn">{p.reason}</Notice>
-      ) : (
-        <p className="text-xs text-muted">
-          Matched by {p.dedupe_keys?.join(' + ')} — exact only, so a value can
-          never be attached to the wrong record. A cell that already holds a value
-          is never overwritten, in either mode. About{' '}
+      ) : null}
+      {/*
+        Unconditional, and outside the branch above on purpose. Whether or not
+        this proposal is fillable, the backfill path only writes cells that are
+        empty — that is the guarantee the panel exists to state, and gating it
+        behind `backfillable` hid it on exactly the datasets whose readers most
+        needed to see it.
+      */}
+      <p className="text-xs text-muted">
+        Matched by {p.dedupe_keys?.join(' + ')} — exact only, so a value can
+        never be attached to the wrong record. A cell that already holds a value
+        is never overwritten, in either mode. About{' '}
           {p.estimated_extractions} extraction
           {p.estimated_extractions === 1 ? '' : 's'} and up to{' '}
           {p.estimated_judge_calls} verification calls.
@@ -500,7 +196,6 @@ function BackfillPanel({ datasetId }) {
             </>
           ) : null}
         </p>
-      )}
 
       {failure ? <ErrorNote error={failure} compact onRetry={() => run(false)} /> : null}
 
@@ -545,7 +240,7 @@ function BackfillPanel({ datasetId }) {
 }
 
 function SelectorLearner({ runId, neverExtracted }) {
-  const { data: pages } = useResource((o) => api.runPages(runId, o), [runId]);
+  const { data: pages } = useResource((o) => api.runPages(runId, undefined, o), [runId]);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState(null);
   const [failure, setFailure] = useState(null);
@@ -584,8 +279,17 @@ function SelectorLearner({ runId, neverExtracted }) {
     setFailure(null);
     try {
       const res = await api.saveSelectors(
-        { domain: draft.domain, page_url: draft.page_url, provider: draft.provider, fields: draft.fields },
-        { overwrite }
+        // `overwrite` belongs in the *body*, not in the options slot. It was
+        // passed as the second argument, where it was spread into the fetch
+        // options object and silently discarded — so the checkbox was decorative
+        // and the server always took its own default.
+        {
+          domain: draft.domain,
+          page_url: draft.page_url,
+          provider: draft.provider,
+          fields: draft.fields,
+          overwrite: Boolean(overwrite),
+        }
       );
       setSaved(res);
       setDraft(null);
@@ -821,7 +525,12 @@ function ConflictsPanel({ datasetId }) {
   const conflicts = data?.conflicts || [];
   const keyOf = (c) => `${c.record_id}|${c.field}`;
   const live = conflicts.filter((c) => !resolved[keyOf(c)]);
-  const rows = [...live, ...Object.values(resolved).map((r) => r.conflict)];
+  // Decided cards come first, not last. They are the reader's own just-finished
+  // work, and the confirmation ("Resolved — adopted rival 1") is the thing the
+  // eye needs next. Appending them after the live list pushed a decision to
+  // index 63 on a 64-conflict dataset, past the 40-card render window — so the
+  // write succeeded, the server agreed, and the panel showed nothing.
+  const rows = [...Object.values(resolved).map((r) => r.conflict), ...live];
   if (!conflicts.length && !Object.keys(resolved).length) {
     return (
       <Empty
@@ -950,19 +659,11 @@ function ConflictsPanel({ datasetId }) {
   );
 }
 
-// Charts for an Ask result. The decision of what to draw is made from the
-// data, not asked for: a column that parses as numbers gets magnitudes, a
-// column with a handful of distinct values gets counts, and a `*__status`
-// column gets a proportion bar. Anything else is left to the table, because a
-// chart of 400 distinct strings is a picture of nothing.
-
-const CHART_ROWS = 8;
-
-
+// Bars for an agent answer. The agent's chart spec is already vetted
+// server-side — same labels, same counts as a distribution a tool returned —
+// so this only draws. One bar is still not a chart: it is a sentence with
+// axes, and drawing it implies a distribution where there is only one value.
 function BarChart({ title, items, unit = '' }) {
-  // One bar is not a chart. It is a sentence with axes, and drawing it implies
-  // a distribution where there is only one value — which is what a model
-  // writing `LIMIT 1` produces.
   if (!items || items.length < 2) return null;
   const max = Math.max(...items.map((i) => i.value)) || 1;
   return (
@@ -990,62 +691,6 @@ function BarChart({ title, items, unit = '' }) {
           </li>
         ))}
       </ul>
-    </div>
-  );
-}
-
-function ResultCharts({ columns, rows }) {
-  if (!rows?.length || !columns?.length) return null;
-
-  const numericCols = columns.filter((c) => numericShare(rows, c) >= 0.6).slice(0, 2);
-  const catCols = columns.filter(
-    (c) => !c.endsWith('__status') && !numericCols.includes(c) && topCategories(rows, c).length >= 2
-  );
-  const statusCols = columns.filter((c) => c.endsWith('__status')).slice(0, 1);
-
-  const toneFor = (status) => (status === 'verified' ? 'ok'
-    : status === 'conflicting' ? 'danger'
-      : status === 'judgment_unavailable' ? 'judge' : 'warn');
-
-  const charts = [];
-
-  for (const col of numericCols) {
-    const items = rows
-      .map((r) => ({ label: String(r[col] ?? ''), value: Number(String(r[col]).replace(/[,$\s]/g, '')) }))
-      .filter((i) => i.label && Number.isFinite(i.value))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, CHART_ROWS)
-      .map((i) => ({ ...i, display: num(i.value) }));
-    charts.push(<BarChart key={`n:${col}`} title={`${col} — top values`} items={items} />);
-  }
-
-  for (const col of catCols.slice(0, 2 - charts.length)) {
-    const items = topCategories(rows, col).map(([label, value]) => ({ label, value }));
-    charts.push(<BarChart key={`c:${col}`} title={`${col} — by count`} items={items} />);
-  }
-
-  for (const col of statusCols) {
-    const items = topCategories(rows, col, 6).map(([label, value]) => ({
-      label: String(label || 'no verdict'),
-      value,
-      tone: toneFor(label),
-    }));
-    charts.push(
-      <BarChart
-        key={`s:${col}`}
-        title={`${col.replace(/__status$/, '')} — how its values earned their keep`}
-        items={items}
-      />
-    );
-  }
-
-  if (!charts.length) return null;
-  return (
-    <div className="space-y-2 rounded-lg border border-rule-2/60 p-2.5">
-      <div className="text-xs uppercase tracking-wide text-muted">
-        Charts — drawn from these {rows.length} row{rows.length === 1 ? '' : 's'}
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2">{charts}</div>
     </div>
   );
 }
@@ -1130,48 +775,65 @@ function ProposalCard({ datasetId, question, onExecuted }) {
   );
 }
 
+/**
+ * Ask this dataset — answered with tools, not with SQL.
+ *
+ * The question goes to one endpoint that runs a bounded agent loop: the model
+ * picks read tools from a fixed menu, the server executes them against stored
+ * records, and the model composes the answer from the results. No
+ * model-authored string ever touches the data, and nothing in this path
+ * writes — a request to change something comes back as a proposal that the
+ * reader approves through the same buttons the Gaps and Conflicts sections
+ * already offer.
+ *
+ * What the panel shows, in order: the answer in words, the figures it cites,
+ * the distribution as bars when one answers the question better, and then how
+ * it found out — the tool trace, one line per call. The trace is not
+ * decoration: it is what lets a reader check that the answer came from the
+ * dataset rather than from the model's prior about what such datasets
+ * usually contain.
+ */
+const ASK_SUGGESTIONS = [
+  'Which fields are the thinnest, and why?',
+  'Where is the evidence weakest?',
+  'What do the sources disagree about?',
+  'Which hosts supplied the most proven values?',
+];
+
 function AskPanel({ datasetId }) {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
-  const [answer, setAnswer] = useState(null);
-  const [proposal, setProposal] = useState(null);
+  const [result, setResult] = useState(null);
   const [failure, setFailure] = useState(null);
 
-  async function ask(e) {
+  async function ask(e, text) {
     e?.preventDefault();
-    if (!question.trim()) return;
+    const q = (text ?? question).trim();
+    if (!q || busy) return;
     setBusy(true);
     setFailure(null);
     try {
-      // Ask the SQL path and the proposal layer about the same sentence. The
-      // proposal is read-only, so asking both costs one cheap request and
-      // means a sentence that turns out to be a change never silently runs as
-      // a query and never silently becomes a write.
-      const text = question.trim();
-      const p = await api.proposeChange(datasetId, { question: text });
-      setProposal(p);
-      if (p.intent === 'query') {
-        setAnswer(await api.queryDataset(datasetId, { question: text, limit: 200 }));
-      } else {
-        setAnswer(null);
-      }
+      setResult(await api.askAgent(datasetId, { question: q }));
     } catch (err) {
       setFailure(err);
-      setAnswer(null);
-      setProposal(null);
+      setResult(null);
     } finally {
       setBusy(false);
     }
   }
+
+  const proposals = result?.proposals || [];
 
   return (
     <div className="space-y-3">
       <div>
         <h3 className="text-sm font-medium">Ask this dataset</h3>
         <p className="text-xs text-muted">
-          A question runs the guarded read-only SQL path. A request to change
-          something becomes a proposal you approve first — the model never
-          writes to a dataset on its own.
+          Questions are answered with read tools over the stored records —
+          distributions, coverage, conflicts, gaps and sources. The model picks
+          the tools and composes the answer from what they return; it cannot
+          write to the dataset. A request to change something becomes a proposal
+          you approve first.
         </p>
       </div>
 
@@ -1179,7 +841,7 @@ function AskPanel({ datasetId }) {
         <input
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
-          placeholder="e.g. how many companies are in each industry?"
+          placeholder="e.g. which values appear most often?"
           aria-label="Question for this dataset"
           className="min-w-0 flex-1 rounded border border-rule-2 bg-transparent px-2 py-1.5 text-sm"
         />
@@ -1192,67 +854,102 @@ function AskPanel({ datasetId }) {
         </button>
       </form>
 
-      {failure ? <ErrorNote error={failure} onRetry={ask} /> : null}
-      {proposal ? (
+      <div className="flex flex-wrap gap-1.5">
+        {ASK_SUGGESTIONS.map((s) => (
+          <button
+            key={s}
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setQuestion(s);
+              ask(null, s);
+            }}
+            className="rounded-full border border-rule-2 px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-ink/40 hover:text-ink disabled:opacity-40"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {failure ? <ErrorNote error={failure} onRetry={(e) => ask(e)} /> : null}
+
+      {proposals.map((p, i) => (
         <ProposalCard
+          key={i}
           datasetId={datasetId}
-          question={proposal}
+          question={p}
           onExecuted={() => {
-            setProposal(null);
+            setResult(null);
             window.location.reload();
           }}
         />
-      ) : null}
+      ))}
 
-      {answer ? (
-        <div className="space-y-2">
-          <div className="rounded-md border border-rule-2/60 bg-warm/40 p-2">
-            <div className="text-xs uppercase tracking-wide text-muted">SQL</div>
-            <code className="mt-1 block overflow-x-auto text-xs">{answer.sql}</code>
+      {result && result.intent === 'query' ? (
+        <div className="space-y-3">
+          <div className="surface p-3">
+            <p className="eyebrow">Answer</p>
+            <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink">{result.answer}</p>
+            {(result.figures || []).length ? (
+              <dl className="mt-2.5 space-y-1 border-t border-rule pt-2">
+                {result.figures.map((f, i) => (
+                  <div key={i} className="flex items-baseline justify-between gap-3">
+                    <dt className="min-w-0 truncate text-[11.5px] text-muted">{f.label}</dt>
+                    <dd className="shrink-0 font-mono text-[12px] tnum text-ink">{String(f.value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
           </div>
-          <div className="text-xs text-muted">
-            {answer.row_count} row{answer.row_count === 1 ? '' : 's'}
-            {answer.truncated ? ' (capped)' : ''}
-          </div>
-          <ResultCharts columns={answer.columns} rows={answer.rows} />
-          {answer.rows?.length ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr>
-                    {answer.columns.map((c) => (
-                      <th key={c} className="border-b border-rule-2/60 px-2 py-1 text-left text-xs font-medium">
-                        {c}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {answer.rows.map((row, i) => (
-                    <tr key={i} className="border-b border-rule-2/30 last:border-0">
-                    {answer.columns.map((c) => (
-                      <td key={c} className="max-w-[280px] px-2 py-1 align-top">
-                        {/* A block-level truncating span: `max-w` on a <td> is
-                            only a hint in an auto-layout table, so a long
-                            description stretched the whole grid instead of
-                            clipping. */}
-                        <span className="block max-w-[260px] truncate" title={String(row[c] ?? '')}>
-                          {row[c] === null || row[c] === undefined ? (
-                            <span className="text-muted">—</span>
-                          ) : (
-                            String(row[c])
-                          )}
-                        </span>
-                      </td>
-                    ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+
+          {result.chart?.items?.length ? (
+            <div className="surface p-3">
+              <BarChart
+                title={result.chart.title || 'Distribution'}
+                items={result.chart.items.map((it) => ({
+                  label: String(it.label ?? ''),
+                  value: Number(it.n) || 0,
+                  display: num(Number(it.n) || 0),
+                }))}
+              />
             </div>
-          ) : (
-            <Empty title="No rows matched" hint="The query ran; nothing satisfied it." />
-          )}
+          ) : null}
+
+          {(result.trace || []).length ? (
+            <details className="surface px-3 py-2">
+              <summary className="focusable cursor-pointer list-none py-1 text-[11.5px] text-muted transition-colors hover:text-ink">
+                How it found out — {result.trace.length} tool
+                {result.trace.length === 1 ? '' : 's'} over the stored records
+              </summary>
+              <ol className="space-y-1.5 border-t border-rule py-2.5">
+                {result.trace.map((t, i) => (
+                  <li key={i} className="grid grid-cols-[minmax(0,9rem)_1fr] items-baseline gap-2 text-[11.5px]">
+                    <code className="truncate font-mono text-ink-2" title={t.tool}>
+                      {t.tool}
+                    </code>
+                    <span className="text-muted">{t.summary}</span>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          ) : null}
+
+          {result.provider || result.model ? (
+            <p className="text-[10.5px] text-muted">
+              Answered with read tools
+              {result.model ? (
+                <>
+                  {' '}by <span className="font-mono">{result.model}</span>
+                </>
+              ) : null}
+              {result.facts?.records !== undefined ? (
+                <>
+                  {' '}over <span className="font-mono tnum">{num(result.facts.records)}</span> stored records
+                </>
+              ) : null}
+              .
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -1599,17 +1296,12 @@ function ExportPanel({ datasetId, schema }) {
         format,
         ...(format !== 'json' && fields.length ? { fields } : {}),
       });
-      const name = `dataset-${String(datasetId).slice(0, 8)}.${format}`;
-      if (format === 'json') {
-        // JSON comes back enveloped, not as an attachment.
-        const blob = new Blob([JSON.stringify(res?.content ?? res, null, 2)], {
-          type: 'application/json',
-        });
-        downloadBlob(blob, name);
-      } else {
-        downloadBlob(res.blob, name);
-      }
-      setDone(format.toUpperCase());
+      // One shape for every format: `api.exportDataset` builds the blob from the
+      // envelope's `content`. It used to differ per format on the belief that
+      // csv/md were raw attachments, so those downloads saved the envelope JSON
+      // under a `.csv` name.
+      downloadBlob(res.blob, res.filename);
+      setDone(res.format.toUpperCase());
     } catch (e) {
       setError(e);
     } finally {
@@ -1621,8 +1313,8 @@ function ExportPanel({ datasetId, schema }) {
     <div className="space-y-4">
       <Notice tone="muted">
         Every export is billed work and is written to the run ledger, so repeated downloads are
-        recorded rather than free. CSV and Markdown stream back as file attachments; JSON returns
-        the same content inline.
+        recorded rather than free. All three formats return the rendered file in the same
+        response; the format only changes what that file contains.
       </Notice>
 
       <div className="surface space-y-4 p-3.5">
@@ -1701,20 +1393,89 @@ function ExportPanel({ datasetId, schema }) {
 
 /* ------------------------------------------------------------------- page */
 
+/**
+ * The dataset workspace.
+ *
+ * The composition here is the whole redesign; the panels it switches between are
+ * the ones that were already in this file, unchanged.
+ *
+ * WHAT CHANGED, AND WHY IT IS NOT A REWRITE
+ *
+ * The eight sections were a horizontal tab strip at the bottom of a page whose
+ * entire first screen was summary cards. Opening a dataset meant scrolling past
+ * record count, proven-field count and schema size before seeing a single row,
+ * and the way into the data was a strip of eight equal-looking words.
+ *
+ * Now the dataset's identity and its four health signals stay on screen, the
+ * sections are a vertical rail, and the default section is the overview — which
+ * leads with the ledger rather than with more metadata. Every API call, route,
+ * record shape and action below is the one that was already here.
+ *
+ * WHY THE MODEL IS BUILT HERE
+ *
+ * Four reads are needed for the health signals and the findings, and three of
+ * them are only used by the overview. They are issued unconditionally rather
+ * than per-section so switching sections never re-fetches, and they are all
+ * optional arguments to `datasetViewModel`, which degrades section by section —
+ * which is what lets the header, the health strip and the ledger all paint
+ * before the slowest read lands.
+ *
+ * WHY THE SECTION IS NOT IN THE URL
+ *
+ * It could be, and that would make a dataset section linkable. It is left as
+ * local state for now because `/library/:id` is the only route contract the rest
+ * of the app, the command palette and the end-to-end suites rely on, and adding
+ * a query parameter to that route is a change to a contract shared well beyond
+ * this page's presentation. It is the obvious next step and it is a deliberate
+ * omission, not an oversight.
+ */
 export default function DatasetPage() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const { inspect } = useInspector();
-  const [tab, setTab] = useState('records');
+
+  /*
+   * Overview leads. Records is second, which is also the order the end-to-end
+   * suites assume when they select a tab by index rather than by name.
+   */
+  const [tab, setTab] = useState('overview');
 
   const { data, status, error, refetch } = useResource((o) => api.dataset(id, o), [id]);
+
   /*
-   * The field profiler is read here rather than inside the Fields tab, because
-   * the domain reading is a property of the *dataset* and not of a tab: it was
-   * buried under Fields, and the page opens on Records, so opening a dataset
-   * never showed it and the feature read as broken. One fetch, passed down, so
-   * the two views cannot show different numbers for the same fields.
+   * The field profiler is read here rather than inside the Fields section,
+   * because the domain reading and the data shapes are properties of the
+   * *dataset* and not of a section — they belong on the overview. One fetch,
+   * passed down, so the overview and the field list cannot show different
+   * numbers for the same fields.
    */
   const profileRes = useResource((o) => api.profile(id, o), [id]);
+
+  /* Coverage and gaps drive three of the four health signals and several of the
+     findings, so they are read once for the whole page. */
+  const coverageRes = useResource((o) => api.coverage(id, o), [id]);
+  const gapsRes = useResource((o) => api.gaps(id, o), [id]);
+
+  /*
+   * Freshness is the one signal no existing counter carries, so the sources read
+   * is needed at page level too. It is the same payload the Sources section
+   * reads again for its own detail, and `useResource` keeps it cached per
+   * component rather than shared, so this is one extra small request in exchange
+   * for a header that can state how old the evidence actually is.
+   */
+  const sourcesRes = useResource((o) => api.sources(id, o), [id]);
+
+  const model = useMemo(
+    () =>
+      datasetViewModel({
+        dataset: data,
+        profile: profileRes.data,
+        coverage: coverageRes.data,
+        gaps: gapsRes.data,
+        sources: sourcesRes.data,
+      }),
+    [data, profileRes.data, coverageRes.data, gapsRes.data, sourcesRes.data]
+  );
 
   if (status === 'loading' && !data) return <Loading rows={7} label="Loading dataset" />;
 
@@ -1731,199 +1492,119 @@ export default function DatasetPage() {
 
   if (!data) return <Empty title="Dataset not found" />;
 
-  /*
-   * Two generations of `counts` exist in this database.
-   *
-   * Current runs write field-level detail: `fields_verified`,
-   * `fields_judgment_unavailable`, `fields_rate_limited`,
-   * `records_fully_verified`. Older datasets only have the coarse
-   * `Counters` shape: `records`, `verified`, `needs_review`.
-   *
-   * Both are handled, and when only the coarse shape is present the UI says
-   * so rather than rendering an empty quality bar that reads as "no data".
-   */
-  const c = data?.counts || {};
-  const modern = 'fields_verified' in c || 'records_fully_verified' in c;
-  const proven = Number(c.fields_verified) || 0;
-  const unjudged = Number(c.fields_judgment_unavailable) || 0;
-  const throttled = Number(c.fields_rate_limited) || 0;
-  const fieldTotal = proven + unjudged + throttled;
+  const openRecord = (record, index) =>
+    inspect({
+      kind: 'record',
+      record,
+      title: `Record ${index + 1}`,
+      sub: data.name,
+      json: record,
+    });
 
-  const qrows = [
-    proven && { key: 'verified', n: proven, tone: 'ok', label: 'Proven' },
-    unjudged && { key: 'unjudged', n: unjudged, tone: 'info', label: 'Unjudged' },
-    throttled && { key: 'throttled', n: throttled, tone: 'judge', label: 'Throttled' },
-  ].filter(Boolean);
+  const openCell = (record, field, index) =>
+    inspect({
+      kind: 'record',
+      record,
+      // The inspector opens on this field, with the stored page already resolved
+      // when the offsets allow it — the reader clicked a value because they want
+      // the sentence behind it, not a summary of it.
+      focusField: field,
+      title: `${field}`,
+      sub: `Record ${index + 1} · ${data.name}`,
+      json: record.fields?.[field],
+    });
+
+  /*
+   * Rail counts. A null count renders nothing rather than a zero — "0
+   * conflicts" and "conflicts not yet read" are different facts, and the rail is
+   * the one place a reader would take the second for the first.
+   */
+  const railCounts = {
+    records: model.summary.records,
+    fields: model.identity.fieldCount,
+    coverage: model.summary.gaps,
+    conflicts: model.summary.openConflicts,
+    sources: model.summary.pages,
+  };
 
   return (
     <div className="space-y-5">
-      <header className="space-y-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="eyebrow">Dataset</p>
-            <h2 className="mt-1 h-display text-[26px] leading-tight text-ink balance">
-              {data.name || `Dataset ${String(id).slice(0, 8)}`}
-            </h2>
-            <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[10.5px] text-muted">
-              <span>{String(id).slice(0, 12)}</span>
-              <span>created {when(data.created_at)}</span>
-              {data.run_id ? (
-                <Link to={`/runs/${data.run_id}`} className="link">
-                  run {String(data.run_id).slice(0, 8)}
-                </Link>
-              ) : null}
-            </p>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <CopyButton value={id} label="Copy ID" />
-            <button
-              type="button"
-              onClick={() => inspect({ kind: 'event', event: data, title: 'Raw dataset' })}
-              className="btn-ghost btn-xs"
-            >
-              Raw
-            </button>
-          </div>
+      <DatasetHeader
+        identity={model.identity}
+        model={model}
+        onInspectRaw={() => inspect({ kind: 'event', event: data, title: 'Raw dataset' })}
+        onDeleted={() => navigate('/library')}
+      />
+
+      {/* A hairline rather than a card. This block used to be four stat cards
+          and a bordered panel, and the borders were most of what made it read
+          as a dashboard rather than as a document. */}
+      <div className="border-y border-rule py-3">
+        <DatasetHealth health={model.health} onOpen={setTab} />
+      </div>
+
+      <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
+        {/*
+          One rail at every width. It reflows from a vertical column to a
+          horizontal scroller on its own, so the document never holds two
+          tablists with the same accessible name.
+        */}
+        <div className="sm:sticky sm:top-4 sm:self-start">
+          <DatasetRail value={tab} onChange={setTab} counts={railCounts} />
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Stat label="Records" value={num(data.record_count)} />
-          {modern ? (
-            <>
-              <Stat
-                label="Records fully proven"
-                value={num(c.records_fully_verified)}
-                tone={c.records_fully_verified ? 'ok' : 'muted'}
-                sub="every field verified"
-              />
-              <Stat
-                label="Proven fields"
-                value={num(proven)}
-                tone={proven ? 'ok' : 'muted'}
-                sub={unjudged ? `${num(unjudged)} unjudged` : 'all judged'}
-              />
-            </>
-          ) : (
-            <>
-              <Stat
-                label="Verified records"
-                value={num(c.verified)}
-                tone={c.verified ? 'ok' : 'muted'}
-                title="Coarse count recorded by an older run"
-              />
-              <Stat
-                label="Needing review"
-                value={num(c.needs_review)}
-                tone={c.needs_review ? 'warn' : 'muted'}
-              />
-            </>
-          )}
-          <Stat
-            label="Schema"
-            value={data.schema?.length ? num(data.schema.length) : '—'}
-            sub={data.schema?.length ? 'fields' : 'not persisted'}
-          />
-        </div>
+        <div className="min-w-0 flex-1">
 
-        {fieldTotal ? (
-          <div className="surface p-3">
-            <div className="mb-2 flex items-baseline justify-between gap-2">
-              <p className="eyebrow">Evidence quality</p>
-              <span className="text-[11px] text-muted">
-                {pctSafe(proven / fieldTotal)} of fields carry judge-verified quotes
-              </span>
+          {tab === 'overview' ? (
+            <DatasetOverview
+              model={model}
+              datasetId={id}
+              schema={data.schema}
+              onOpen={setTab}
+              onPick={openRecord}
+              onCell={openCell}
+            />
+          ) : null}
+
+          {tab === 'records' ? (
+            <RecordsTable
+              datasetId={id}
+              schema={data.schema}
+              onPick={openRecord}
+              onCell={openCell}
+            />
+          ) : null}
+
+          {tab === 'fields' ? (
+            <div className="space-y-6">
+              {/* The domain reading and its receipt, above the full field list.
+                  The sector is a claim about which fields matter, and the
+                  charts beneath it are the argument for it. */}
+              <SectorPanel
+                profile={profileRes.data}
+                status={profileRes.status}
+                error={profileRes.error}
+                onRetry={profileRes.refetch}
+              />
+              <FieldsView datasetId={id} profile={profileRes.data} />
             </div>
-            <StackedBar rows={qrows} total={fieldTotal} height={8} />
-            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-              {qrows.map((r) => (
-                <li key={r.key} className="flex items-center gap-1.5 text-[11px] text-muted">
-                  <Dot tone={r.tone} />
-                  <span className="text-ink-2">{r.label}</span>
-                  <span className="font-mono tnum text-ink">{num(r.n)}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : (
-          <Notice tone="warn">
-            <span className="font-medium">No field-level verification was recorded for this run.</span>{' '}
-            The run predates per-field judging, so aggregate counts are all that exist. Open any
-            record to see the per-field status that <em>is</em> stored with each value.
-          </Notice>
-        )}
-      </header>
+          ) : null}
 
-      <SectorPanel
-        profile={profileRes.data}
-        status={profileRes.status}
-        error={profileRes.error}
-        onRetry={profileRes.refetch}
-      />
+          {tab === 'review' ? (
+            <ReviewQueue
+              datasetId={id}
+              schema={data.schema}
+              onOpenConflicts={() => setTab('conflicts')}
+            />
+          ) : null}
 
-      <Segmented
-        label="Dataset section"
-        value={tab}
-        onChange={setTab}
-        options={[
-          { value: 'fields', label: 'Fields' },
-          { value: 'records', label: 'Records' },
-          { value: 'review', label: 'Review' },
-          { value: 'coverage', label: 'Gaps' },
-          { value: 'conflicts', label: 'Conflicts' },
-          { value: 'sources', label: 'Sources' },
-          { value: 'ask', label: 'Ask' },
-          { value: 'export', label: 'Export' },
-        ]}
-      />
-
-      {tab === 'fields' ? (
-        <FieldsView datasetId={id} profile={profileRes.data} />
-      ) : null}
-
-      {tab === 'records' ? (
-        <RecordsTable
-          datasetId={id}
-          schema={data.schema}
-          onPick={(record, index) =>
-            inspect({
-              kind: 'record',
-              record,
-              title: `Record ${index + 1}`,
-              sub: data.name,
-              json: record,
-            })
-          }
-          onCell={(record, field, index) =>
-            inspect({
-              kind: 'record',
-              record,
-              // The rail opens on this field, with the stored page already
-              // resolved when offsets allow it — the reader clicked a value
-              // because they want the sentence behind it, not a summary of it.
-              focusField: field,
-              title: `${field}`,
-              sub: `Record ${index + 1} · ${data.name}`,
-              json: record.fields?.[field],
-            })
-          }
-        />
-      ) : null}
-
-      {tab === 'review' ? (
-        <ReviewQueue
-          datasetId={id}
-          schema={data.schema}
-          onOpenConflicts={() => setTab('conflicts')}
-        />
-      ) : null}
-
-      {tab === 'coverage' ? <CoveragePanel datasetId={id} runId={data.run_id} /> : null}
-      {tab === 'conflicts' ? <ConflictsPanel datasetId={id} /> : null}
-      {tab === 'sources' ? <SourceGrid datasetId={id} /> : null}
-      {tab === 'ask' ? <AskPanel datasetId={id} /> : null}
-      {tab === 'export' ? <ExportPanel datasetId={id} schema={data.schema} /> : null}
+          {tab === 'coverage' ? <CoveragePanel datasetId={id} runId={data.run_id} /> : null}
+          {tab === 'conflicts' ? <ConflictsPanel datasetId={id} /> : null}
+          {tab === 'sources' ? <SourceGrid datasetId={id} /> : null}
+          {tab === 'ask' ? <AskPanel datasetId={id} /> : null}
+          {tab === 'export' ? <ExportPanel datasetId={id} schema={data.schema} /> : null}
+        </div>
+      </div>
     </div>
   );
 }
-
-const pctSafe = (n) => (Number.isFinite(n) ? `${Math.round(n * 100)}%` : '—');

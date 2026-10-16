@@ -104,7 +104,12 @@ def test_transient_search_retried_fatal_not():
             "validation_rules": [], "dedupe_keys": ["company_name"],
             "allowed_sources": [], "max_pages": 5}
     out = run(discovery_svc.discover("run-10", plan, _flaky, None, _emit))
-    assert [a["url"] for a in out] == ["https://s.example/a"] and calls["n"] == 2
+    # The transient failure is retried (never exactly-once), and the accepted
+    # URL survives. The count is a lower bound, not exact: a single-host
+    # accepted set triggers the diversity top-up, which spends its own
+    # searches excluding the accepted host.
+    assert [a["url"] for a in out] == ["https://s.example/a"]
+    assert calls["n"] >= 2
 
 
 def test_no_fabrication_without_llm():

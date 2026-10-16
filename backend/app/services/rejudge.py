@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from app.core.logging import log
 from app.services import gaps as gaps_svc
 from app.providers.decision import jev
 from app.services.validator import JudgeBudget
@@ -85,6 +86,7 @@ def _cells_needing_a_verdict(records: list[dict], field: str | None = None) -> l
     unreproducible, and nothing here gains from it.
     """
     out: list[dict] = []
+    skipped_shapes = 0
     for rec in records:
         rid = str(rec.get("record_id") or "")
         for name, cell in (rec.get("fields") or {}).items():
@@ -94,7 +96,15 @@ def _cells_needing_a_verdict(records: list[dict], field: str | None = None) -> l
                 continue
             if str(cell.get("verification_status") or "") != "judgment_unavailable":
                 continue
+            # The source is assumed to be a dict everywhere below. Legacy and
+            # hand-touched rows can carry a string (or a list) instead, and
+            # `.get` on those is an AttributeError that 500s the whole pass —
+            # the shape seen on a real dataset's gap queue. Skip and count,
+            # never crash the collection.
             src = cell.get("source") or {}
+            if not isinstance(src, dict):
+                skipped_shapes += 1
+                continue
             if not src.get("quote") or not src.get("page_id"):
                 # No evidence to judge against. Left untouched rather than
                 # reported as a failure — this is an extraction gap, and the
@@ -105,6 +115,9 @@ def _cells_needing_a_verdict(records: list[dict], field: str | None = None) -> l
                 "value": cell.get("value"), "quote": src.get("quote", ""),
                 "page_id": str(src.get("page_id")),
             })
+    if skipped_shapes:
+        log.info("rejudge skipped cells with non-dict sources",
+                 extra={"data": {"skipped": skipped_shapes}})
     return out
 
 

@@ -54,7 +54,8 @@ from playwright.async_api import async_playwright
 OFFLINE_FONTS = re.compile(r"fonts\.(googleapis|gstatic)\.com")
 
 ROUTES = [
-    ("/", "Collect"),
+    ("/", "Landing"),
+    ("/investigate", "Collect"),
     ("/runs", "Runs"),
     ("/library", "Library"),
     ("/intel", "Intel"),
@@ -123,9 +124,10 @@ async def main() -> int:
             for p in problems:
                 failures.append(f"{path}: {p[:180]}")
 
-        # Interaction checks on the main flow.
+        # Interaction checks on the main flow. Collect lives at /investigate;
+        # / is the landing surface, which has no palette or shortcuts.
         console.clear()
-        await page.goto(f"{BASE}/", wait_until="networkidle")
+        await page.goto(f"{BASE}/investigate", wait_until="networkidle")
         await page.wait_for_timeout(600)
 
         # Command palette
@@ -154,7 +156,7 @@ async def main() -> int:
             failures.append(f"digit shortcut did not navigate (got {url_after})")
 
         # Command palette must work even with the caret in a textarea.
-        await page.goto(f"{BASE}/", wait_until="networkidle")
+        await page.goto(f"{BASE}/investigate", wait_until="networkidle")
         await page.wait_for_timeout(600)
         focused = await page.evaluate(
             "document.activeElement?.tagName || 'none'"

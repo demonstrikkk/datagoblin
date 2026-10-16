@@ -101,10 +101,16 @@ export default function ReviewQueue({ datasetId, schema, onOpenConflicts }) {
   const [page, setPage] = useState(0);
   const [status, setStatus] = useState('all');
 
-  const { data, loading, error, refetch } = useResource(
+  // `status` is the *fetch* status from useResource, aliased because the
+  // component already uses `status` for the status filter below. Shadowing the
+  // filter is what made `loading` undefined: the hook returns
+  // `{...state}` where state holds `status`, never `loading`, so the skeleton
+  // branch could never be true and a cold open rendered an empty panel.
+  const { data, status: fetchStatus, error, refetch } = useResource(
     (o) => api.records(datasetId, { limit: PAGE, offset: page * PAGE }, o),
     [datasetId, page]
   );
+  const loading = fetchStatus === 'loading' || fetchStatus === 'idle';
 
   const records = data?.records || [];
   const total = data?.total ?? 0;

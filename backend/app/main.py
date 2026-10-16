@@ -8,7 +8,9 @@ import asyncio
 import datetime
 import hmac
 import json
+import re
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -19,7 +21,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.api.deps import correlation_id, require_api_key
 from app.core.config import settings
 from app.core.constants import EVENT_TYPES
-from app.core.errors import AppError, not_found, validation
+from app.core.errors import AppError, dependency, not_found, validation
 from app.core.logging import log, set_level
 from app.events.stream import bus
 from app.providers.crawl import fetcher
@@ -27,8 +29,9 @@ from app.providers.llm import generate as llm_provider
 from app.providers.search import tavily as search_provider
 from app.repositories import factory as factory_repo
 from app.repositories.factory import build_repo
-from app.schemas.run import DatasetView, Envelope, RunView
+from app.schemas.run import Counters, DatasetView, Envelope, RunView
 from app.services import backfill as backfill_svc
+from app.services import dataset_agent as agent_svc
 from app.services import dashboard as dashboard_svc
 from app.services import profile as profile_svc
 from app.services import refresh as refresh_svc
@@ -53,7 +56,6 @@ from app.services import politeness as politeness_svc
 from app.services import proposals as proposals_svc
 from app.services import runner as runner_svc
 from app.services import selector_learn as selector_learn_svc
-from app.services import selectors as selectors_svc
 from app.services import sqlq as sqlq_svc
 
 set_level(settings.LOG_LEVEL)
@@ -123,6 +125,8 @@ async def _fetch_method(url: str, method: str) -> dict:
         return await impersonation_svc.impersonate_fetch(url)
     if method == "jina":
         return await fetcher.jina_fetch(url)
+    if method == "docling":
+        return await fetcher.docling_fetch(url)
     return await fetcher.http_fetch(url)
 
 
@@ -182,6 +186,45 @@ async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResp
                        "message": e.get("msg", "")}
                       for e in exc.errors()[:20]]}},
         "meta": {}})
+
+
+def _stored_run_view(row: dict, dataset_id: str | None = None) -> dict:
+    """One run shape for stored rows, matching the live `RunView`.
+
+    `GET /api/runs/{id}` used to return the raw row after eviction, so a
+    finished run's quality breakdown depended on which endpoint was asked: live
+    in-memory runs carried field-level counters while stored rows carried
+    whatever `stats.counts` held, under `id` instead of `run_id`, with no
+    `partial`/`no_yield_reason` normalization. Normalize here so the frontend
+    no longer needs per-source compensation.
+    """
+    row = row or {}
+    stats = row.get("stats") or {}
+    counts = stats.get("counts") or {}
+    status = str(row.get("status", "UNKNOWN") or "UNKNOWN")
+    stage = str(row.get("current_stage", "") or "")
+    progress = row.get("progress", 100 if status in _TERMINAL else 0)
+    try:
+        progress = max(0, min(100, int(progress)))
+    except (TypeError, ValueError):
+        progress = 100 if status in _TERMINAL else 0
+    counter_values = {}
+    for key in Counters.model_fields:
+        try:
+            counter_values[key] = max(0, int(counts.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            counter_values[key] = 0
+    error = str(row.get("error", "") or "")
+    no_yield = str(counts.get("no_yield_reason", "") or "")
+    if not no_yield and status in ("FAILED", "PARTIAL") and not int(
+            counter_values.get("records", 0)):
+        no_yield = error
+    view = RunView(run_id=str(row.get("run_id", row.get("id", "")) or ""),
+                   status=status, current_stage=stage or status,
+                   progress=progress, counters=Counters(**counter_values),
+                   dataset_id=dataset_id, error=error,
+                   partial=bool(row.get("partial", False)), no_yield_reason=no_yield)
+    return view.model_dump()
 
 
 def _run_view(run_id: str) -> dict:
@@ -286,25 +329,40 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         if ev.get("type") not in EVENT_TYPES:
             ev["type"] = "stage.progress"
         await bus.emit(run_id, ev)
-        r.append_event(run_id, ev)
+        # Sync psycopg must never run on the event loop: during judging this
+        # handler fires per record, and each blocking write stalled health,
+        # history and SSE polling. The live bus update above is the delivery;
+        # the row is the audit trail, so a persistence failure is logged rather
+        # than thrown into the run.
+        try:
+            await asyncio.to_thread(r.append_event, run_id, ev)
+        except Exception as e:  # noqa: BLE001
+            log.warning("run event not persisted",
+                        extra={"data": {"run_id": run_id,
+                                        "type": ev.get("type", ""),
+                                        "error": str(e)[:150]}})
         st = RUNS.get(run_id)
         if st is not None:
             st.update(current_stage=ev.get("stage", st.get("current_stage", "")),
                       progress=ev.get("progress", st.get("progress", 0)))
             data = ev.get("data", {}) or {}
-            counters = {"attempted": data.get("attempted", 0),
-                        "successful": data.get("successful", 0),
-                        "failed": data.get("failed", 0),
-                        "records": data.get("records", 0),
-                        # Named for what they measure. `verified`/`needs_review`
-                        # conflated records with fields and counted unjudged
-                        # claims as verified.
-                        "records_fully_verified": data.get("records_fully_verified", 0),
-                        "records_needing_review": data.get("records_needing_review", 0),
-                        "fields_verified": data.get("fields_verified", 0),
-                        "fields_judgment_unavailable": data.get(
-                            "fields_judgment_unavailable", 0),
-                        "fields_rate_limited": data.get("fields_rate_limited", 0)}
+            # Copied by enumeration rather than by hand: `provenance.summarize`
+            # emits 11 counters and this list carried 9, so `fields_unverified`
+            # and `fields_conflicting` were computed, shipped on the event, and
+            # then dropped on the floor here. `GET /api/runs/{id}` therefore
+            # reported 0 for both forever, on every run — including the ones that
+            # were mostly unverified. The two models in `app/schemas/run.py`
+            # declared both fields, so the API contract said they existed while
+            # the handler silently refused to fill them.
+            counters = {key: int(data.get(key, 0) or 0) for key in (
+                "attempted", "successful", "failed", "records",
+                # Named for what they measure. `verified`/`needs_review`
+                # conflated records with fields and counted unjudged
+                # claims as verified.
+                "records_fully_verified", "records_needing_review",
+                "fields_verified", "fields_unverified",
+                "fields_judgment_unavailable", "fields_conflicting",
+                "fields_rate_limited")}
             # Every terminal event changes what the dashboard reports, so the cached
         # aggregate is dropped here rather than left to expire. Recomputing it is
         # 26s of reads against a remote database, and a stale summary on the page
@@ -351,13 +409,69 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
         return await llm_provider.structured_generate(prompt, schema)
 
     async def _store(rid: str, pl: dict, rows: list[dict], counts: dict) -> str:
-        return r.finalize_dataset(rid, pl, rows, counts)
+        dataset_id = await asyncio.to_thread(r.finalize_dataset, rid, pl, rows, counts)
+        # Field freshness is recorded here rather than at fetch time, because
+        # only now do we know which cells came back verified. Doing it earlier
+        # would stamp every field of every fetched page as fresh, which is
+        # exactly the over-confident age reporting this table exists to fix.
+        try:
+            await _note_field_freshness(dataset_id, rows)
+        except Exception as e:  # noqa: BLE001
+            log.warning("field freshness not recorded",
+                        extra={"data": {"dataset_id": dataset_id,
+                                        "error": str(e)[:160]}})
+        return dataset_id
+
+    async def _note_field_freshness(dataset_id: str, rows: list[dict]) -> None:
+        """Stamp the fields that were actually verified for this dataset."""
+        tally: dict[str, list[int]] = {}
+        for row in rows or []:
+            for name, cell in (row.get("fields") or {}).items():
+                if not isinstance(cell, dict):
+                    continue
+                slot = tally.setdefault(str(name), [0, 0])
+                slot[1] += 1
+                if cell.get("verification_status") in ("verified", "judgment_unavailable"):
+                    # `judgment_unavailable` counts as a fresh *reading*: the page
+                    # was read and the value graded. What it does not count as is
+                    # proof, and that distinction is the point of the two columns.
+                    slot[0] += 1
+        for name, (verified, total) in tally.items():
+            await asyncio.to_thread(r.note_field_verified,
+                                    dataset_id, name, verified, total)
 
     async def _persist_source(source: dict) -> None:
-        r.upsert_source(run_id, source)
+        # Per settled page, on the crawl path: all three writes are blocking
+        # psycopg and must stay off the loop.
+        await asyncio.to_thread(r.upsert_source, run_id, source)
         fp = source.get("fingerprint", "")
         if fp:
-            r.note_fingerprint(run_id, fp, source.get("url", ""))
+            await asyncio.to_thread(r.note_fingerprint, run_id, fp,
+                                    source.get("url", ""))
+
+        # Cross-run reputation. Recorded here because this is the one place every
+        # settled source passes through, and it is the only place that sees both
+        # the outcome and the URL — which is all the host needs. Counting verified
+        # cells here too is deliberately deferred to `note_field_verified`, which
+        # runs after validation and therefore knows which cells were actually
+        # proven; at this point the run has not judged anything.
+        host = urlparse(str(source.get("url", ""))).hostname or ""
+        if host:
+            status = str(source.get("status") or "")
+            error = str(source.get("error") or "").lower()
+            blocked = ("robots" in error or "blocked" in error
+                       or status in ("skipped", "failed")
+                       and any(k in error for k in ("403", "429", "forbidden",
+                                                    "rate limit", "throttl")))
+            try:
+                await asyncio.to_thread(
+                    r.note_source_outcome, host,
+                    ok=status in ("ok", "reused"), blocked=blocked)
+            except Exception as e:  # noqa: BLE001
+                # Reputation is bookkeeping. A failure here must never cost the
+                # run its source row, which is the durable part.
+                log.warning("reputation not recorded",
+                            extra={"data": {"host": host, "error": str(e)[:160]}})
 
     async def _persist_page(page: dict) -> str:
         """Store the crawled page so evidence can cite it later.
@@ -390,8 +504,8 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
             return None
         return await asyncio.to_thread(r.find_page_by_url, url, True)
 
-    def _record_charge(entry: dict) -> None:
-        r.record_charge(run_id, entry)
+    async def _record_charge(entry: dict) -> None:
+        await asyncio.to_thread(r.record_charge, run_id, entry)
 
     async def _llm_preflight() -> str | None:
         """Can the LLM actually serve this run? Checked before it starts.
@@ -448,7 +562,7 @@ async def map_url(body: dict, cid: str = Depends(correlation_id)) -> dict:
         links = fetcher.extract_all_links(page.get("html", ""), page.get("final_url", url),
                                           limit=link_limit)
     job_id = f"map-{uuid.uuid4().hex[:8]}"
-    entry = metering_svc.Ledger().bill(job_id, "map", 1)
+    entry = metering_svc.SHARED_LEDGER.bill(job_id, "map", 1)
     try:
         repo().record_charge(job_id, entry)
     except Exception as e:  # noqa: BLE001 (map result matters more than its receipt)
@@ -467,7 +581,8 @@ async def run_status(run_id: str, cid: str = Depends(correlation_id)) -> dict:
         stored = await asyncio.to_thread(repo().get_run, run_id)
         if stored is None:
             raise not_found("run", run_id)
-        return {"data": stored, "error": None, "meta": {"correlation_id": cid}}
+        return {"data": _stored_run_view(stored), "error": None,
+                "meta": {"correlation_id": cid}}
 
     # `partial` and `no_yield_reason` are computed on every terminal event and
     # were unreachable, because RunView had no such fields. A run that stored
@@ -577,22 +692,109 @@ async def get_dataset(did: str, include_records: bool = False,
     return {"data": view, "error": None, "meta": {"correlation_id": cid}}
 
 
+@app.delete("/api/datasets/{did}", dependencies=[Depends(require_api_key)])
+async def delete_dataset(did: str, body: dict,
+                         cid: str = Depends(correlation_id)) -> dict:
+    """Delete one dataset, its records, its gap history and its export ledger.
+
+    There is no undo and no bulk form, so the guard is explicit: the body must
+    carry `{"confirm": "<the full dataset id>"}`, exactly matching the id in
+    the path. Anything else — missing, truncated, wrong — is a 422 and nothing
+    is touched. The UI asks twice before it ever sends that body.
+
+    Sources, pages and runs belong to the *run*, not the dataset, and survive:
+    the run stays as the audit trail of work that happened, and its stored
+    pages stay reusable by future runs.
+    """
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_row, did) is None:
+        raise not_found("dataset", did)
+    if str((body or {}).get("confirm") or "") != did:
+        raise validation("deletion needs an exact confirmation: "
+                         '{"confirm": "<the full dataset id>"}')
+    deleted = await asyncio.to_thread(r.delete_dataset, did)
+    if not deleted:
+        raise not_found("dataset", did)
+    dashboard_svc.invalidate()
+    return {"data": {"dataset_id": did, "deleted": True},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
 @app.get("/api/datasets/{did}/records", dependencies=[Depends(require_api_key)])
 async def get_records(did: str, q: str = "", limit: int = Query(default=100, ge=1, le=500),
                       offset: int = Query(default=0, ge=0),
                       cid: str = Depends(correlation_id)) -> dict:
-    out = await asyncio.to_thread(repo().get_records, did, q[:200], limit, offset)
-    if not out:
+    # Existence first: an empty result and a missing dataset are different
+    # answers, and both used to arrive as either 200-empty or 404 depending on
+    # which repository quirk fired first.
+    if await asyncio.to_thread(repo().get_dataset_schema, did) is None:
         raise not_found("dataset", did)
-    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+    out = await asyncio.to_thread(repo().get_records, did, q[:200], limit, offset)
+    return {"data": out or {"dataset_id": did, "total": 0, "records": []},
+            "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.get("/api/datasets/{did}/sources", dependencies=[Depends(require_api_key)])
 async def get_sources(did: str, cid: str = Depends(correlation_id)) -> dict:
-    out = await asyncio.to_thread(repo().get_sources, did)
-    if not out:
+    if await asyncio.to_thread(repo().get_dataset_schema, did) is None:
         raise not_found("dataset", did)
-    return {"data": out, "error": None, "meta": {"correlation_id": cid}}
+    out = await asyncio.to_thread(repo().get_sources, did)
+    return {"data": out or {"dataset_id": did, "sources_attempted": 0,
+                            "sources_successful": 0, "sources_failed": 0,
+                            "sources": []},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/duplicates", dependencies=[Depends(require_api_key)])
+async def get_duplicates(did: str,
+                         limit_datasets: int = Query(default=5, ge=1, le=10),
+                         records_each: int = Query(default=200, ge=1, le=500),
+                         cid: str = Depends(correlation_id)) -> dict:
+    """Which records in other datasets carry this dataset's identities.
+
+    Detection only — the response names datasets and identities, and nothing is
+    merged, moved, or rewritten. Cross-dataset auto-merge would fold one
+    question's answer into another's; this exists for the audit question "does
+    this entity already exist elsewhere in the library?"
+
+    Bounded twice: at most `limit_datasets` other datasets, `records_each`
+    records apiece. The identity keys are the plan's declared `dedupe_keys`,
+    recovered the same way the run used them; without them the request is
+    refused rather than matched on every field.
+    """
+    from app.services import deduper as deduper_svc
+
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    try:
+        plan = await asyncio.to_thread(backfill_svc.plan_for_dataset, r, did)
+    except backfill_svc.BackfillRefused as exc:
+        raise validation(str(exc))
+    keys = [str(k) for k in (plan.get("dedupe_keys") or []) if str(k).strip()]
+    if not keys:
+        raise validation(
+            "this dataset's plan declares no dedupe_keys, so records in other "
+            "datasets cannot be matched to an identity")
+    own = (await asyncio.to_thread(r.get_records, did, "", 1000, 0) or {}).get("records", [])
+    datasets = await asyncio.to_thread(r.list_datasets, limit_datasets + 1) or []
+    others = []
+    for d in datasets:
+        oid = str(d.get("id", "") or "")
+        if not oid or oid == did:
+            continue
+        if len(others) >= limit_datasets:
+            break
+        recs = (await asyncio.to_thread(r.get_records, oid, "", records_each, 0)
+                or {}).get("records", [])
+        others.append((oid, recs))
+    try:
+        out = deduper_svc.find_cross_dataset_duplicates(own, keys, others)
+    except deduper_svc.CrossDatasetRefused as exc:
+        raise validation(str(exc))
+    return {"data": {"dataset_id": did, "dedupe_keys": keys,
+                     "datasets_compared": [o for o, _ in others], **out},
+            "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.post("/api/datasets/{did}/propose", dependencies=[Depends(require_api_key)])
@@ -766,7 +968,21 @@ async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_
     async def _llm(prompt: str, schema: dict) -> dict:
         return await llm_provider.structured_generate(prompt, schema)
 
-    run_id = str((await asyncio.to_thread(r.get_dataset_row, did)) or {}).get("run_id", "")
+    # `get_dataset_row` returns the dataset's own row (a dict), or None.
+    #
+    # The `str()` was wrapped around the whole expression, so Python bound `.get`
+    # to the *string* rather than to the row:
+    #
+    #     str(row or {}).get("run_id", "")   ->  str has no .get
+    #
+    # Every POST to /gaps/fill therefore raised AttributeError and answered 500,
+    # for every dataset, always. The intent is to read the row and stringify the
+    # run id — a repo-agnostic `str` matters because LocalRepo returns a plain
+    # string id where Postgres returns a UUID.
+    row = await asyncio.to_thread(r.get_dataset_row, did)
+    if not row:
+        raise not_found("dataset", did)
+    run_id = str(row.get("run_id") or "")
 
     async def _persist_page(page: dict) -> str:
         """Store the fetched body so its quote can be checked later.
@@ -940,6 +1156,61 @@ async def refresh_proposal(did: str, sources: str = "",
             "error": None, "meta": {"correlation_id": cid}}
 
 
+@app.get("/api/reputation/sources", dependencies=[Depends(require_api_key)])
+async def source_reputation(hosts: str = "",
+                            cid: str = Depends(correlation_id)) -> dict:
+    """Cross-run trust in each source host, and why it scored what it did.
+
+    Reports every term that fed the score, not just the number. A host being
+    deprioritised is a decision someone may have to justify, and "0.15" on its
+    own explains nothing — `terms` distinguishes a host that was excellent and
+    went quiet from one that answered every time and proved nothing.
+    """
+    from app.services import reputation as reputation_svc
+
+    r = repo()
+    wanted = [h.strip().lower() for h in hosts.split(",") if h.strip()] or None
+    try:
+        rows = await asyncio.to_thread(r.get_source_reputation, wanted)
+    except Exception as e:  # noqa: BLE001
+        raise dependency(f"reputation store is unavailable: {str(e)[:160]}")
+    scored = reputation_svc.rank_hosts(rows or [])
+    return {"data": {"hosts": scored, "count": len(scored),
+                     "half_life_days": reputation_svc.DECAY_HALF_LIFE_DAYS},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.get("/api/datasets/{did}/staleness", dependencies=[Depends(require_api_key)])
+async def dataset_staleness(did: str, cid: str = Depends(correlation_id)) -> dict:
+    """How current each field of this dataset is, and the order to refresh them.
+
+    A dataset is only as fresh as the weakest number you would quote from it, so
+    the summary carries the oldest age rather than an average — an average hides
+    the one field that is two years old behind thirty fresh ones.
+    """
+    from app.services import reputation as reputation_svc
+
+    r = repo()
+    if await asyncio.to_thread(r.get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+    try:
+        fields = await asyncio.to_thread(r.get_field_freshness, did)
+    except Exception as e:  # noqa: BLE001
+        # A dataset written before this table existed has no freshness rows at
+        # all. That is "unknown age", not an error, and reporting it as one would
+        # make every existing dataset look broken.
+        log.info("field freshness unavailable",
+                 extra={"data": {"dataset_id": did, "error": str(e)[:160]}})
+        fields = []
+    return {"data": {
+                **reputation_svc.dataset_staleness(fields),
+                "dataset_id": did,
+                "tracked": bool(fields),
+                "refresh_order": reputation_svc.refresh_order(fields),
+            },
+            "error": None, "meta": {"correlation_id": cid}}
+
+
 @app.post("/api/datasets/{did}/refresh", dependencies=[Depends(require_api_key)])
 async def refresh_run(did: str, body: dict, cid: str = Depends(correlation_id)) -> dict:
     """Re-read this dataset's sources and re-verify the values they supplied.
@@ -1073,6 +1344,42 @@ async def query_dataset(did: str, body: dict,
                      "columns": list(rows[0].keys()) if rows else columns[:1],
                      "row_count": len(rows), "truncated": len(rows) >= limit,
                      "rows": rows},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
+@app.post("/api/datasets/{did}/agent", dependencies=[Depends(require_api_key)])
+async def ask_agent(did: str, body: dict,
+                    cid: str = Depends(correlation_id)) -> dict:
+    """Answer a question about one dataset with tools, not with SQL.
+
+    The model picks read tools from a fixed menu; the server executes them
+    against stored records with bounded arguments and the model composes the
+    answer from the results. No model-authored string ever touches the data,
+    and nothing in this path writes: a request to change something comes back
+    as a proposal naming the existing endpoint that carries it out, for the
+    reader to approve through the UI's own button.
+
+    This is the endpoint the Ask panel uses. `/query` (model-written SQL)
+    remains for compatibility, but the UI no longer calls it.
+    """
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise validation("question is required")
+    if len(question) > 2000:
+        raise validation("question too long (2000 chars max)")
+    if await asyncio.to_thread(repo().get_dataset_schema, did) is None:
+        raise not_found("dataset", did)
+
+    async def _llm(prompt: str, schema: dict) -> dict:
+        return await llm_provider.structured_generate(prompt, schema)
+
+    try:
+        out = await agent_svc.answer(repo(), did, question, _llm)
+    except AppError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise dependency(f"the agent could not answer: {str(exc)[:160]}")
+    return {"data": {"dataset_id": did, "question": question, **out},
             "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -1392,25 +1699,42 @@ async def export_dataset(did: str, body: dict, cid: str = Depends(correlation_id
     try:
         run_id = ds.get("run_id", did)
         prior = [e for e in await asyncio.to_thread(repo().ledger, run_id) if e.get("stage") == "export"]
-        entry = metering_svc.Ledger().bill(run_id, "export", 1, seq=len(prior) + 1)
-        repo().record_charge(run_id, entry)
+        entry = metering_svc.SHARED_LEDGER.bill(run_id, "export", 1, seq=len(prior) + 1)
+        await asyncio.to_thread(repo().record_charge, run_id, entry)
         credits = entry["credits"]
     except Exception as e:  # noqa: BLE001 (download must survive billing failure)
         log.info("export ledger persist failed", extra={"data": {"error": str(e)[:150]}})
     meta = {"correlation_id": cid, "export_id": export_id, "persisted": persisted,
             "credits_used": credits}
+    # File downloads cannot carry the JSON envelope (the bytes must be the file),
+    # so the envelope-equivalent travels in headers. A client that only reads the
+    # body gets a valid file; a client that reads headers gets the receipt.
+    headers = {"Content-Disposition": f"attachment; filename={filename}",
+               "X-Datagoblin-Export-Id": str(export_id),
+               "X-Datagoblin-Persisted": str(persisted),
+               "X-Datagoblin-Credits-Used": str(credits),
+               "X-Datagoblin-Correlation-Id": str(cid)}
     if fmt == "csv":
-        return PlainTextResponse(content, media_type="text/csv",
-                                 headers={"Content-Disposition": f"attachment; filename={filename}"})
+        return PlainTextResponse(content, media_type="text/csv", headers=headers)
     if fmt == "md":
-        return PlainTextResponse(content, media_type="text/markdown",
-                                 headers={"Content-Disposition": f"attachment; filename={filename}"})
+        return PlainTextResponse(content, media_type="text/markdown", headers=headers)
     return {"data": {"format": fmt, "content": content}, "error": None, "meta": meta}
 
 
 @app.get("/api/history", dependencies=[Depends(require_api_key)])
 async def history(cid: str = Depends(correlation_id)) -> dict:
-    return {"data": repo().run_history(), "error": None, "meta": {"correlation_id": cid}}
+    rows = await asyncio.to_thread(repo().run_history)
+    # Attach the dataset each run produced, when one exists. `runs` carries no
+    # dataset id, so without this the stored shape could not link back to its
+    # output while the live shape could.
+    try:
+        datasets = await asyncio.to_thread(repo().list_datasets)
+    except Exception:  # noqa: BLE001 (history must survive a dataset-list failure)
+        datasets = []
+    by_run = {str(d.get("run_id") or ""): str(d.get("id") or "")
+              for d in datasets or [] if d.get("run_id")}
+    return {"data": [_stored_run_view(r, by_run.get(str(r.get("id", "")))) for r in rows or []],
+            "error": None, "meta": {"correlation_id": cid}}
 
 
 @app.get("/api/health")
@@ -1463,7 +1787,28 @@ async def free_models(cid: str = Depends(correlation_id)) -> dict:
     data["zen"] = {"configured": bool(settings.ZEN_API_KEY),
                    "enabled": bool(settings.ZEN_ENABLED),
                    "base_url": settings.ZEN_BASE_URL}
-    data["opencode"] = await opencode_svc.available()
+    oc = await opencode_svc.available()
+    data["opencode"] = oc
+    # `reachable` per model, derived — never probed per model here. A registry
+    # that lists models without saying which can be used made clients default to
+    # green for gated entries. `observed` stays as the point-in-time note; this
+    # boolean is the usable-now answer.
+    for m in data.get("text_models", []) or []:
+        observed = str(m.get("observed", "") or "")
+        transport = str(m.get("transport", "") or "")
+        if transport == "direct":
+            m["reachable"] = observed.startswith("ok")
+            m["reachable_reason"] = ("direct REST observed working"
+                                     if m["reachable"] else
+                                     f"direct REST not observed working ({observed or 'unobserved'})")
+        elif transport == "opencode":
+            m["reachable"] = bool(oc.get("reachable", False))
+            m["reachable_reason"] = ("local OpenCode server reachable"
+                                     if m["reachable"] else
+                                     f"needs local OpenCode server ({oc.get('error') or 'unreachable'})")
+        else:
+            m["reachable"] = observed.startswith("ok")
+            m["reachable_reason"] = observed or "unobserved"
     return {"data": data, "error": None, "meta": {"correlation_id": cid}}
 
 
@@ -1556,7 +1901,7 @@ async def intel_ask(body: dict, cid: str = Depends(correlation_id)) -> dict:
         raise validation(f"Unknown model id(s): {', '.join(unknown[:5])}")
 
     job_id = f"intel-{uuid.uuid4().hex[:8]}"
-    entry = metering_svc.Ledger().bill(job_id, "intel", 1)
+    entry = metering_svc.SHARED_LEDGER.bill(job_id, "intel", 1)
     try:
         repo().record_charge(job_id, entry)
     except Exception as e:  # noqa: BLE001 (the answer matters more than its receipt)

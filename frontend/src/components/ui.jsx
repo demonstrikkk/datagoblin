@@ -119,9 +119,21 @@ export function Empty({ icon = '◌', title, hint, action, className = '' }) {
   );
 }
 
-export function ErrorNote({ error, onRetry, className = '', compact = false }) {
-  if (!error) return null;
-  const msg = error?.message || String(error);
+/**
+ * A failed request, rendered so a person can act on it.
+ *
+ * Also accepts `title` and `children` — a heading and any detail. It rendered
+ * neither, so `<ErrorNote title="Stored page unavailable">{detail}</ErrorNote>`
+ * produced an alert with an empty body: the error state occupied space and
+ * communicated nothing, which is worse than showing nothing at all because it
+ * looks like a deliberate, contentless badge.
+ *
+ * Still returns null when there is no error and no content, so an unused
+ * instance renders nothing.
+ */
+export function ErrorNote({ error, title, children, onRetry, className = '', compact = false }) {
+  if (!error && !children) return null;
+  const msg = error?.message || (typeof error === 'string' ? error : '');
   return (
     <div
       role="alert"
@@ -133,7 +145,13 @@ export function ErrorNote({ error, onRetry, className = '', compact = false }) {
         ⚠
       </span>
       <div className="min-w-0 flex-1">
-        <p className="text-[12.5px] font-medium leading-snug text-danger break-words">{msg}</p>
+        {title ? (
+          <p className="text-[12.5px] font-semibold leading-snug text-danger">{title}</p>
+        ) : null}
+        {msg ? (
+          <p className="text-[12.5px] font-medium leading-snug text-danger break-words">{msg}</p>
+        ) : null}
+        {children ? <div className="mt-0.5 text-[12px] text-danger/90">{children}</div> : null}
       </div>
       {onRetry ? (
         <button type="button" className="btn-ghost btn-xs text-danger" onClick={onRetry}>
