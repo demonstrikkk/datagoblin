@@ -359,6 +359,21 @@ async def extract_page(plan: dict, page: dict, llm: object) -> tuple[list[dict],
     if not (dom_source or page.get("markdown") or raw_body):
         return [], "none"
 
+    # Relevance, before any model call. Placed here rather than after
+    # extraction because the whole point is to not pay for a page that cannot
+    # be about the question: an extraction call is the expensive part, and a
+    # record from an off-topic page is wrong in a way no quote check can catch.
+    if settings.EXTRACT_RELEVANCE_GATE:
+        from app.services import relevance as relevance_svc
+        body = page.get("markdown") or raw_body or dom_source
+        verdict = relevance_svc.assess(plan, body, str(page.get("url", "")))
+        if not verdict.keep:
+            log.info("page dropped as off-topic",
+                     extra={"data": {"url": str(page.get("url", ""))[:120],
+                                     "reason": verdict.reason,
+                                     "terms": verdict.terms[:12]}})
+            return [], "off-topic"
+
     fields_spec = plan.get("fields", []) or []
     ctx = {"plan": plan, "page": page, "json_text": raw_body}
 

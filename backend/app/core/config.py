@@ -113,6 +113,23 @@ class Settings(BaseSettings):
     ZEN_JEV_ENABLED: bool = True
     JEV_ZEN_MODEL: str = "jev-1.13-free"
 
+    #: Drop pages that share no subject term with the run's goal, before
+    #: spending an extraction call on them.
+    #:
+    #: Added after a live run answered "hackathon sponsors in New Delhi" with
+    #: records citing an AWS product page and a free-tier page. Those cells were
+    #: marked verified, because verification checks that a quote is faithful to
+    #: its page -- not that the page is about the question. Both faults produce
+    #: confident, well-sourced, irrelevant rows, and only one of them is
+    #: detectable by evidence checking.
+    #:
+    #: Default on because the failure it prevents is silent. The bar is
+    #: deliberately low (one shared subject term, body or URL) so it drops
+    #: clearly-off-topic pages rather than making a semantic judgement it cannot
+    #: make -- see services/relevance.py for why losing rows is worse than
+    #: keeping a few.
+    EXTRACT_RELEVANCE_GATE: bool = Field(default=True)
+
     # Fetch
     FETCH_HTTP_TIMEOUT_S: int = Field(default=20, ge=1, le=120)
     FETCH_CRAWL_TIMEOUT_S: int = Field(default=90, ge=10, le=600)

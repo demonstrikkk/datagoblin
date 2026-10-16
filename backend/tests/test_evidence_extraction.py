@@ -173,7 +173,7 @@ def test_single_path_extract_and_metadata():
     page = {"url": "https://x.example/a", "title": "T", "markdown": PLAIN_MD,
             "references": ""}
     recs, provider = run(extractor_svc.extract_page(
-        {"fields": FIELDS, "goal": "AI startups"}, page, llm))
+        {"fields": FIELDS, "goal": "AI startups London founders"}, page, llm))
     assert provider == "test-llm" and len(recs) == 1 and len(calls) == 1
     assert recs[0]["source_text"] == PLAIN_MD
     assert recs[0]["references"] == "" and recs[0]["coverage"] == "partial"
@@ -219,7 +219,15 @@ def test_regen_fires_once_when_tripwire_hot():
     assert recs and recs[0]["fields"]["company_name"] == "Acme AI"
 
 
-def test_no_regen_when_tripwire_cold():
+def test_no_regen_when_tripwire_cold(monkeypatch):
+    from app.core import config as config_mod
+    # The relevance gate is off here on purpose. Both this test and the gate
+    # derive their terms from the goal, so a page cold enough to suppress the
+    # regen is also off-topic by the gate's own rules -- and coupling them means
+    # this test can only pass by weakening one of them. They are independent
+    # mechanisms; the tripwire is about a page the model returns nothing from,
+    # the gate is about a page that is not about the question.
+    monkeypatch.setattr(config_mod.settings, "EXTRACT_RELEVANCE_GATE", False)
     calls: list = []
     llm = _llm_factory([{"records": [], "coverage": "none"}], calls)
     page = {"url": "https://x.example/a", "title": "T", "markdown": IRRELEVANT}
