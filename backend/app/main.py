@@ -1321,6 +1321,27 @@ async def source_reputation(hosts: str = "",
             "error": None, "meta": {"correlation_id": cid}}
 
 
+@app.get("/api/crawl/timing", dependencies=[Depends(require_api_key)])
+async def crawl_timing(reset: int = Query(default=0, ge=0, le=1),
+                       cid: str = Depends(correlation_id)) -> dict:
+    """Per-rung fetch wall-clock, process-wide. Reads only.
+
+    Answers "where did the time go" without a profiler and without waiting for
+    a run: which rung dominated, whether a rung is uniformly slow or mostly fast
+    and occasionally terrible, and how often each one ended in a skip or a
+    failure rather than content.
+
+    Process-wide and in-memory rather than per-run, because the useful
+    comparison is between rungs across many pages, and because persisting
+    timings per run would make the instrumentation more durable than the thing
+    it measures. Resets on restart; `reset=1` clears it on demand.
+    """
+    if reset:
+        crawler_svc.reset_fetch_timing()
+    return {"data": {"rungs": crawler_svc.fetch_timing()},
+            "error": None, "meta": {"correlation_id": cid}}
+
+
 @app.get("/api/datasets/{did}/staleness", dependencies=[Depends(require_api_key)])
 async def dataset_staleness(did: str, cid: str = Depends(correlation_id)) -> dict:
     """How current each field of this dataset is, and the order to refresh them.

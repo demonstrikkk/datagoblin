@@ -270,7 +270,11 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
 
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.REDUCING,
                        "message": f"Reducing {len(pages)} pages to quotable text",
-                       "progress": 52, "timestamp": _now()})
+                       "progress": 52, "timestamp": _now(),
+                       # Where the fetch budget actually went, per rung. Attached
+                       # here rather than at the end because after this point the
+                       # page set is already fixed and the numbers stop changing.
+                       "data": {"fetch_timing": crawler_svc.fetch_timing()}})
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.EXTRACTING,
                        "message": f"Extracting ({counts['successful']} ok, {counts['failed']} failed, "
                                   f"{counts.get('skipped', 0)} skipped)",

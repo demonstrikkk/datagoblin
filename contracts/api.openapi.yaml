@@ -1389,6 +1389,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/crawl/timing:
+   get:
+    summary: Crawl Fetch Timing
+    description: |-
+     Per-rung fetch wall-clock, process-wide. Reads only.
+
+     Answers "where did the time go" without a profiler and without waiting for
+     a run: which rung dominated, whether a rung is uniformly slow or mostly fast
+     and occasionally terrible, and how often each one ended in a skip or a
+     failure rather than content.
+
+     Reports p50 and p90 rather than only a mean, because a mean hides the case
+     this exists to diagnose - a rung that is usually fast and rarely very slow.
+     Percentiles show shape; they do not catch every rare event, so `max_ms` is
+     reported alongside them.
+
+     Process-wide and in-memory rather than per-run, because the useful
+     comparison is between rungs across many pages. Resets on restart.
+    operationId: crawl_timing_api_crawl__timing_get
+    parameters:
+    - name: reset
+      in: query
+      required: false
+      schema:
+       type: integer
+       maximum: 1
+       minimum: 0
+       default: 0
+      description: Clear the collected timings and report the now-empty state.
+    responses:
+     '200':
+      description: OK
+      content:
+       application/json:
+        schema:
+         $ref: '#/components/schemas/Envelope'
   /api/datasets/{did}/staleness:
     get:
       summary: Dataset Staleness

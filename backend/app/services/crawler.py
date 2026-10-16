@@ -26,6 +26,8 @@ import asyncio
 import datetime
 import hashlib
 import re
+import threading
+import time
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -1084,13 +1086,103 @@ def _source_fetched_event(url: str, ok_flag: bool = True) -> dict[str, Any]:
             "data": {"url": url, "ok": bool(ok_flag)}}
 
 
+#: How long each rung's wall-clock is kept for reporting.
+#:
+#: Bounded on purpose. This is a rolling window over a long crawl, not a
+#: per-call log: the useful question is "where does the time go", which needs
+#: enough samples to be representative and no more. Unbounded samples on a
+#: 500-page crawl would be a memory leak dressed as instrumentation.
+_TIMING_WINDOW = 200
+
+#: rung -> samples of {"ms", "ok", "outcome"}. Insertion-ordered; the window is
+#: trimmed from the front, which keeps recent behaviour rather than the average
+#: of a run that started before the site changed.
+_timing: dict[str, list[dict[str, Any]]] = {}
+_timing_lock = threading.Lock()
+
+
+def _note_timing(rung: str, ms: int, ok: bool, outcome: str) -> None:
+    with _timing_lock:
+        samples = _timing.setdefault(rung, [])
+        samples.append({"ms": ms, "ok": bool(ok), "outcome": outcome})
+        if len(samples) > _TIMING_WINDOW:
+            del samples[: len(samples) - _TIMING_WINDOW]
+
+
+def fetch_timing() -> dict[str, Any]:
+    """Per-rung wall-clock, for diagnosing where a crawl spent its time.
+
+    Reports the shape of the distribution rather than only a mean, because the
+    mean hides the thing that matters here: a rung that is usually fast and
+    occasionally very slow (browser launch, a PDF conversion) looks identical to
+    a uniformly slow rung if you only average it. `p50` and `p90` separate those.
+
+    Failure outcomes are counted by name rather than folded into a boolean,
+    because "skipped because robots disallowed" and "threw a timeout" call for
+    completely different responses.
+    """
+    with _timing_lock:
+        snapshot = {rung: list(samples) for rung, samples in _timing.items()}
+    out: dict[str, Any] = {}
+    for rung, samples in snapshot.items():
+        times = sorted(s["ms"] for s in samples)
+        n = len(times)
+        if not n:
+            continue
+        outcomes: dict[str, int] = {}
+        for s in samples:
+            outcomes[s["outcome"]] = outcomes.get(s["outcome"], 0) + 1
+        out[rung] = {
+            "n": n,
+            "p50_ms": times[n // 2],
+            "p90_ms": times[min(n - 1, int(n * 0.9))],
+            "min_ms": times[0],
+            "max_ms": times[-1],
+            "total_ms": sum(times),
+            "failed": sum(1 for s in samples if not s["ok"]),
+            "outcomes": dict(sorted(outcomes.items(), key=lambda kv: -kv[1])),
+        }
+    return out
+
+
+def reset_fetch_timing() -> None:
+    with _timing_lock:
+        _timing.clear()
+
+
 async def _default_fetch(url: str, method: str) -> dict[str, Any]:
-    if method == "crawl4ai":
-        return await fetcher.crawl4ai_fetch(url)
-    if method == "impersonate":
-        return await impersonation_svc.impersonate_fetch(url)
-    if method == "jina":
-        return await fetcher.jina_fetch(url)
-    if method == "docling":
-        return await fetcher.docling_fetch(url)
-    return await fetcher.http_fetch(url)
+    """Dispatch to a fetch rung, timing it.
+
+    Timing lives here rather than inside each rung because this is the one
+    place every rung passes through. Instrumenting the five fetch functions
+    separately would miss the robots check and the throttle wait, which are part
+    of what the crawl actually pays for and were the reason for measuring.
+    """
+    started = time.perf_counter()
+    outcome = "ok"
+    try:
+        if method == "crawl4ai":
+            out = await fetcher.crawl4ai_fetch(url)
+        elif method == "impersonate":
+            out = await impersonation_svc.impersonate_fetch(url)
+        elif method == "jina":
+            out = await fetcher.jina_fetch(url)
+        elif method == "docling":
+            out = await fetcher.docling_fetch(url)
+        else:
+            out = await fetcher.http_fetch(url)
+    except BaseException as exc:
+        outcome = f"raised:{type(exc).__name__}"
+        _note_timing(method, int((time.perf_counter() - started) * 1000),
+                     False, outcome)
+        raise
+    # A rung that returns a skip is not a rung that worked: it reported no
+    # content, and counting it as success would make the timing look better
+    # than the crawl actually was.
+    if out.get("skipped"):
+        outcome = str(out.get("skipped"))[:60]
+    elif out.get("error"):
+        outcome = "error"
+    _note_timing(method, int((time.perf_counter() - started) * 1000),
+                 not bool(out.get("skipped") or out.get("error")), outcome)
+    return out
