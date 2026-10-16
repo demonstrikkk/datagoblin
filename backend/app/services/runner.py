@@ -68,6 +68,12 @@ def _now() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
+#: Adaptive per-domain budget. A host at or above `CAP_TRUST_FLOOR` keeps the
+#: full flat cap; one below it is scaled down toward `CAP_FLOOR` pages.
+CAP_TRUST_FLOOR = 0.35
+CAP_FLOOR = 2
+
+
 def _emit_stamped(emit: object, run_id: str) -> object:
     async def _stamped(ev: dict) -> None:
         ev = dict(ev)
@@ -91,6 +97,15 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     # What past runs learned about which hosts are worth crawling. Absent in
     # tests and /api/map, where discovery simply runs cold.
     host_prior = ctx.get("host_prior")
+
+    async def _prior_map() -> dict:
+        """The prior, resolved once and shared with discovery."""
+        if not callable(host_prior):
+            return {}
+        try:
+            return await host_prior() or {}
+        except Exception:  # noqa: BLE001 (cold start is a valid state)
+            return {}
     budget = budget or _Budget(settings.RUN_MAX_RUNTIME_S)
     # Shared with execute_run so a hard timeout can still persist what was
     # produced. Written as each stage completes, never read from the pipeline.
@@ -196,10 +211,11 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     # spinner. Bounding it means the worst case is an honest failure with a name
     # for the cause, not silence.
     discovery_cap = max(60.0, budget.total * 0.25)
+    _prior = await _prior_map()
     try:
         sources = await asyncio.wait_for(
             discovery_svc.discover(run_id, plan, search_fn, llm, _discover_emit,
-                                   host_prior=host_prior),
+                                   host_prior=_prior),
             timeout=discovery_cap)
     except asyncio.TimeoutError:
         reason = (f"source discovery did not finish within "
@@ -211,6 +227,7 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         return {"status": "FAILED", "records": [], "error": reason,
                 "no_yield_reason": reason}
     await _bill("discover_query", projection["queries"])
+    _apply_adaptive_domain_caps(plan, sources, await _prior_map())
     if cancelled():
         return {"status": "CANCELLED", "records": []}
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.FETCHING,
@@ -594,6 +611,47 @@ def _explain_zero_yield(pages: list, providers: list) -> str:
               if thin else "")
     return (f"the pages were read but contained no matching records "
             f"({n} page(s) checked, provider {provs[0] or 'none'}){detail}")
+
+
+def _apply_adaptive_domain_caps(plan: dict, sources: list[dict],
+                                prior: dict) -> None:
+    """Give a proven host more of the crawl than a barren one.
+
+    `per_domain_cap` was one number for every host, so a site with a 0.95
+    verified-cell rate and a listicle that has never produced a record were
+    allowed the same number of pages. The budget is finite, so that is a real
+    trade: a proven host is being starved by pages a barren one consumed.
+
+    Scaled rather than switched. A host that proves nothing still gets a floor
+    of `CAP_FLOOR` pages, because "we have not tried it yet" and "we tried and
+    it gave nothing" are different states and only the second deserves less.
+    An unknown host keeps the flat cap, so a cold start is unchanged.
+    """
+    if not isinstance(plan, dict) or not prior:
+        return
+    from urllib.parse import urlparse as _up
+
+    traversal = dict(plan.get("traversal", {}) or {})
+    flat = max(1, min(int(traversal.get("max_pages_per_domain", 10)),
+                       settings.RUN_MAX_DOMAIN_PAGES))
+    caps: dict[str, int] = {}
+    for src in sources or []:
+        host = (_up(str((src or {}).get("url", "") or "")).hostname or "").lower()
+        if not host:
+            continue
+        host = host[4:] if host.startswith("www.") else host
+        info = prior.get(host)
+        if not info:
+            continue  # unknown: leave it on the flat cap
+        trust = max(0.0, min(1.0, float(info.get("trust") or 0.0)))
+        if trust >= CAP_TRUST_FLOOR:
+            scaled = flat
+        else:
+            scaled = max(CAP_FLOOR, int(round(flat * (0.4 + 0.6 * trust))))
+        caps[host] = max(CAP_FLOOR, min(flat, scaled))
+    if caps:
+        traversal["domain_caps"] = caps
+        plan["traversal"] = traversal
 
 
 async def execute_run(run_id: str, plan: dict, ctx: dict, emit: object) -> dict:

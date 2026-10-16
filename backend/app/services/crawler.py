@@ -667,6 +667,25 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     max_depth = max(1, min(settings.RUN_MAX_DEPTH, 5))
     budget = min(int(plan.get("max_pages", settings.RUN_MAX_PAGES)), settings.RUN_MAX_PAGES)
 
+    # Per-host caps, from the prior where one exists.
+    #
+    # `per_domain_cap` was a single number for every host, so a site with a
+    # 0.95 verified-cell rate and a listicle that has never yielded a record
+    # both got the same allowance. `domain_caps` is filled by discovery from
+    # `source_reputation`; an absent entry keeps the flat cap, so a cold start
+    # behaves exactly as it did before.
+    domain_caps: dict[str, int] = {}
+    for host, cap in ((plan.get("traversal", {}) or {})
+                      .get("domain_caps") or {}).items():
+        try:
+            domain_caps[str(host).lower()] = max(1, min(int(cap),
+                                                      settings.RUN_MAX_DOMAIN_PAGES))
+        except (TypeError, ValueError):
+            continue
+
+    def _cap_for(host: str) -> int:
+        return domain_caps.get(host.lower(), per_domain_cap)
+
     # Seeds and traversal were drawing on one budget, and seeds won.
     #
     # `discovery` returns up to `max_pages` seeds, so a normal run entered the
@@ -766,7 +785,7 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         if not url:
             return
         dom = _domain(url)
-        if depth > 0 and domain_count.get(dom, 0) >= per_domain_cap:
+        if depth > 0 and domain_count.get(dom, 0) >= _cap_for(dom):
             # Counted, and reported, rather than dropped in silence. This used to
             # be a bare `return`, so a run stopped at 3 pages of one host looked
             # exactly like a run with no further links to follow — and the cap is

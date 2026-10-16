@@ -95,6 +95,67 @@ class TestBlockedHostExclusion:
         assert discovery_svc.blocked_hosts_from_prior({}, set()) == set()
 
 
+class TestAdaptiveDomainBudget:
+    """A barren host and a proven host shared one page allowance.
+
+    `per_domain_cap` was a single number for every host, so a listicle that
+    has never produced a record consumed the same budget a site with a 0.95
+    verified-cell rate was given. The budget is finite, so that is a real
+    trade rather than a tidiness issue.
+    """
+
+    @staticmethod
+    def _plan(caps=None):
+        traversal = {"max_pages_per_domain": 10}
+        if caps:
+            traversal["domain_caps"] = caps
+        return {"goal": "t", "entity": "c", "max_pages": 20,
+                "traversal": traversal,
+                "fields": [], "search_queries": ["q"], "dedupe_keys": []}
+
+    def test_a_proven_host_keeps_the_full_cap(self):
+        from app.services import runner as runner_svc
+        plan = self._plan({})
+        runner_svc._apply_adaptive_domain_caps(
+            plan, [{"url": "https://good.example/list"}],
+            {"good.example": {"trust": 0.95, "known": True, "cells": 500}})
+        assert plan["traversal"]["domain_caps"]["good.example"] == 10
+
+    def test_a_barren_host_is_scaled_down_but_never_to_zero(self):
+        from app.services import runner as runner_svc
+        plan = self._plan({})
+        runner_svc._apply_adaptive_domain_caps(
+            plan, [{"url": "https://barren.example/list"}],
+            {"barren.example": {"trust": 0.0, "known": True, "cells": 400}})
+        cap = plan["traversal"]["domain_caps"]["barren.example"]
+        assert 0 < cap < 10, cap
+        assert cap >= runner_svc.CAP_FLOOR, \
+            "not having tried it yet differs from having tried and failing"
+
+    def test_an_unknown_host_is_left_alone(self):
+        """Cold start must be byte-identical to the flat cap."""
+        from app.services import runner as runner_svc
+        plan = self._plan({})
+        runner_svc._apply_adaptive_domain_caps(
+            plan, [{"url": "https://new.example/list"}], {})
+        assert "domain_caps" not in plan["traversal"]
+
+    def test_www_is_normalised_so_the_cap_actually_applies(self):
+        from app.services import runner as runner_svc
+        plan = self._plan({})
+        runner_svc._apply_adaptive_domain_caps(
+            plan, [{"url": "https://www.good.example/list"}],
+            {"good.example": {"trust": 0.9, "known": True}})
+        assert "good.example" in plan["traversal"]["domain_caps"]
+
+    def test_no_prior_leaves_the_plan_alone(self):
+        from app.services import runner as runner_svc
+        plan = self._plan({})
+        before = dict(plan["traversal"])
+        runner_svc._apply_adaptive_domain_caps(plan, [{"url": "https://x/"}], {})
+        assert plan["traversal"] == before
+
+
 class TestLocalAdapterLocking:
     """The local store deadlocked on first use of its read-modify-write helpers.
 
