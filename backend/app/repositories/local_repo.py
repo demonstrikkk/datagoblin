@@ -282,6 +282,17 @@ class LocalRepo:
     def append_event(self, run_id: str, event: dict) -> None:
         self._append("events", {"run_id": run_id, **event})
 
+    def append_events(self, run_id: str, events: list[dict]) -> None:
+        """Store many events, preserving order.
+
+        Local storage appends JSON lines, so this is not a round-trip saving the
+        way it is on Postgres. It exists so the batcher exercises the same
+        call shape in both modes rather than having a Postgres-only path that
+        tests never touch.
+        """
+        for ev in events:
+            self._append("events", {"run_id": run_id, **ev})
+
     def finalize_dataset(self, run_id: str, plan: dict, rows: list[dict], counts: dict) -> str:
         did = str(uuid.uuid4())
         self._append("datasets", {"id": did, "run_id": run_id, "name": plan.get("goal", ""),

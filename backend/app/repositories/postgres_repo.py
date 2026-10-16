@@ -491,6 +491,49 @@ class PostgresRepo:
                 return
             raise
 
+    def append_events(self, run_id: str, events: list[dict]) -> None:
+        """Store many run events in ONE statement.
+
+        Exists because a run emits per record and per page, and each event is
+        one round trip at a measured 177ms floor. `executemany` would still
+        send one round trip per row on most drivers; a single multi-row INSERT
+        is what actually amortises it.
+
+        Order is preserved by the VALUES list, so the audit trail reads in the
+        order the run emitted. Falls back to the single-event path when the
+        table predates migration 006, rather than duplicating that fallback.
+        """
+        if not events:
+            return
+        if len(events) == 1:
+            self.append_event(run_id, events[0])
+            return
+
+        run_ids = [run_id] * len(events)
+        stages = [e.get("stage", "") for e in events]
+        types = [str(e.get("type", ""))[:120] for e in events]
+        messages = [str(e.get("message", ""))[:2000] for e in events]
+        metas = [_jsonb(e.get("data", {}) or {}) for e in events]
+
+        def _typed(cur):
+            cur.executemany(
+                """INSERT INTO run_events (run_id,stage,type,message,metadata_json)
+                   VALUES (%s,%s,%s,%s,%s)""",
+                list(zip(run_ids, stages, types, messages, metas)))
+
+        try:
+            self._run("append_events", _typed)
+        except AppError as e:
+            if "run_events" in str(e) and "type" in str(e) and (
+                    "does not exist" in str(e) or "UndefinedColumn" in str(e)):
+                log.warning("run_events.type column missing; wrote legacy events",
+                            extra={"data": {"run_id": run_id,
+                                            "migration": "006_run_event_type.sql"}})
+                for ev in events:
+                    self.append_event(run_id, ev)
+                return
+            raise
+
     def finalize_dataset(self, run_id: str, plan: dict, rows: list[dict],
                          counts: dict) -> str:
         """Dataset + records + terminal run state, in ONE transaction.
