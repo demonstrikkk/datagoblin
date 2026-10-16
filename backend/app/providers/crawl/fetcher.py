@@ -690,7 +690,23 @@ def _run_config() -> Any:
     # more". `js_code` below clicks those a bounded number of times.
     return CrawlerRunConfig(cache_mode=CacheMode.BYPASS, markdown_generator=gen,
                             scan_full_page=True, scroll_delay=0.5,
-                            js_code=_EXPAND_JS, wait_for="css body")
+                            js_code=_EXPAND_JS,
+                            # Plain "body", not "css body".
+                            #
+                            # The wait selector is passed to Playwright's
+                            # wait_for_selector, which takes a bare CSS selector.
+                            # "css body" is not a selector that matches anything, so
+                            # every rendered page waited out its full timeout and
+                            # then failed -- and a page that failed to render is
+                            # indistinguishable from a JavaScript shell, so the
+                            # whole browser rung reported as "still a JavaScript
+                            # shell after rendering".
+                            #
+                            # Measured on the installed versions: "css body"
+                            # times out at 60s+, "body" returns in 1.8s. That one
+                            # string was the reason 42% of pages in a live run
+                            # were lost.
+                            wait_for="body")
 
 
 async def _arun(crawler: Any, url: str, timeout_s: int) -> dict:
