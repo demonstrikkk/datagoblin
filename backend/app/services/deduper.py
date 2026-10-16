@@ -30,6 +30,43 @@ import re
 from rapidfuzz import fuzz
 
 
+def _strip_parenthetical(value: str) -> str:
+    """Drop a trailing parenthetical, keeping what remains.
+
+    `Amazon Web Services (AWS)` is the same company as `Amazon Web Services`,
+    and the parenthetical is a gloss on the name rather than part of it. Left
+    in place it produces a signature no other spelling of the company can ever
+    match, so the row is its own entity forever.
+
+    Only the *trailing* parenthetical is removed. A parenthetical in the middle
+    of a name usually carries real distinguishing information
+    (`Acme (Europe) Ltd` vs `Acme (US) Ltd`), and dropping it would merge two
+    genuinely different entities -- exactly the failure this module's corporate
+    form handling exists to prevent.
+
+    Refuses to strip a name that is *only* a parenthetical. `(unknown)` would
+    otherwise normalise to the empty string, and an empty identity is not a
+    useful thing to compare records on -- it makes every such row a candidate
+    for merging with every other one.
+    """
+    inner = re.sub(r"\s*\([^)]*\)\s*$", "", value).strip()
+    return inner or value.strip()
+
+
+def _acronym_of(text: str) -> str:
+    """The initials of a multi-word name, or "" if it cannot be one.
+
+    Used to tie a bare acronym to the full name it stands for: "aws" is the
+    initials of "amazon web services". Only computed for genuine multi-word
+    names, and only consulted when the mapping is unambiguous within the run --
+    an acronym shared by two different names proves nothing and is ignored.
+    """
+    words = [w for w in _identity(text).split() if len(w) > 1]
+    if len(words) < 2:
+        return ""
+    return "".join(w[0] for w in words)
+
+
 def _identity(value: object) -> str:
     """Normalise one identity value WITHOUT discarding its corporate form.
 
@@ -48,7 +85,11 @@ def _identity(value: object) -> str:
 
     if value is None:
         return ""
-    text = unicodedata.normalize("NFKD", str(value))
+    # Parenthetical first, while the brackets still exist: the punctuation
+    # normalisation below erases them, turning `Amazon Web Services (AWS)` into
+    # `amazon web services aws`, which is a name no other spelling can match.
+    text = _strip_parenthetical(str(value))
+    text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
     text = re.sub(r"[^a-z0-9]+", " ", text.lower())
     return " ".join(text.split())
