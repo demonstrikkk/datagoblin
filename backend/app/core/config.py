@@ -116,6 +116,25 @@ class Settings(BaseSettings):
     # Fetch
     FETCH_HTTP_TIMEOUT_S: int = Field(default=20, ge=1, le=120)
     FETCH_CRAWL_TIMEOUT_S: int = Field(default=90, ge=10, le=600)
+
+    # Browser reuse. Off by default: without it every page launches and tears
+    # down its own browser, which is the behaviour these settings change and
+    # the behaviour to fall back to if reuse misbehaves.
+    #
+    # Reuse is not a free win. It serialises the browser rung onto one owning
+    # loop, so four concurrent rendered pages become one at a time. That trade
+    # is worth it when a Chromium launch costs more than the page, and is not
+    # when it does not -- hence a flag rather than a default-on change.
+    REUSE_BROWSER: bool = Field(default=False)
+    #: Pages a single browser serves before being recycled. Bounds how long a
+    #: slowly-degrading browser can keep being handed new pages.
+    REUSE_BROWSER_MAX_PAGES: int = Field(default=25, ge=1, le=1000)
+    #: Seconds with no use after which an idle browser is closed, so an idle
+    #: process is not holding Chromium open indefinitely.
+    REUSE_BROWSER_IDLE_S: float = Field(default=120.0, ge=0, le=3600)
+    #: Browsers held open at once. 1 matches the single owning loop; raising it
+    #: buys concurrency at the cost of one Chromium per slot.
+    REUSE_BROWSER_CONCURRENCY: int = Field(default=1, ge=1, le=4)
     # Phase-6 thinness gate: static pages with less clean text than this AND a
     # script tag escalate to the renderer when one remains untried.
     FETCH_THIN_CHARS: int = Field(default=500, ge=100, le=5000)

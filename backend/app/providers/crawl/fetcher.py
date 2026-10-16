@@ -15,6 +15,7 @@ import ipaddress
 import random
 import re
 import socket
+import threading
 import time
 import urllib.robotparser
 from concurrent.futures import ThreadPoolExecutor
@@ -633,31 +634,88 @@ def _crawl_result_page(res: object, url: str) -> dict:
             "links": links, "method": "crawl4ai"}
 
 
-def _sync_crawl(url: str, timeout_s: int) -> dict:
-    from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+def _build_crawler() -> Any:
+    """Construct one AsyncWebCrawler. Isolated so the pool can own its lifetime."""
+    from crawl4ai import AsyncWebCrawler
+    return AsyncWebCrawler()
+
+
+def _new_crawler_sync() -> Any:
+    return asyncio.run(_async_new_crawler())
+
+
+async def _async_new_crawler() -> Any:
+    from crawl4ai import AsyncWebCrawler
+    return await AsyncWebCrawler().__aenter__()
+
+
+#: Set once per process when REUSE_BROWSER is on. Built lazily so importing
+#: this module never constructs a browser, and so the flag can be flipped in
+#: tests without a module reload.
+_POOL: Any = None
+_POOL_LOCK = threading.Lock()
+
+
+def _pool() -> Any:
+    global _POOL
+    if not settings.REUSE_BROWSER:
+        return None
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                from app.providers.crawl.browser_pool import BrowserPool
+                _POOL = BrowserPool(
+                    factory=_async_new_crawler,
+                    max_pages=settings.REUSE_BROWSER_MAX_PAGES,
+                    idle_s=settings.REUSE_BROWSER_IDLE_S,
+                    concurrency=settings.REUSE_BROWSER_CONCURRENCY,
+                )
+    return _POOL
+
+
+def _run_config() -> Any:
+    from crawl4ai import CrawlerRunConfig, CacheMode
     from crawl4ai.content_filter_strategy import PruningContentFilterLXML
     from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+
+    gen = DefaultMarkdownGenerator(
+        content_filter=PruningContentFilterLXML(threshold=0.4, threshold_type="fixed"))
+    # Phase-6 bench finding: infinite-scroll pages (quotes.toscrape.com/scroll)
+    # render thin without a full-page scan. scan_full_page costs seconds on an
+    # already-expensive fallback path and rescues them deterministically.
+    #
+    # `scan_full_page` is the ONLY lazy-load trigger that existed, and one
+    # scroll pass cannot reach content behind a click: a card grid's detail
+    # pane, a "load more" button, an accordion, a bio hidden behind "Read
+    # more". `js_code` below clicks those a bounded number of times.
+    return CrawlerRunConfig(cache_mode=CacheMode.BYPASS, markdown_generator=gen,
+                            scan_full_page=True, scroll_delay=0.5,
+                            js_code=_EXPAND_JS, wait_for="css body")
+
+
+async def _arun(crawler: Any, url: str, timeout_s: int) -> dict:
+    res = await asyncio.wait_for(
+        crawler.arun(url, config=_run_config()), timeout=timeout_s)
+    if not res.success:
+        raise RuntimeError(res.error_message or "crawl failed")
+    return _crawl_result_page(res, url)
+
+
+def _sync_crawl(url: str, timeout_s: int) -> dict:
     import asyncio as _aio
 
+    pool = _pool()
+    if pool is not None:
+        # Runs on the pool's own loop and thread, because a browser is bound to
+        # the loop that created it.
+        return pool.run(lambda crawler: _arun(crawler, url, timeout_s),
+                        timeout_s=timeout_s)
+
+    from crawl4ai import AsyncWebCrawler
+
     async def _run() -> dict:
-        gen = DefaultMarkdownGenerator(
-            content_filter=PruningContentFilterLXML(threshold=0.4, threshold_type="fixed"))
-        # Phase-6 bench finding: infinite-scroll pages (quotes.toscrape.com/scroll)
-        # render thin without a full-page scan. scan_full_page costs seconds on
-        # an already-expensive fallback path and rescues them deterministically.
-        #
-        # `scan_full_page` is the ONLY lazy-load trigger that existed, and one
-        # scroll pass cannot reach content behind a click: a card grid's detail
-        # pane, a "load more" button, an accordion, a bio hidden behind "Read
-        # more". `js_code` below clicks those a bounded number of times.
-        cfg = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, markdown_generator=gen,
-                               scan_full_page=True, scroll_delay=0.5,
-                               js_code=_EXPAND_JS, wait_for="css body")
         async with AsyncWebCrawler() as crawler:
-            res = await _aio.wait_for(crawler.arun(url, config=cfg), timeout=timeout_s)
-            if not res.success:
-                raise RuntimeError(res.error_message or "crawl failed")
-            return _crawl_result_page(res, url)
+            return await _arun(crawler, url, timeout_s)
     return _aio.run(_run())
 
 
@@ -760,7 +818,16 @@ async def jina_fetch(url: str) -> dict[str, Any]:
 
 
 async def aclose_pool() -> None:
-    global _client
+    """Close the HTTP client AND any pooled browser.
+
+    A reused browser outlives the request that started it by design, so
+    without this an idle server would be holding Chromium open until the
+    process died. Shutdown is the backstop the idle TTL cannot be.
+    """
+    global _client, _POOL
     if _client is not None:
         await _client.aclose()
         _client = None
+    pool, _POOL = _POOL, None
+    if pool is not None:
+        pool.shutdown()
