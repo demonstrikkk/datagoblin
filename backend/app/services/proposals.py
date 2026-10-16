@@ -78,6 +78,38 @@ def _tokens(text: str) -> list[str]:
     return [m.group(0).lower() for m in _IDENT.finditer(text or "")]
 
 
+def _vocab(words: tuple[str, ...]) -> set[str]:
+    """A hint/target vocabulary with both grammatical numbers.
+
+    Every list in this module is written in the singular (`source`, `founder`,
+    `value`) because that is how the vocabularies read, but people write the
+    plural — "use only two **sources** instead of five" matched nothing in
+    `_PLAN_SUBJECTS`, so the refine hint could not be scored and the sentence
+    fell through to `refresh` on a bare target noun. The same gap is why
+    "founders" never matched `_BACKFILL_TARGETS`. A vocabulary that only answers
+    to one number is a vocabulary that misclassifies.
+
+    Additive in both directions: the forms given always keep matching.
+    """
+    out: set[str] = set()
+    for word in words:
+        out.add(word)
+        if word.endswith("ies"):
+            out.add(word[:-3] + "y")
+        elif word.endswith(("ses", "xes", "zes", "ches", "shes")):
+            out.add(word[:-2])
+        elif word.endswith("s") and not word.endswith("ss"):
+            out.add(word[:-1])
+        if not word.endswith("s"):
+            if word.endswith("y") and len(word) > 1 and word[-2] not in "aeiou":
+                out.add(word[:-1] + "ies")
+            elif word.endswith(("s", "x", "z", "ch", "sh")):
+                out.add(word + "es")
+            else:
+                out.add(word + "s")
+    return out
+
+
 def classify(question: str) -> tuple[str, float]:
     """Which intent, and how strongly. (intent, score).
 
@@ -85,6 +117,18 @@ def classify(question: str) -> tuple[str, float]:
     contains hints for more than one: "add funding but only from the UK" is a
     backfill that also refines the plan. The stronger reading wins and the
     weaker one is reported, so the user can see what was nearly chosen.
+
+    **A write intent requires an action word.** The target lists name *what* a
+    request could be about (`valuation`, `founders`, `source`); only the hint
+    lists say something should *change*. Scoring a bare noun phrase as a write
+    is what turned
+
+        founders with company valuation above 1 million dollars
+
+    into a backfill proposal at confidence 0.55 — no verb, no gap named, no
+    request made, just a filter. That sentence is a read, and it got a write
+    card and **no answer at all**, because `dataset_agent.answer` returns early
+    on a non-query intent. The noun alone is not evidence of intent.
     """
     words = set(_tokens(question))
     if not words:
@@ -99,9 +143,28 @@ def classify(question: str) -> tuple[str, float]:
     if question.strip().endswith("?"):
         return "query", 0.0
 
-    backfill = len(words & set(_BACKFILL_HINTS)) + 0.5 * len(words & set(_BACKFILL_TARGETS))
-    refine = len(words & set(_REFINE_HINTS)) + 0.5 * len(words & set(_PLAN_SUBJECTS))
-    refresh = len(words & set(_REFRESH_HINTS)) + 0.5 * len(words & set(_REFRESH_TARGETS))
+    backfill_words = words & _vocab(_BACKFILL_HINTS)
+    refine_words = words & _vocab(_REFINE_HINTS)
+    refresh_words = words & _vocab(_REFRESH_HINTS)
+
+    # No action word anywhere: nothing is being asked to change, however many
+    # field nouns it contains. This is the read case, and it is the common one.
+    if not (backfill_words or refine_words or refresh_words
+            or _asks_for_new_column(question or "")):
+        return "query", 0.0
+
+    backfill = len(backfill_words) + 0.5 * len(words & _vocab(_BACKFILL_TARGETS))
+    refresh = len(refresh_words) + 0.5 * len(words & _vocab(_REFRESH_TARGETS))
+    # Refine needs a plan subject as well as a hint. Its hints are the weakest
+    # set in the file — `only`, `more`, `fewer`, `limit` are all how a *read* is
+    # phrased ("show only companies above 1M") as much as how a plan change is.
+    # Without a subject there is nothing to refine: no run, source, budget or
+    # goal was named, so there is no plan object the request could be about.
+    plan_subjects = words & _vocab(_PLAN_SUBJECTS)
+    if refine_words and plan_subjects:
+        refine = len(refine_words) + 0.5 * len(plan_subjects)
+    else:
+        refine = 0.0
 
     # "add a column" and "fill the missing funding" are the same request by
     # another name, and which one it is only matters for the schema write. The

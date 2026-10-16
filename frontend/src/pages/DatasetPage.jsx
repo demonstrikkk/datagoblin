@@ -873,19 +873,12 @@ function AskPanel({ datasetId }) {
 
       {failure ? <ErrorNote error={failure} onRetry={(e) => ask(e)} /> : null}
 
-      {proposals.map((p, i) => (
-        <ProposalCard
-          key={i}
-          datasetId={datasetId}
-          question={p}
-          onExecuted={() => {
-            setResult(null);
-            window.location.reload();
-          }}
-        />
-      ))}
-
-      {result && result.intent === 'query' ? (
+      {/* The answer renders whenever there is one. It used to be gated on
+          `intent === 'query'`, so any sentence the classifier read as a change
+          request showed a proposal card and *no answer at all* — a filter like
+          "founders with company valuation above 1 million dollars" came back as
+          a backfill proposal. The answer no longer depends on the guess. */}
+      {result && result.answer ? (
         <div className="space-y-3">
           <div className="surface p-3">
             <p className="eyebrow">Answer</p>
@@ -952,6 +945,21 @@ function AskPanel({ datasetId }) {
           ) : null}
         </div>
       ) : null}
+
+      {/* After the answer, never instead of it. A proposal is an offer, and an
+          offer that displaced the reply read as the system having understood
+          the question as a command. */}
+      {proposals.map((p, i) => (
+        <ProposalCard
+          key={i}
+          datasetId={datasetId}
+          question={p}
+          onExecuted={() => {
+            setResult(null);
+            window.location.reload();
+          }}
+        />
+      ))}
     </div>
   );
 }

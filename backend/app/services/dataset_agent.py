@@ -330,24 +330,23 @@ async def answer(store, dataset_id: str, question: str, llm) -> dict:
         raise validation("dataset not found")
     fields = _schema_fields(schema)
 
-    # A change request never reaches the model. The existing proposal path
-    # classifies it and names the endpoint that carries it out; the agent's
-    # job here is only to add the dataset facts so the proposal is grounded.
+    # A change request still gets its proposal. But it is *also* answered.
+    #
+    # This used to return early on any non-query intent, which meant one
+    # misclassification cost the reader the entire answer: "founders with
+    # company valuation above 1M" was read as a backfill (a bare field noun, no
+    # verb) and came back as a proposal card with nothing answering it. A
+    # stray card is a nuisance the reader can ignore; a missing answer is the
+    # feature failing. The tools below are read-only, so answering a question
+    # that also suggests a change is always safe.
     intent, confidence = proposals_svc.classify(question)
+    proposal: dict | None = None
     if intent != "query":
-        proposal = proposals_svc.propose(store, question, dataset_id)
-        total = (await asyncio.to_thread(
-            store.get_records, dataset_id, "", 1, 0)).get("total", 0)
-        return {
-            "intent": intent,
-            "confidence": confidence,
-            "answer": proposal.get("summary") or "",
-            "figures": [],
-            "chart": None,
-            "trace": [],
-            "proposals": [proposal],
-            "facts": {"records": total, "fields": fields},
-        }
+        try:
+            proposal = proposals_svc.propose(store, question, dataset_id)
+        except Exception:  # noqa: BLE001 (a failed proposal must not lose the answer)
+            log.warning("agent proposal failed for dataset %s", dataset_id)
+            proposal = None
 
     got = await asyncio.to_thread(
         store.get_records, dataset_id, "", AGENT_MAX_ROWS, 0) or {}
@@ -425,14 +424,17 @@ async def answer(store, dataset_id: str, question: str, llm) -> dict:
         data.get("figures") if isinstance(data.get("figures"), list) else [],
         results)
     return {
-        "intent": "query",
-        "confidence": 1.0,
+        # The answer is always the answer. `intent` records what the classifier
+        # thought, and the proposal rides alongside when there is one, but a
+        # write reading never replaces the reply.
+        "intent": intent,
+        "confidence": confidence if intent != "query" else 1.0,
         "answer": str(data.get("answer")),
         "figures": figures,
         "chart": chart,
         "trace": [{"tool": r["tool"], "args": r["args"], "summary": r["summary"]}
                   for r in results],
-        "proposals": [],
+        "proposals": [proposal] if proposal else [],
         "provider": provider,
         "model": model,
         "facts": {"records": total, "fields": fields},

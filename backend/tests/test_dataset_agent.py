@@ -134,18 +134,39 @@ def test_a_full_run_answers_from_tools():
     assert out["proposals"] == []
 
 
-def test_a_change_request_never_reaches_the_model():
+def test_a_change_request_answers_and_still_proposes():
+    """A change request may reach the model, because answering it is read-only.
+
+    This test previously asserted that a change request **never** reached the
+    model, and that assertion was the bug. The guard was implemented by
+    returning early from `answer` before any tool ran, which meant one
+    misclassification of one ordinary sentence cost the reader their answer
+    entirely:
+
+        "founders with company valuation above 1 million dollars"
+
+    was read as a backfill (a bare field noun, no verb), so it came back as a
+    proposal card with nothing answering it. The sentence is a read.
+
+    What must hold is the safety property, and it still does — the agent's
+    tools are read-only, and any write arrives as a proposal carrying
+    `needs_confirmation` for the reader to approve. Nothing here writes.
+    """
     seen = []
 
-    async def _exploding(prompt, schema):
+    async def _record_calls(prompt, schema):
         seen.append(prompt)
-        raise AssertionError("the model must not be called for a change request")
+        raise RuntimeError("provider down")  # fall through to the real fallback
 
     out = asyncio.run(agent.answer(
         _Store(_records()), "d1", "only two sources instead of ten",
-        _exploding))
-    assert seen == []
-    assert out["proposals"], "a change request must come back as a proposal"
+        _record_calls))
+    assert out["proposals"], "a change request must still come back as a proposal"
+    assert out["proposals"][0]["needs_confirmation"] is True
+    assert out["answer"], "a change request must also be answered"
+    # The fallback answer cites measurements the tools actually read, so the
+    # reply is grounded rather than model prose about a dataset it never saw.
+    assert out["trace"]
 
 
 def test_a_failed_plan_still_answers_from_real_measurements():
