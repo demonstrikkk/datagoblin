@@ -59,6 +59,7 @@ from typing import Any
 from app.core.logging import log
 from app.services import gaps as gaps_svc
 from app.providers.decision import jev
+from app.services import validator as validator_svc
 from app.services.validator import JudgeBudget
 
 #: Judge calls allowed in one pass. 259 is the entire measured hard set for this
@@ -154,7 +155,8 @@ def _pages_for(store, cells: list[dict]) -> dict[str, str]:
     return out
 
 
-def _upgraded(cell: dict, judgment: str, confidence: float) -> dict:
+def _upgraded(cell: dict, judgment: str, confidence: float,
+              text: str = "") -> dict:
     """The cell after a judgement. The value is never touched.
 
     Three outcomes, and the third is the important one:
@@ -166,10 +168,24 @@ def _upgraded(cell: dict, judgment: str, confidence: float) -> dict:
     * anything else -> unchanged. `judgment_unavailable` stays
       `judgment_unavailable`; "we could not tell" is not an improvement on "we
       could not tell".
+
+    This used to return `{**cell, "verification_status": "verified"}` and stop.
+    The cell being promoted was `judgment_unavailable`, so its offsets were
+    `(None, None)` — it had a quote and a `page_id` but no recorded position,
+    because offsets are only ever computed for a verified cell. So this wrote
+    exactly the state the whole function exists to clear: cells that read as
+    proven with nothing behind them. 992 such cells were counted on the live
+    database before it existed.
+
+    `text` is the stored page the quote resolves against, so the promotion can
+    carry its locator with it. It is passed rather than looked up because the
+    pass already loaded every page it needs.
     """
     if judgment == "SUPPORTED":
-        return {**cell, "verification_status": "verified",
-                "judgment_confidence": confidence}
+        quote = str((cell.get("source") or {}).get("quote") or "")
+        return validator_svc.settle(
+            {**cell, "judgment_confidence": confidence},
+            status="verified", quote=quote, source_text=text)
     if judgment == "NOT_SUPPORTED":
         return {**cell, "verification_status": "unverified",
                 "rejudged": "not_supported",
@@ -252,7 +268,8 @@ async def run(store, dataset_id: str, *, apply: bool = False,
             free += 1
         else:
             judged += 1
-        after = _upgraded(item["cell"], judgment, confidence)
+        after = _upgraded(item["cell"], judgment, confidence,
+                          pages.get(str(item["page_id"] or ""), ""))
         if after is item["cell"] or after.get("verification_status") == "judgment_unavailable":
             unresolved += 1
             continue

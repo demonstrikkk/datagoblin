@@ -396,21 +396,25 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
                                        source_text, f.get("required", False),
                                        f.get("type", "string"), ref_id, references,
                                        budget=budget, norm_source=norm_source)
-        start, end = locate_quote(quote, source_text) if st == "verified" else (None, None)
+        # Settled through the one function permitted to grant `verified`, so the
+        # status and the locator can never disagree. See `settle`.
+        cell = settle(
+            {"value": v, "verification_status": st,
+             # page_id makes the claim re-checkable: the offsets address stored
+             # text rather than a string that only existed in this process.
+             "source": {"url": source_url, "title": source_title,
+                        "quote": quote, "retrieved_at": ts,
+                        "reference_id": ref_id,
+                        "page_id": page_id or ev.get("page_id", ""),
+                        "content_hash": ev.get("content_hash", "")}},
+            status=st, quote=quote, source_text=source_text)
         # How the value was read, not just whether it was checked. Absent on a
         # raw extraction, so it defaults to `llm` — which is what it was, since
-        # every cell that predates this went through the model.
-        wrapped[name] = {"value": v, "verification_status": st,
-                         # page_id makes the claim re-checkable: the offsets
-                         # above address stored text rather than a string that
-                         # only existed in this process's memory.
-                         "source": {"url": source_url, "title": source_title,
-                                    "quote": quote, "retrieved_at": ts,
-                                    "reference_id": ref_id,
-                                    "page_id": page_id or ev.get("page_id", ""),
-                                    "content_hash": ev.get("content_hash", ""),
-                                    "start": start, "end": end},
-                         **_receipt_for(raw, name, st, route)}
+        # every cell that predates this went through the model. Built from the
+        # settled status, so a cell `settle` demoted cannot keep a confident
+        # receipt.
+        wrapped[name] = {**cell, **_receipt_for(
+            raw, name, cell["verification_status"], route)}
     # Shape-drift guard: every wrapped row must satisfy the RecordRow contract.
     # Return the inner fields dict (callers expect {name: provenance-field}).
     return RecordRow.model_validate({"fields": wrapped}).model_dump()["fields"]
@@ -450,3 +454,123 @@ def _receipt_for(raw: dict, field: str, status: str, route: str = "") -> dict:
         # No receipt on the evidence item: the model produced this one.
         method = conf_svc.normalise_method(route) if route else "llm"
     return conf_svc.receipt(method, verified=(status == "verified"))
+
+
+#: Every status a cell may hold. Anything else arriving at `settle` is normalised
+#: to `unverified` rather than stored, so an unrecognised value can never appear
+#: in a dataset and leave a reader unable to interpret it.
+_PROMOTABLE = frozenset({"verified", "unverified", "judgment_unavailable",
+                         "rate_limited", "conflicting", "rejected"})
+
+
+def has_locator(cell: dict) -> bool:
+    """Does this cell carry offsets that resolved against stored text?
+
+    A `source` with `start: None` is not a citation. It says a quote exists
+    somewhere in a string nobody can now find, which is the state the locator's
+    own docstring warns about: "a field is admitted as verified and then handed
+    offsets of (None, None), which makes the citation unusable."
+    """
+    src = (cell or {}).get("source") or {}
+    return src.get("start") is not None and src.get("end") is not None
+
+
+def settle(cell: dict, *, status: str, quote: str = "",
+           source_text: str = "", reason: str = "") -> dict:
+    """Grant or withhold `verified`, and keep the locator and the status in step.
+
+    **This is the only function in the codebase permitted to leave a cell
+    `verified`.** `test_promotion_chokepoint.py` enforces that by parsing every
+    module under `app/` and failing on a literal assignment anywhere else, so a
+    new caller cannot quietly open a ninth door.
+
+    `verified` takes two things, and historically only the first was checked:
+
+      1. a support verdict -- does this passage establish this value
+      2. a locator -- does the quote resolve, at a known position, against the
+         exact text the store holds
+
+    Passing (1) while failing (2) produces a cell that reads as proven and
+    cannot be checked by anyone, including the product's own proof view. So (2)
+    is now a precondition: an unlocatable quote is demoted to `unverified` and
+    keeps the reason, rather than being stored as a claim with nothing behind it.
+
+    Fails closed on every path. `settle` never raises and never returns a cell
+    it could not justify.
+    """
+    out = dict(cell)
+    src = dict(out.get("source") or {})
+    src["start"], src["end"] = None, None
+
+    if status == "verified":
+        start, end = locate_quote(quote, source_text)
+        if start is None or end is None:
+            # The verdict stands but the citation does not. Demoting is the only
+            # honest option: "verified" with no resolvable offsets is a claim no
+            # reader and no later check can test.
+            out["verification_status"] = "unverified"
+            src["start"], src["end"] = None, None
+            out["not_verified_because"] = reason or (
+                "the evidence was supported but its quote does not resolve "
+                "against the stored text, so there is nothing a reader could "
+                "check")
+        else:
+            out["verification_status"] = "verified"
+            src["start"], src["end"] = start, end
+            out.pop("not_verified_because", None)
+    else:
+        # Fails closed on anything that is not a status: a missing or empty one
+        # must not be stored as-is, because `Verification` is a closed set and an
+        # unrecognised value would leave the cell claiming something no reader
+        # can interpret. "unverified" is the least-committal true statement.
+        out["verification_status"] = status if status in _PROMOTABLE else "unverified"
+        if reason:
+            out["not_verified_because"] = reason
+    out["source"] = src
+    return out
+
+
+def adopt(cell: dict, other: dict, *, resolved: str = "") -> dict:
+    """Take another cell's value **and its evidence**, keeping the status it earned.
+
+    Used wherever a decision picks a rival: Jev-C's conflict triage and the
+    manual resolver. Both used to write `verification_status = "verified"`
+    outright, and both reasons were wrong in the same way — a decision about
+    *which value is better* was recorded as *the evidence is sound*. Neither had
+    re-located the quote, and neither had any support verdict for the rival.
+
+    A decision is not evidence. So the adopted cell gets the rival's own status,
+    and the rival's whole `source` verbatim, offsets included, rather than a
+    three-key reconstruction that dropped them.
+
+    A rival that carries `verified` but no resolvable locator is demoted: that
+    combination is the state this whole change exists to stop being able to
+    produce, so it is refused on the way in rather than discovered later.
+
+    `resolved` records that a decision was made. It never confers status.
+    """
+    out = dict(cell)
+    other = other or {}
+    src = dict(other.get("source") or {})
+    out["value"] = other.get("value")
+    out["source"] = src
+
+    status = str(other.get("verification_status") or "") or "unverified"
+    if status == "verified" and not has_locator({"source": src}):
+        status = "unverified"
+        out["not_verified_because"] = (
+            "this value was adopted from a rival marked verified, but the "
+            "rival carried no offsets, so its quote cannot be checked against "
+            "the stored page")
+    out["verification_status"] = status
+    if resolved:
+        out["resolved"] = resolved
+    if status == "verified":
+        out.pop("not_verified_because", None)
+    # The receipt described the old value's provenance; the adopted evidence has
+    # its own, or none. Recomputing it is `wrap_record`'s job, which runs before
+    # any of this.
+    for key in ("read_method", "method_label", "method_hint", "confidence",
+                "certainty", "certainty_label", "certainty_hint"):
+        out.pop(key, None)
+    return out

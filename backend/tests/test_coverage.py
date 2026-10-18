@@ -130,12 +130,21 @@ def test_fully_covered_field_is_absent_from_the_backlog():
 
 
 # -- apply_resolution --------------------------------------------------------
-def test_keep_marks_verified_and_records_which_move_was_made():
+def test_keep_records_the_move_without_claiming_the_evidence_is_sound():
+    """A click resolves a disagreement. It does not verify a passage.
+
+    This asserted `verified`, which said that reading two quoted passages and
+    preferring one was the same act as establishing that a quote sits at a known
+    position in the stored page. It is not, and the two are now distinct.
+    """
     cell = _cell("A", "conflicting")
     out = cov.apply_resolution(cell, "keep", None)
     assert out["value"] == "A"
-    assert out["verification_status"] == "verified"
+    assert out["verification_status"] == "conflicting", (
+        "keeping the incumbent changes which value is offered; it adds no "
+        "evidence, so the incumbent's status is unchanged")
     assert out["resolved"] == "kept_incumbent"
+    assert out["source"] == cell["source"], "the incumbent's evidence is untouched"
 
 
 def test_adopt_takes_the_rival_value_and_that_rivals_evidence():
@@ -147,7 +156,32 @@ def test_adopt_takes_the_rival_value_and_that_rivals_evidence():
     assert out["value"] == "B"
     assert out["source"]["quote"] == "qb"
     assert out["source"]["page_id"] == "p2"
-    assert out["verification_status"] == "verified"
+    assert out["resolved"] == "adopted_rival"
+    # The rival carries no offsets, so the adopted value has no citation and
+    # cannot be called verified -- whatever the reviewer concluded.
+    assert out["verification_status"] == "unverified"
+
+
+def test_adopt_keeps_the_rivals_offsets_rather_than_rebuilding_the_source():
+    """The discarded fields are the citation.
+
+    The old path rebuilt `source` from quote/url/page_id alone, so adopting a
+    rival threw away the offsets, `content_hash` and `retrieved_at` it had --
+    which is how a cell came to read as verified with nothing behind it.
+    """
+    cell = _cell("A", "conflicting", quote="qa", url="https://a.example/",
+                 rivals=[{"value": "B", "verification_status": "verified",
+                          "source": {"quote": "qb", "url": "https://b.example/",
+                                     "page_id": "p2", "start": 40, "end": 42,
+                                     "content_hash": "h2",
+                                     "retrieved_at": "then"}}])
+    out = cov.apply_resolution(cell, "adopt", 0)
+    assert out["verification_status"] == "verified", (
+        "a genuinely proven rival stays proven; demoting everything would be a "
+        "different bug")
+    assert out["source"] == {"quote": "qb", "url": "https://b.example/",
+                             "page_id": "p2", "start": 40, "end": 42,
+                             "content_hash": "h2", "retrieved_at": "then"}
 
 
 def test_adopt_with_a_bad_rival_index_is_refused():

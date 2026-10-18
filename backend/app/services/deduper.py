@@ -434,11 +434,25 @@ def dedupe_records(rows: list[dict], keys: list[str],
                       and v.get("value") not in (None, "")
                       and cur.get("value") != v.get("value")):
                     # Genuine conflict on merge: keep first value, mark conflicting,
-                    # preserve the rival {value, source} for the JUDGE step (Jev-C).
+                    # preserve the rival for the JUDGE step (Jev-C).
+                    #
+                    # The rival used to be stored as `{value, source}` and
+                    # nothing else, so when Jev-C adopted it there was no status
+                    # to inherit and the code had nothing to copy but a hardcoded
+                    # "verified". That is why a decision about *which value is
+                    # better* ended up recorded as *the evidence is sound* — an
+                    # invariant that could not be honoured because the evidence
+                    # had not been carried along.
+                    #
+                    # So the rival now carries its own status and locator, and
+                    # adoption inherits them instead of inventing them.
                     cur["verification_status"] = "conflicting"
-                    cur.setdefault("rivals", []).append(
-                        {"value": v.get("value"),
-                         "source": copy.deepcopy(v.get("source", {}))})
+                    cur.setdefault("rivals", []).append({
+                        "value": v.get("value"),
+                        "source": copy.deepcopy(v.get("source", {})),
+                        "verification_status": str(
+                            (v.get("verification_status") or "") or ""),
+                    })
     return canon_rows, merged
 
 
@@ -520,6 +534,7 @@ async def adjudicate_conflicts(rows: list[dict]) -> dict:
     import asyncio
     from app.providers.decision import jev
     from app.core.config import settings
+    from app.services import validator as validator_svc
 
     stats = {"judged": 0, "confirmed": 0, "adopted": 0, "downgraded": 0}
     sem = asyncio.Semaphore(max(1, int(getattr(settings, "ITEM_CONCURRENCY", 8) or 8)))
@@ -554,9 +569,15 @@ async def adjudicate_conflicts(rows: list[dict]) -> dict:
             stats["confirmed"] += 1
             continue
         if item == "B":
-            cell["value"] = rival.get("value")
-            cell["source"] = rival.get("source", cell.get("source", {}))
-            cell["verification_status"] = "verified"
+            # Triage answered "which of these two values is better". It did not
+            # check that the rival's quote resolves against its own stored page,
+            # and it has no support verdict for it. So the adopted cell inherits
+            # the rival's status and locator, and `adopt` demotes anything that
+            # claims `verified` without offsets behind it.
+            #
+            # `update` rather than rebinding: the caller holds this dict by
+            # reference out of the row it is about to be persisted from.
+            cell.update(validator_svc.adopt(cell, rival, resolved="adopted_rival"))
             stats["adopted"] += 1
         elif item == "INSUFFICIENT":
             cell["value"] = None

@@ -124,7 +124,17 @@ def test_conflicts_are_judged_concurrently(monkeypatch):
 
 
 def test_adopting_a_rival_actually_mutates_the_cell(monkeypatch):
-    """Counting a decision is not applying it."""
+    """Counting a decision is not applying it.
+
+    The decision applies -- in place, because the caller holds this dict by
+    reference out of the row it is about to persist. What the decision does
+    *not* do is grant `verified`.
+
+    The rival here carries `source={"quote": "q2"}` and nothing else, so it has
+    no offsets and therefore no citation a reader could follow. This used to
+    assert `verified`, which is the state the whole `adopt` change exists to
+    stop being producible.
+    """
 
     async def _triage(field, a, b, qa="", qb=""):
         return {"decision": "B"}
@@ -135,8 +145,42 @@ def test_adopting_a_rival_actually_mutates_the_cell(monkeypatch):
     cell = rows[0]["fields"]["f0"]
     assert stats["adopted"] == 1 and stats["confirmed"] == 0
     assert cell["value"] == "b", "the rival value was not adopted"
+    assert cell["source"] == {"quote": "q2"}, "the rival's own evidence was not taken"
+    assert cell["verification_status"] == "unverified", (
+        "the rival carried no offsets, so adopting it cannot produce a verified "
+        "cell")
+    assert "not_verified_because" not in cell, (
+        "the rival never claimed verified, so nothing needs demoting -- this is "
+        "the rival's own status being inherited, not a downgrade")
+    assert cell["resolved"] == "adopted_rival"
+
+
+def test_a_verified_rival_stays_verified_when_adopted(monkeypatch):
+    """The other half: the fix must not demote a genuinely proven value.
+
+    If this demoted everything, the right response would be to undo the change,
+    not to weaken the rule. A rival with resolvable offsets keeps `verified` and
+    hands them to the cell.
+    """
+
+    async def _triage(field, a, b, qa="", qb=""):
+        return {"decision": "B"}
+
+    monkeypatch.setattr(jev, "conflict_triage", _triage)
+    rows = [{"fields": {"f0": {
+        "value": "a", "verification_status": "conflicting",
+        "source": {"quote": "q1", "start": 0, "end": 2},
+        "rivals": [{"value": "b", "verification_status": "verified",
+                    "source": {"quote": "q2", "start": 7, "end": 9}}]}}}]
+    stats = run(deduper_svc.adjudicate_conflicts(rows))
+    cell = rows[0]["fields"]["f0"]
+    assert stats["adopted"] == 1
+    assert cell["value"] == "b"
     assert cell["verification_status"] == "verified"
-    assert cell["source"] == {"quote": "q2"}
+    assert cell["source"] == {"quote": "q2", "start": 7, "end": 9}, (
+        "the adopted cell must carry the rival's locator, or the offsets name "
+        "the wrong passage")
+    assert "not_verified_because" not in cell
 
 
 def test_insufficient_downgrades_and_nulls(monkeypatch):

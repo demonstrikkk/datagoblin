@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services import validator as validator_svc
+
 #: Cell states a stored value can be in. `missing` is ours, not the extractor's:
 #: there is no cell at all.
 _PRESENT_STATES = ("verified", "unverified", "conflicting", "not_proven")
@@ -178,31 +180,38 @@ def apply_resolution(cell: dict, choice: str, rival_index: int | None) -> dict:
     different source. There is no "type the right answer here" — that would put
     unquoted text into a dataset whose entire claim is that every value carries
     evidence.
+
+    **A human decision resolves a conflict. It does not verify evidence.**
+    Both moves used to end in `verification_status = "verified"`, which claimed
+    that a stored passage had been checked when the only thing that had happened
+    was that a person read two of them and preferred one. The `adopt` path also
+    rebuilt `source` from `quote`/`url`/`page_id` alone, discarding the rival's
+    offsets, `content_hash` and `retrieved_at` — so it manufactured the state
+    "verified with nothing behind it" on the way to claiming it.
+
+    So `resolved` records the decision and the status stays whatever the evidence
+    earned. A cell whose adopted rival was genuinely verified stays verified,
+    now pointing at the rival's real offsets; one that was not is visibly not,
+    which is the point of the distinction.
     """
     if not isinstance(cell, dict):
         raise ValueError("not a provenance-bearing cell")
     rivals = cell.get("rivals") or []
     if choice == "keep":
+        # The incumbent's evidence is untouched and so is its status. Resolving
+        # a disagreement says which value the dataset is offering; it says
+        # nothing new about whether that value's quote is in the stored page.
         out = dict(cell)
-        out["verification_status"] = "verified"
         out["resolved"] = "kept_incumbent"
         return out
     if choice == "adopt":
         if rival_index is None or not 0 <= int(rival_index) < len(rivals):
-            raise ValueError("rival_index out of range")
+            raise ValueError("rival_index out range")
         rival = rivals[int(rival_index)]
         # Rivals are stored exactly as cells are: {"value":..., "source":{...}}.
-        # Reading `quote` off the top level found nothing, so adopting a rival
-        # replaced the value and left the cell pointing at the *incumbent's*
-        # page — the dataset would claim evidence it did not have.
-        src = rival.get("source") or {}
-        quote = src.get("quote", rival.get("quote", ""))
-        url = src.get("url", rival.get("url", ""))
-        page_id = src.get("page_id", rival.get("page_id", ""))
-        out = dict(cell)
-        out["value"] = rival.get("value")
-        out["source"] = {"quote": quote, "url": url, "page_id": page_id}
-        out["verification_status"] = "verified"
-        out["resolved"] = "adopted_rival"
-        return out
+        # Reading `quote` off the top level found nothing, so an earlier
+        # adoption replaced the value and left the cell pointing at the
+        # *incumbent's* page. `adopt` takes the rival's whole source, which also
+        # keeps the offsets the discarded reconstruction threw away.
+        return validator_svc.adopt(cell, rival, resolved="adopted_rival")
     raise ValueError(f"unknown choice: {choice!r}")

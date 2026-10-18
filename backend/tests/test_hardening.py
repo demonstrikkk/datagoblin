@@ -530,7 +530,13 @@ def test_judge_confirms_and_adopts(monkeypatch):
     stats = run(dd.adjudicate_conflicts(rows))
     assert stats["adopted"] == 1
     assert rows[0]["fields"]["founded"]["value"] == "2024"
-    assert rows[0]["fields"]["founded"]["verification_status"] == "verified"
+    # Not `verified`. Triage decided which of two values is better; it did not
+    # check that the rival's quote resolves against its own stored page, and the
+    # rival carries no offsets, so there is no citation behind the adopted value.
+    # The status is now the rival's own, inherited rather than asserted.
+    assert rows[0]["fields"]["founded"]["verification_status"] == "unverified"
+    assert rows[0]["fields"]["founded"]["source"]["url"] == "b", (
+        "the adopted value must cite the rival's page, not the incumbent's")
 
     async def _ins(field, va, vb, qa="", qb=""):
         return {"decision": "INSUFFICIENT", "provider": "test"}
