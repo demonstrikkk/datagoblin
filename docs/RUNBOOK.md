@@ -241,7 +241,7 @@ because nothing reads them.
 ## 9. Testing
 
 ```powershell
-# backend — 1313 tests
+# backend -- the suite; see AGENTS.md for the markers and the full gate
 cd backend; .venv\Scripts\python.exe -m pytest -q
 
 # frontend
@@ -250,6 +250,10 @@ cd frontend; npm test; npm run build
 # regenerate the contract after any route change
 backend\.venv\Scripts\python.exe backend\scripts\gen_contract.py --write
 ```
+
+The count is deliberately not written down. This file said 1313, `README.md` said
+389 and `AUDIT.md` said 143; every one of them was stale by the time it was read,
+and a wrong number is worse than none because it looks authoritative.
 
 ### The guard that matters most
 

@@ -52,7 +52,8 @@ answered, all **8 distinct models** (`distinct_models: 8`, `independent: true`).
 The 2 failures are genuine upstream `UnknownError` 500s on `mimo-v2.5-free` and
 `muse-spark-1.2-contributor-free`, retried and still failing.
 
-**Suites**: 389 backend tests pass. `git diff --check` clean.
+**Suites**: the backend suite passes — run it, do not believe a number here.
+`git diff --check` clean.
 
 **Frontend (rebuilt 2026-09-27)**: production build passes with per-route code
 splitting, and four Playwright suites now drive the real app against the real

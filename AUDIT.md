@@ -1,5 +1,15 @@
 # DATAGOBLIN audit — dead code, dummy fallbacks, structure (mark-only pass)
 
+> **Point-in-time record.** Every line number, test count and `[KEEP]` judgement
+> below describes the tree on the date at the top and is stale now. It is kept
+> unedited because rewriting an audit to match the present is how an audit stops
+> being evidence. For current numbers and the live gate, see [`AGENTS.md`](AGENTS.md).
+>
+> Since this pass some of the marked items have been dealt with: `ladder.attach_receipt`
+> and `EventBus.dropped`/`format_sse` were deleted, and the `RUN_RETRY_COUNT`
+> setting was found to have been inert. The `[DELETE?]`/`[FIX?]` marks say what
+> was true then.
+
 Date: 2026-09-26. Rule for this pass: **NOTHING deleted.** Every candidate
 below is marked `[DELETE?]` / `[FIX?]` / `[KEEP]` with file:line evidence.
 Deletions, moves, and creations happen only on the user's green flag.

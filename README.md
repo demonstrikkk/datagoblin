@@ -455,9 +455,14 @@ into validation. Details: [`docs/23-ENVIRONMENT.md`](docs/23-ENVIRONMENT.md).
 ## Tests
 
 ```bash
-python -m pytest backend/tests -q          # 389 passed, hermetic, no credits
-cd frontend && npm run build               # production build
+python -m pytest backend/tests -q          # hermetic: no network, no DB, no credits
+cd frontend && npm test && npm run build   # the frontend gate is two commands
 ```
+
+The authoritative gate and its markers are in [`AGENTS.md`](AGENTS.md). No count
+is quoted here on purpose: this file said 389, `docs/RUNBOOK.md` said 1313,
+`AUDIT.md` said 143 and `docs/37` said 389, and all four were wrong. The number is
+the output of the command.
 
 Hermetic by construction: `.env` is ignored, every provider key is blanked per
 test, and the judge is stubbed by an autouse fixture. The `no_judge` fixture opts

@@ -27,6 +27,31 @@ addopts = [
     "--strict-config",
     "-p", "no:cacheprovider",
 ]
+# Markers, registered because `--strict-markers` is on above -- an unregistered
+# one is an error, which is the point: a marker nobody declared is a promise
+# nobody can select on.
+#
+# The suite was one undifferentiated block, so "run the fast tests" and "run
+# everything" meant the same 150 seconds and a live-network test was
+# indistinguishable from an arithmetic one in the summary. There were no tiers;
+# `docs/24-TEST-STRATEGY.md` described levels that did not exist as anything
+# selectable.
+#
+#   hermetic  no network, no database, no provider. The default: everything here
+#             is hermetic unless it says otherwise, so a tier marker is a claim
+#             the reader can check.
+#   postgres  needs a real DATABASE_URL in the *process* environment. Not `.env`
+#             -- `conftest._no_env_file` rebuilds settings from
+#             `Settings(_env_file=None)` and ignores it, so the value has to be
+#             exported before pytest starts. Nothing documents that.
+#   live      reaches the real network or a real provider. Costs money and is
+#             non-deterministic; excluded from the default gate.
+markers = [
+    "hermetic: runs offline against fakes (the default for this suite)",
+    "postgres: requires DATABASE_URL exported in the process environment",
+    "live: requires the real network or a real provider; costs money",
+    "slow: takes more than about a second, usually a crawl or an export",
+]
 filterwarnings = [
     # Invalid escape sequences in docstrings are SyntaxWarning on 3.12+ and a
     # hard error after that. They are treated as errors here rather than left to

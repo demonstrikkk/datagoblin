@@ -29,6 +29,12 @@ from app.core.config import settings
 from app.services import coverage as coverage_svc
 from app.services import dashboard as dashboard_svc
 
+# Marked `postgres` so it can be selected or excluded as a unit. It skips itself
+# when `DATABASE_URL` is unset, which is the older mechanism and still right --
+# but a skip is silent in a summary, so "did the aggregate ever run?" was not a
+# question the output could answer. `-m "not postgres"` now says so explicitly.
+pytestmark = pytest.mark.postgres
+
 
 def _repo():
     if not settings.DATABASE_URL:
