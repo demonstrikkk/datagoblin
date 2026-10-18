@@ -142,15 +142,28 @@ class Settings(BaseSettings):
     # loop, so four concurrent rendered pages become one at a time. That trade
     # is worth it when a Chromium launch costs more than the page, and is not
     # when it does not -- hence a flag rather than a default-on change.
+    #
+    # Measured, not assumed (docs/39-REUSE-VERIFICATION.md): reuse is SAFE --
+    # no reuse-specific failure, output inside the fresh-vs-fresh band, every
+    # lifecycle bound behaving. It stays off because the payoff is UNPROVEN.
+    # Fresh renders measured 5.5-25.6s and reuse 4.3-24.7s: the two overlap
+    # heavily, and on a loaded machine reuse was no faster at all. Turn this on
+    # when a launch genuinely dominates the page, not on the strength of the
+    # commit that introduced it.
     REUSE_BROWSER: bool = Field(default=False)
     #: Pages a single browser serves before being recycled. Bounds how long a
     #: slowly-degrading browser can keep being handed new pages.
     REUSE_BROWSER_MAX_PAGES: int = Field(default=25, ge=1, le=1000)
-    #: Seconds with no use after which an idle browser is closed, so an idle
-    #: process is not holding Chromium open indefinitely.
+    #: Seconds with no use after which an idle browser is closed. Measured to
+    #: fire correctly, and it will not close a browser that is mid-render. Keep
+    #: it ABOVE the longest single crawl or you will trade a slow close for a
+    #: failed page; 120 > the 90s crawl timeout today, which is why that works.
     REUSE_BROWSER_IDLE_S: float = Field(default=120.0, ge=0, le=3600)
-    #: Browsers held open at once. 1 matches the single owning loop; raising it
-    #: buys concurrency at the cost of one Chromium per slot.
+    #: Browsers held open at once. Accepted and bounded, but NOT a concurrency
+    #: control: BrowserPool.run() dispatches to the first slot only, so values
+    #: above 1 build slots that never hold a browser. Measured 3 -> 1 in use.
+    #: 1 matches the single owning loop. Raise it only alongside a real
+    #: round-robin in browser_pool, and update the bench with it.
     REUSE_BROWSER_CONCURRENCY: int = Field(default=1, ge=1, le=4)
     # Phase-6 thinness gate: static pages with less clean text than this AND a
     # script tag escalate to the renderer when one remains untried.
