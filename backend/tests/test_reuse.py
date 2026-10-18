@@ -313,8 +313,20 @@ def test_a_known_fingerprint_without_a_stored_page_is_not_reusable(monkeypatch):
 
 
 def test_find_page_by_url_is_asked_for_the_newest_copy(monkeypatch):
-    """The unique index is (run_id, url), so the same URL can exist once per
-    run. Reusing the oldest would hand back the stalest evidence available."""
+    """A URL can have several rows, so the newest must win.
+
+    Two reasons now, not one. It used to be once per (run, url); 009 added
+    `revision`, so a re-fetch inside one run has several rows too. The old
+    assertion on the literal `ORDER BY retrieved_at DESC` was pinned to a
+    timestamp ordering, which is not a total order anyway -- a run with two
+    revisions written in the same second is ordered arbitrarily. `revision` is
+    what the writer assigned, so it is the ordering that actually means
+    "newest".
+
+    Asserted on the intent -- a descending order over something that tracks
+    recency -- rather than on one exact string, so a future correct ordering is
+    not a test failure but a dropped ordering still is.
+    """
     from app.repositories import postgres_repo
 
     captured = {}
@@ -329,5 +341,11 @@ def test_find_page_by_url_is_asked_for_the_newest_copy(monkeypatch):
     repo._rows = _Repo()._rows
     out = postgres_repo.PostgresRepo.find_page_by_url(repo, "https://x.example/a")
     assert out == {"id": "p1"}
-    assert "ORDER BY retrieved_at DESC" in captured["sql"]
+    assert "ORDER BY" in captured["sql"]
+    assert "DESC" in captured["sql"], (
+        "the newest copy has to be asked for; reusing the oldest would hand "
+        "back the stalest evidence available")
+    assert captured["sql"].index("revision DESC") < captured["sql"].index(
+        "retrieved_at DESC"), (
+        "revision leads, because timestamps are not a total order within a run")
     assert "run_id=%s" not in captured["sql"], "the lookup must not be run-scoped"

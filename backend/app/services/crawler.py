@@ -957,7 +957,11 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                     # resolves against the stored copy.
                     "markdown": await asyncio.to_thread(reducer_svc.page_evidence_text, page),
                     "raw_html": page.get("rendered_html", "") or page.get("html", ""),
-                    "snapshot_chars": snapshot_chars})
+                    "snapshot_chars": snapshot_chars,
+                    # Which reducer produced the `markdown` above. Offsets in
+                    # every verified cell index into it, so a future change here
+                    # is otherwise undetectable after the fact.
+                    "reducer_version": reducer_svc.REDUCER_VERSION})
                 if pid:
                     page["page_id"] = pid
             except Exception as e:  # noqa: BLE001

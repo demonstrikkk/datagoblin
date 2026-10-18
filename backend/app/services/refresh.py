@@ -37,6 +37,7 @@ from app.core.logging import log
 from app.services import validator as validator_svc
 from app.services import yieldmap as yieldmap_svc
 from app.services.deduper import _sig
+from app.services import reducer as reducer_svc
 from app.services.reducer import page_evidence_text
 
 #: Judge calls allowed per record for a refresh. Lower than backfill's: a
@@ -201,7 +202,7 @@ def propose(store, dataset_id: str, sources: list[str] | None = None,
 
 async def run(store, dataset_id: str, sources: list[str] | None = None, *,
               llm: Any, limit: int = MAX_SOURCES, apply: bool = False,
-              fetch=None) -> dict:
+              fetch=None, persist_page=None) -> dict:
     """Re-read the chosen sources and re-verify the values they supplied.
 
     `fetch` is the crawler's single-page callable, injected rather than imported
@@ -215,6 +216,12 @@ async def run(store, dataset_id: str, sources: list[str] | None = None, *,
     `apply=False` re-fetches, re-extracts and re-verifies for real and withholds
     only the writing, for the same reason backfill has that mode: the proposal's
     numbers should be checkable against what happens, not believed in advance.
+
+    `persist_page` stores the re-fetched page and returns its id. It is not
+    optional in spirit -- refresh replaces values, and a replaced value that
+    cites a page nobody kept is the exact failure this path exists to prevent.
+    It used to take no such argument and wrote `page_id: ""` into every cell it
+    changed, so a refreshed dataset cited text that existed nowhere.
     """
     chosen = pick_sources(store, dataset_id, sources, limit)
     if not chosen:
@@ -267,6 +274,34 @@ async def run(store, dataset_id: str, sources: list[str] | None = None, *,
         except Exception:  # noqa: BLE001
             return url, []
         working = {**page, "_evidence_text": text}
+        # Store the *reduced* text, not the raw fetch.
+        #
+        # Refresh replaces values, and every offset in a replaced cell indexes
+        # into `page_evidence_text()`. Persisting the HTML would leave the
+        # replacement citing text that exists nowhere, and persisting the raw
+        # fetch dict stores no `markdown` at all -- which is what happened, so
+        # every refreshed cell carried `page_id: ""` as well.
+        #
+        # Ordering: reduce, then store, then extract. A quote has to be able to
+        # point at a stored row before any cell is written.
+        page_id = ""
+        if persist_page is not None:
+            try:
+                page_id = await persist_page({
+                    "url": str(page.get("url") or url),
+                    "final_url": page.get("final_url", ""),
+                    "method": page.get("method", ""),
+                    "status": "ok", "error": "",
+                    "content_hash": page.get("content_hash", ""),
+                    "markdown": text,
+                    "raw_html": page.get("rendered_html", "") or page.get("html", ""),
+                    "snapshot_chars": len(text),
+                    "reducer_version": reducer_svc.REDUCER_VERSION,
+                }) or ""
+            except Exception:  # noqa: BLE001
+                page_id = ""
+        if page_id:
+            working["page_id"] = page_id
         from app.services import extractor as extractor_svc
         try:
             recs, _provider = await extractor_svc.extract_page(plan, working, llm)

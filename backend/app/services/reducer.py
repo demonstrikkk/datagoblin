@@ -153,6 +153,23 @@ def media_block(page: dict, max_items: int = 30) -> str:
 _EVIDENCE_CACHE: dict[tuple, tuple[str, dict]] = {}
 _EVIDENCE_CACHE_MAX = 256
 
+#: Which reducer produced a given `pages.markdown`.
+#:
+#: `pages.markdown` is not raw HTML. It is the output of
+#: `page_evidence_text()` below, and every character offset in a verified cell
+#: indexes into *that* function's output rather than into the page as served.
+#: So changing the order of the concatenation, or what any part strips, silently
+#: reinterprets every offset already in the database -- no error, no re-locate,
+#: and no way afterwards to say which rows were affected.
+#:
+#: Each stored page records this value, and `stale_reducer_pages()` finds the
+#: ones that no longer match. That is the whole value of the constant: it makes a
+#: reducer change detectable instead of merely suspected.
+#:
+#: Bump it whenever the output of `page_evidence_text` or `page_evidence_text_parts`
+#: can differ for the same page. A docstring edit does not count.
+REDUCER_VERSION = 1
+
 
 def page_evidence_text_parts(page: dict) -> tuple[str, dict]:
     """The evidence text, plus a breakdown of what went into it.

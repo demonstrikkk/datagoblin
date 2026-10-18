@@ -204,30 +204,67 @@ class LocalRepo:
 
         Mirrors PostgresRepo: markdown is the reduced text the LLM saw, so
         quotes and offsets resolve against it; raw_html is the snapshot.
+
+        And mirrors its revision rule, because the two adapters are expected to
+        behave identically and this one previously guaranteed they would not: a
+        re-fetch of the same URL reused the row and replaced its `markdown`,
+        so under local persistence a quoted offset silently drifted while the
+        same run under Postgres would not have. An identical `content_hash`
+        returns the existing id and writes nothing; a different one appends a
+        new row with a new id and the next `revision`.
         """
+        url = page.get("url", "")
+        chash = page.get("content_hash", "")
         prev = [p for p in self._scan("pages")
-                if p.get("run_id") == run_id and p.get("url") == page.get("url", "")]
-        pid = (prev[-1]["id"] if prev else None) or page.get("page_id") or str(uuid.uuid4())
-        self._append("pages", {"id": pid, "run_id": run_id,
-                               "url": page.get("url", ""),
-                               "final_url": page.get("final_url", ""),
-                               "parent_url": page.get("parent_url", ""),
-                               "depth": int(page.get("depth", 0) or 0),
-                               "method": page.get("method", ""),
-                               "status": page.get("status", "ok"),
-                               "error": page.get("error", ""),
-                               "content_hash": page.get("content_hash", ""),
-                               "markdown": page.get("markdown", ""),
-                               "raw_html": page.get("raw_html", ""),
-                                "snapshot_chars": int(page.get("snapshot_chars", 0) or 0),
-                                # `retrieved_at` was dropped here while PostgresRepo
-                                # kept it, so the two did not actually mirror each
-                                # other: `get_pages` documents itself as "newest
-                                # first" and had no timestamp to order by, and the
-                                # source browser's "last used" column was
-                                # permanently null under local persistence.
-                                "retrieved_at": page.get("retrieved_at") or ""})
+                if p.get("run_id") == run_id and p.get("url") == url]
+        if prev:
+            last = prev[-1]
+            if str(last.get("content_hash") or "") == chash:
+                return str(last["id"])  # same bytes; the id evidence holds stands
+            revision = int(last.get("revision") or 1) + 1
+            pid = str(uuid.uuid4())
+        else:
+            revision = 1
+            pid = str(page.get("page_id") or "") or str(uuid.uuid4())
+        self._append("pages", {
+            "id": pid,
+            "run_id": run_id,
+            "url": url,
+            "final_url": page.get("final_url", ""),
+            "parent_url": page.get("parent_url", ""),
+            "depth": int(page.get("depth", 0) or 0),
+            "method": page.get("method", ""),
+            "status": page.get("status", "ok"),
+            "error": page.get("error", ""),
+            "content_hash": chash,
+            "markdown": page.get("markdown", ""),
+            "raw_html": page.get("raw_html", ""),
+            "snapshot_chars": int(page.get("snapshot_chars", 0) or 0),
+            "revision": revision,
+            # Which reducer produced `markdown`. Without it a change to the
+            # reducer silently reinterprets every stored offset; see
+            # reducer.REDUCER_VERSION.
+            "reducer_version": str(page.get("reducer_version") or ""),
+            # `retrieved_at` was dropped here while PostgresRepo kept it, so the
+            # two did not actually mirror each other: `get_pages` documents
+            # itself as "newest first" and had no timestamp to order by, and the
+            # source browser's "last used" column was permanently null under
+            # local persistence.
+            "retrieved_at": page.get("retrieved_at") or "",
+        })
         return pid
+
+    def stale_reducer_pages(self, run_id: str) -> list[dict]:
+        """Pages not produced by `reducer_svc.REDUCER_VERSION`. See PostgresRepo."""
+        from app.services.reducer import REDUCER_VERSION
+
+        wanted = str(REDUCER_VERSION)
+        return [{"id": p.get("id"), "url": p.get("url"),
+                 "revision": p.get("revision"),
+                 "reducer_version": p.get("reducer_version")}
+                for p in self._scan("pages")
+                if p.get("run_id") == run_id
+                and str(p.get("reducer_version") or "") != wanted]
 
     def get_pages(self, run_id: str, limit: int = 200) -> list[dict]:
         rows = [p for p in self._scan("pages") if p.get("run_id") == run_id]

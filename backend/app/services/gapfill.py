@@ -45,6 +45,7 @@ from app.services import coverage as coverage_svc
 from app.services import extractor as extractor_svc
 from app.services import gaps as gaps_svc
 from app.services import rejudge as rejudge_svc
+from app.services import reducer as reducer_svc
 from app.services import validator as validator_svc
 from app.services.deduper import _sig
 from app.services.reducer import page_evidence_text
@@ -325,16 +326,52 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
         }, {"pages_read": 0, "cells_written": 0, "searches_run": searches_run,
             "pages_fetched": 0}, None)
 
-    # Store before extracting, for the same reason the run does: a quote that
-    # cites a page nobody kept cannot be checked afterwards.
-    page_ids: dict[int, str] = {}
+    # Reduce first, store second, extract third.
+    #
+    # The order matters twice over. A quote has to cite a page somebody kept, so
+    # the row is written before extraction. And what is written must be the
+    # *reduced* text, not the raw fetch: every character offset in a verified
+    # cell indexes into `page_evidence_text()`, so persisting the HTML would
+    # leave every offset addressing a string nobody stored. This loop used to
+    # hand `persist_page` the raw fetch dict, which has no `markdown` key at all
+    # -- so the page was stored empty and the ids it returned were discarded.
+    #
+    # Both are now done once, up front, and `_extract` reuses the result.
+    prepared: dict[int, dict] = {}
     for i, (_rid, page) in enumerate(fetched):
-        if persist_page is None:
-            continue
+        working = {**page, "html": "", "markdown": page.get("markdown", "")}
+        if not working["markdown"]:
+            full = store.get_page(page.get("id", "")) if page.get("id") else None
+            if not full:
+                continue
+            working = {**full, "html": full.get("raw_html", "") or ""}
         try:
-            page_ids[i] = await persist_page(page)
+            text = await asyncio.to_thread(page_evidence_text, working)
         except Exception:  # noqa: BLE001
-            page_ids[i] = ""
+            continue
+        working["_evidence_text"] = text
+        if persist_page is not None:
+            try:
+                pid = await persist_page({
+                    "url": str(working.get("url") or ""),
+                    "final_url": working.get("final_url", ""),
+                    "method": working.get("method", ""),
+                    "status": "ok", "error": "",
+                    "content_hash": working.get("content_hash", ""),
+                    "markdown": text,
+                    "raw_html": working.get("raw_html", "") or "",
+                    "snapshot_chars": len(text),
+                    "reducer_version": reducer_svc.REDUCER_VERSION,
+                }) or ""
+            except Exception:  # noqa: BLE001
+                pid = ""
+            # Without this the page dict carries no `page_id`, `_record_shell`
+            # falls back to "", and every cell this pass produces cites a page
+            # that does not exist. The `page_ids` map built for exactly this was
+            # never read.
+            if pid:
+                working["page_id"] = pid
+        prepared[i] = working
 
     by_sig: dict[str, dict] = {}
     for rec in records:
@@ -350,17 +387,9 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
 
     async def _extract(i: int, page: dict) -> list[dict]:
         async with sem:
-            working = {**page, "html": "", "markdown": page.get("markdown", "")}
-            if not working["markdown"]:
-                full = store.get_page(page.get("id", "")) if page.get("id") else None
-                if not full:
-                    return []
-                working = {**full, "html": full.get("raw_html", "") or ""}
-            try:
-                source_text = await asyncio.to_thread(page_evidence_text, working)
-            except Exception:  # noqa: BLE001
+            working = prepared.get(i)
+            if working is None:
                 return []
-            working["_evidence_text"] = source_text
             try:
                 recs, _p = await extractor_svc.extract_page(reduced_plan, working, llm)
             except Exception:  # noqa: BLE001

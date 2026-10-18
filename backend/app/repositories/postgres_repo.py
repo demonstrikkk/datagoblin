@@ -35,6 +35,12 @@ from typing import Any, Iterable
 from app.core.config import settings
 from app.core.errors import AppError, dependency, validation
 
+# A constant, not a behavioural dependency. The repositories have to agree on
+# which reducer a stored page's text came from, and duplicating the number here
+# would give two places to forget to bump it -- which is the failure the constant
+# exists to prevent.
+from app.services.reducer import REDUCER_VERSION as _REDUCER_VERSION
+
 
 def _is_bad_uuid_error(e: Exception) -> bool:
     """Did Postgres reject a parameter as malformed UUID syntax?
@@ -398,57 +404,97 @@ class PostgresRepo:
                           "ORDER BY field", (dataset_id,))
 
     def find_page_by_url(self, url: str, include_html: bool = True) -> dict | None:
-        """The stored page for `url` from any run, newest first.
+        """The stored page for `url` from any run, newest revision first.
 
         `get_pages` is deliberately run-scoped and omits raw_html, so neither
         could answer "have we already fetched this exact URL?" across runs —
         which is the question reuse asks.
 
-        Newest first: if a page was re-fetched at some point, the freshest copy
-        is the one worth reusing, and the unique index is (run_id, url) so the
-        same URL can legitimately exist once per run.
+        Newest by `revision`, not by `retrieved_at`: a URL re-fetched inside one
+        run has several rows now, and timestamps are not a total order. `revision`
+        is what the writer assigned, so this is deterministic.
         """
         cols = ("id,run_id,url,final_url,parent_url,depth,method,status,error,"
-                "content_hash,markdown,snapshot_chars,retrieved_at")
+                "content_hash,markdown,snapshot_chars,retrieved_at,revision,"
+                "reducer_version")
         if include_html:
             cols += ",raw_html"
         rows = self._rows(
             "find_page_by_url",
             f"SELECT {cols} FROM pages WHERE url=%s AND status='ok'"
-            f" ORDER BY retrieved_at DESC LIMIT 1", (url,))
+            f" ORDER BY revision DESC, retrieved_at DESC LIMIT 1", (url,))
         return rows[0] if rows else None
+
+    def stale_reducer_pages(self, run_id: str) -> list[dict]:
+        """Pages whose stored text was not produced by the current reducer.
+
+        Every character offset in a verified cell indexes into the output of
+        `reducer.page_evidence_text()`. If that function changes, the offsets in
+        every historical row reinterpret silently. This is how you find out which
+        rows, instead of wondering whether you have to distrust the lot.
+        """
+        return self._rows(
+            "stale_reducer_pages",
+            "SELECT id, url, revision, reducer_version FROM pages "
+            "WHERE run_id=%s AND reducer_version IS DISTINCT FROM %s "
+            "ORDER BY url",
+            (run_id, str(_REDUCER_VERSION)))
 
     def upsert_page(self, run_id: str, page: dict) -> str:
         """Store the evidence. Returns the page id that records cite.
 
         `markdown` is the reduced text the LLM actually saw, so quotes and
-        offsets resolve against it. `raw_html` is the snapshot for
-        re-checking content_hash. Re-fetching the same URL updates the row
-        rather than forking two contradicting snapshots of one page.
+        offsets resolve against it. `raw_html` is the snapshot for re-checking
+        content_hash.
+
+        Idempotent on content, append-only on change. This used to be
+        `ON CONFLICT (run_id, url) DO UPDATE`, which kept the row's primary key
+        while replacing `markdown` -- so a re-fetch of the same URL in the same
+        run left every offset already recorded against that id addressing
+        different text, silently, with the cell still labelled verified. The
+        unique index it relied on is gone in 009_page_revisions.sql.
+
+        Now: an identical `content_hash` returns the existing id and writes
+        nothing, so the common re-encounter does not fork a duplicate; a
+        different one inserts a new row with a new id and the next `revision`,
+        and the old row stays because evidence cites it. That is the invariant:
+        a `page_id` always addresses the same text.
+
+        A caller-supplied `page_id` is honoured only when this URL has never been
+        stored in this run. Reusing one that evidence already cites would be the
+        bug this change exists to remove.
         """
-        pid = page.get("page_id") or str(uuid.uuid4())
+        url = str(page.get("url", ""))
+        chash = str(page.get("content_hash", ""))
+        prev = self._rows("upsert_page_prev",
+                          "SELECT id, revision, content_hash FROM pages "
+                          "WHERE run_id=%s AND url=%s "
+                          "ORDER BY revision DESC LIMIT 1",
+                          (run_id, url))
+        if prev:
+            last = prev[0]
+            if str(last.get("content_hash") or "") == chash:
+                return str(last["id"])  # same bytes; the id evidence holds stands
+            revision = int(last.get("revision") or 1) + 1
+            pid = str(uuid.uuid4())
+        else:
+            revision = 1
+            pid = str(page.get("page_id") or "") or str(uuid.uuid4())
+
         self._run("upsert_page", lambda cur: cur.execute(
             """INSERT INTO pages (id,run_id,url,final_url,parent_url,depth,method,
                                   status,error,content_hash,markdown,raw_html,
-                                  snapshot_chars,retrieved_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
-               ON CONFLICT (run_id,url) DO UPDATE SET final_url=EXCLUDED.final_url,
-                 parent_url=EXCLUDED.parent_url, depth=EXCLUDED.depth,
-                 method=EXCLUDED.method, status=EXCLUDED.status,
-                 error=EXCLUDED.error, content_hash=EXCLUDED.content_hash,
-                 markdown=EXCLUDED.markdown, raw_html=EXCLUDED.raw_html,
-                 snapshot_chars=EXCLUDED.snapshot_chars, retrieved_at=now()""",
-            (pid, run_id, page.get("url", ""), page.get("final_url", ""),
+                                  snapshot_chars,reducer_version,revision,retrieved_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())""",
+            (pid, run_id, url, page.get("final_url", ""),
              page.get("parent_url", ""), int(page.get("depth", 0) or 0),
              page.get("method", ""), page.get("status", "ok"),
-             page.get("error", ""), page.get("content_hash", ""),
+             page.get("error", ""), chash,
              page.get("markdown", ""), page.get("raw_html", ""),
-             int(page.get("snapshot_chars", 0) or 0))))
-        # A pre-existing row keeps its own id; report the one now in force.
-        found = self._rows("upsert_page_id",
-                           "SELECT id FROM pages WHERE run_id=%s AND url=%s",
-                           (run_id, page.get("url", "")))
-        return str(found[0]["id"]) if found else pid
+             int(page.get("snapshot_chars", 0) or 0),
+             str(page.get("reducer_version") or _REDUCER_VERSION),
+             revision)))
+        return pid
 
     def append_event(self, run_id: str, event: dict) -> None:
         """Store one run event, keeping its kind.

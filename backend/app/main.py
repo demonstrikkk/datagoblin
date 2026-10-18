@@ -1408,9 +1408,25 @@ async def refresh_run(did: str, body: dict, cid: str = Depends(correlation_id)) 
         route = source_router.triage_source(url)
         return await crawler_svc._one(url, route, _fetch_method, asyncio.Semaphore(1))
 
+    row = await asyncio.to_thread(r.get_dataset_row, did)
+    run_id = str((row or {}).get("run_id") or "")
+
+    async def _persist_page(page: dict) -> str:
+        """Keep the re-fetched text, so a replacement value can cite it.
+
+        Refresh overwrites values, which makes this the one path where a
+        `page_id` of "" is not merely missing metadata: the dataset would
+        replace a good value with a new one whose quote points at text that
+        does not exist anywhere.
+        """
+        if not run_id:
+            return ""
+        return await asyncio.to_thread(r.upsert_page, run_id, page)
+
     try:
         out = await refresh_svc.run(r, did, named, llm=_llm, limit=limit,
-                                    apply=bool(body.get("apply")), fetch=_fetch)
+                                    apply=bool(body.get("apply")), fetch=_fetch,
+                                    persist_page=_persist_page)
     except refresh_svc.RefreshRefused as exc:
         raise validation(str(exc))
     if bool(body.get("apply")) and out.get("written"):
