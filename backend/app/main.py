@@ -137,6 +137,11 @@ async def _fetch_method(url: str, method: str) -> dict:
 @app.on_event("startup")
 async def _startup() -> None:
     global REPO
+    # Before anything is built or opened. The defaults are safe, so this only
+    # fires on a configuration someone wrote deliberately, and the combination it
+    # rejects -- no key, no auth, bound to every interface -- is an open metered
+    # proxy in front of live provider keys. See `unsafe_exposure_reason`.
+    settings.require_safe_exposure()
     REPO = build_repo()
     missing = [n for n in ("TAVILY_API_KEY", "GEMINI_API_KEY") if not getattr(settings, n)]
     if missing and settings.REQUIRE_KEYS_AT_STARTUP:

@@ -323,5 +323,58 @@ class Settings(BaseSettings):
             raise RuntimeError(f"Missing required configuration: {name} (see .env.example)")
         return value
 
+    #: Addresses that cannot be reached from off the machine. `0.0.0.0` and `::`
+    #: are deliberately absent: they bind every interface, which is the case
+    #: this check exists to catch. An empty host means "uvicorn's default", and
+    #: that default is loopback.
+    _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", ""})
+
+    def unsafe_exposure_reason(self) -> str:
+        """Why this configuration would serve an open API, or "" if it is safe.
+
+        The combination that matters is not any one setting but three together:
+
+            ALLOW_UNAUTHENTICATED  -- no key is required
+            no API_KEY              -- so there is nothing to check against
+            a non-loopback API_HOST -- so something other than this machine can
+                                      reach the port
+
+        On its own, each is defensible. An open API on loopback is a developer
+        convenience and is how this was run. But combined it is a metered proxy
+        to Tavily, Gemini, Groq and OpenRouter, plus an unauthenticated crawler
+        that will fetch arbitrary hosts, with no credential in front of it. The
+        defaults are safe -- `ALLOW_UNAUTHENTICATED` is false and the host is
+        loopback -- so reaching this is always a deliberate configuration, which
+        is exactly why it should be deliberate twice.
+
+        A configured `API_KEY` alongside the opt-in is *not* unsafe: the key is
+        still enforced, so the opt-in is redundant rather than open. That is the
+        difference between a redundant setting and an open port, and refusing the
+        first would push people to drop the key.
+        """
+        if not self.ALLOW_UNAUTHENTICATED:
+            return ""
+        if self.API_KEY:
+            return ""  # still gated; the opt-in changes nothing
+        host = (self.API_HOST or "").strip().lower()
+        if host in self._LOOPBACK:
+            return ""
+        return (
+            f"ALLOW_UNAUTHENTICATED is on, API_KEY is empty, and API_HOST is "
+            f"{host!r} rather than loopback. That is an unauthenticated, "
+            f"unmetered-access-to-anyone-who-can-reach-this-port API in front "
+            f"of live Tavily, Gemini, Groq and OpenRouter keys, and of a crawler "
+            f"that will fetch any host it is given. Set an API_KEY, bind to "
+            f"127.0.0.1, or unset ALLOW_UNAUTHENTICATED."
+        )
+
+    def require_safe_exposure(self) -> None:
+        """Raise when the configuration would serve an open API. Called at startup."""
+        reason = self.unsafe_exposure_reason()
+        if reason:
+            raise RuntimeError(
+                "refusing to start: " + reason
+            )
+
 
 settings = Settings()

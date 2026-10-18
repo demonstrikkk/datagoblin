@@ -32,7 +32,17 @@ def run(coro):
 def _canned(monkeypatch, host, text):
     async def _text(h, s):
         return text
+
+    async def _public(h):
+        return False
+
     monkeypatch.setattr(fetcher, "_fetch_robots_text", _text)
+    # `robots_allowed` resolves the host before it will fetch anything -- a
+    # `.example` name does not resolve, and resolution fails closed, so a canned
+    # robots body would never be reached without this. Stating it here is also
+    # what makes the SSRF test below meaningful: the two tests differ only in
+    # what resolution says.
+    monkeypatch.setattr(fetcher, "_resolve_private", _public)
     fetcher._robots.pop(host, None)
 
 

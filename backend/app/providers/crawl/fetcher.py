@@ -202,25 +202,62 @@ async def _fetch_robots_text(host: str, scheme: str) -> str | None:
         r = await _client_pool().get(
             f"{scheme}://{host}/robots.txt",
             headers={"User-Agent": settings.FETCH_USER_AGENT}, timeout=10)
+        # A public host can still send us somewhere private. The pooled client
+        # follows redirects, so the hop list is the only place the redirect
+        # target is visible -- and without this check a robots.txt is a
+        # convenient way to make the crawler issue a request to an arbitrary
+        # host, since the path is fixed and a 302 can send it anywhere.
+        await _check_hops(r)
         if r.status_code in (401, 403):
             return "DISALLOW-ALL"
         if r.status_code >= 400:
             return None
         return r.text
+    except AppError:
+        # `_check_hops` refuses a private redirect with a typed error. Treat it
+        # as unreadable: no rules, so nothing blocks, and the fetch-time guard
+        # is what will actually refuse the URL if it is fetched at all.
+        return None
     except Exception:
         return None
 
 
 async def robots_allowed(url: str) -> tuple[bool, float]:
-    """Returns (allowed, crawl_delay_s). Cached per host for 1h. Never raises."""
+    """Returns (allowed, crawl_delay_s). Cached per host for 1h. Never raises.
+
+    **This function makes an outbound request, so it validates its target.**
+
+    `discovery._robots_ok` calls it with raw, unfiltered search results, before
+    any URL has passed `guard_url` -- it runs ahead of the Jev-A screen so a dead
+    source costs a robots lookup instead of a judge call. That made the robots
+    fetch the one path where an attacker-chosen host reached the network without
+    ever being checked: a search result of `http://169.254.169.254/` had its
+    `/robots.txt` fetched, on the pooled client, which follows redirects.
+
+    So the host is checked here, not at the call sites, because the callers are
+    not the property that has to hold -- the function that opens a socket is.
+
+    A private host returns `(True, 0.0)` rather than `(False, 0.0)`. Blocking
+    here would report the source as `robots-disallowed`, which is a lie about a
+    file nobody read, and would be recorded as one in the run's counters and the
+    source row. Allowing passes it on to the fetch-time guard, which refuses it
+    with the accurate reason: `Fetch refused (private target)`.
+    """
     try:
         p = urlparse(url)
         host = (p.hostname or "").lower()
+        if not host:
+            return True, 0.0
         now = time.monotonic()
         cached = _robots.get(host)
         if cached and now - cached[1] < _ROBOTS_TTL_S:
             rp, ok = cached[0], cached[2]
         else:
+            if _host_is_private(host) or await _resolve_private(host):
+                # No request is made and nothing is cached, so the refusal is
+                # re-derived on every call rather than remembered from a lookup
+                # that never happened.
+                return True, 0.0
             rp = urllib.robotparser.RobotFileParser()
             rp.set_url(f"{p.scheme or 'https'}://{host}/robots.txt")
             text = await _fetch_robots_text(host, p.scheme or "https")
@@ -644,9 +681,101 @@ def _new_crawler_sync() -> Any:
     return asyncio.run(_async_new_crawler())
 
 
+#: Per-host egress decisions for the browser path. A page issues hundreds of
+#: subresource requests and re-resolving each one would dominate the render, so
+#: the verdict is cached. Short TTL, because the thing being cached is a DNS
+#: answer and that is exactly what a rebinding attack changes.
+_EGRESS_CACHE: dict[str, tuple[float, bool]] = {}
+_EGRESS_TTL_S = 60.0
+_EGRESS_CACHE_MAX = 2048
+
+
+async def _egress_blocked(host: str) -> bool:
+    """Should the browser refuse to talk to this host? Cached, fails closed."""
+    host = (host or "").lower().strip().rstrip(".")
+    if not host:
+        return True
+    now = time.monotonic()
+    hit = _EGRESS_CACHE.get(host)
+    if hit and now - hit[0] < _EGRESS_TTL_S:
+        return hit[1]
+    blocked = True
+    if not _host_is_private(host):
+        try:
+            blocked = await _resolve_private(host)
+        except Exception:  # noqa: BLE001 - fail closed, same as the fetch path
+            blocked = True
+    if len(_EGRESS_CACHE) >= _EGRESS_CACHE_MAX:
+        _EGRESS_CACHE.clear()
+    _EGRESS_CACHE[host] = (now, blocked)
+    return blocked
+
+
+def _install_browser_egress(crawler: Any) -> None:
+    """Stop the renderer from reaching anything the crawler would not fetch.
+
+    Every other fetch path validates its target. The browser validated none of
+    them: `CrawlerRunConfig` sets no interception, so a rendered page could pull
+    `http://169.254.169.254/latest/meta-data/` as a subresource, or be redirected
+    there, from inside Chromium -- invisible to `guard_url`, invisible to
+    `_check_hops`, and invisible to the run's source list, because the browser is
+    not the crawler.
+
+    That closes the top-level URL check for the one rung that can still be
+    pointed at an arbitrary host from page content. It is enforced at the
+    context, so it covers the navigation, every subresource, and every redirect
+    hop the browser itself follows -- none of which the fetch path can observe.
+
+    `on_page_context_created` is the only hook that hands back a Playwright
+    context, and it is set per crawler instance, which matters because the sync
+    path builds its own crawler on the crawl executor thread.
+    """
+    strategy = getattr(crawler, "crawler_strategy", None)
+    if strategy is None or not hasattr(strategy, "set_hook"):
+        return
+
+    async def _on_context(context=None, page=None, **_kw):
+        if context is None or not hasattr(context, "route"):
+            return
+
+        async def _guard(route):
+            url = ""
+            try:
+                url = str(getattr(getattr(route, "request", None), "url", ""))
+            except Exception:  # noqa: BLE001
+                url = ""
+            host = ""
+            try:
+                host = (urlparse(url).hostname or "")
+            except Exception:  # noqa: BLE001
+                host = ""
+            if not host or await _egress_blocked(host):
+                try:
+                    await route.abort()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            try:
+                await route.continue_()
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            await context.route("**/*", _guard)
+        except Exception:  # noqa: BLE001 - never fail a render over this
+            pass
+
+    try:
+        strategy.set_hook("on_page_context_created", _on_context)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _async_new_crawler() -> Any:
     from crawl4ai import AsyncWebCrawler
-    return await AsyncWebCrawler().__aenter__()
+    crawler = await AsyncWebCrawler().__aenter__()
+    _install_browser_egress(crawler)
+    return crawler
 
 
 #: Set once per process when REUSE_BROWSER is on. Built lazily so importing
