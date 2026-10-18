@@ -245,6 +245,16 @@ class LocalRepo:
             # reducer silently reinterprets every stored offset; see
             # reducer.REDUCER_VERSION.
             "reducer_version": str(page.get("reducer_version") or ""),
+            # The fetch outcome. See `010_fetch_outcome.sql`: a page that fell
+            # back after a render failure has to be distinguishable from one that
+            # was simply read over HTTP, and nothing above carried that.
+            "fetch_attempts": list(page.get("fetch_attempts") or []),
+            "render_attempted": bool(page.get("render_attempted")),
+            "render_status": str(page.get("render_status") or "not_needed"),
+            "render_error_code": str(page.get("render_error_code") or ""),
+            "fallback_used": bool(page.get("fallback_used")),
+            "final_content_source": str(page.get("final_content_source") or "http"),
+            "degraded_reason": str(page.get("degraded_reason") or ""),
             # `retrieved_at` was dropped here while PostgresRepo kept it, so the
             # two did not actually mirror each other: `get_pages` documents
             # itself as "newest first" and had no timestamp to order by, and the

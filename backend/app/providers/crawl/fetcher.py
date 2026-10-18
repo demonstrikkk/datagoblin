@@ -838,6 +838,72 @@ def _run_config() -> Any:
                             wait_for="body")
 
 
+#: Closed taxonomy for a failed render attempt.
+#:
+#: Every render failure used to reach the run as
+#: `E_PROVIDER_TRANSIENT: Crawl4AI error: <150 chars of whatever Playwright
+#: said>`. That cannot be counted, aggregated, alerted on, or compared between
+#: runs -- and the question that started this was "why do driver deaths happen",
+#: which is unanswerable from a truncated string. The counts are the diagnosis.
+#:
+#: `unknown` is a real member of the set rather than an absence: a failure that
+#: could not be classified is a finding, because it means the taxonomy does not
+#: describe what the browser is doing.
+RENDER_ERROR_CODES = (
+    "browser_disconnected",
+    "browser_crash",
+    "navigation_timeout",
+    "browser_launch_failed",
+    "content_extraction_error",
+    "unknown",
+)
+
+#: Checked in order, so the first match wins and the specific patterns come
+#: before the general ones. Disconnection first: Playwright's
+#: "Target page, context or browser has been closed" is a disconnect, and the
+#: word "closed" would otherwise be caught by nothing vaguer -- but a crash and a
+#: disconnect have opposite remedies, so getting this backwards would send the
+#: next investigation in the wrong direction.
+_RENDER_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("browser_disconnected", (
+        "connection closed", "target closed", "has been closed", "target page",
+        "websocket", "disconnected", "protocol error", "browser closed",
+        "connection reset", "eof")),
+    ("browser_crash", (
+        "crash", "out of memory", "oom", "renderer", "segfault", "killed")),
+    ("navigation_timeout", (
+        "timeout", "timed out", "exceeded")),
+    ("browser_launch_failed", (
+        "executable doesn't exist", "browsertype.launch", "launch", "target page, context or browser has been closed")),
+    ("content_extraction_error", (
+        "extraction", "no content", "empty")),
+)
+
+
+def classify_render_error(err: object) -> str:
+    """Name the kind of render failure, from whatever the browser said.
+
+    String matching, because the browser's message is the only signal available
+    at the point the exception is caught -- the Playwright exception type is
+    `Error` for all of these and carries no classification of its own. That is
+    why the taxonomy is closed and `unknown` is a member: this is a best-effort
+    label on free text, and pretending otherwise would make the counts look
+    authoritative when they are not.
+
+    Fails safe to `unknown`, never to a specific code.
+    """
+    try:
+        msg = str(getattr(err, "message", "") or err or "").lower()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    if not msg.strip():
+        return "unknown"
+    for code, needles in _RENDER_PATTERNS:
+        if any(n in msg for n in needles):
+            return code
+    return "unknown"
+
+
 async def _arun(crawler: Any, url: str, timeout_s: int) -> dict:
     res = await asyncio.wait_for(
         crawler.arun(url, config=_run_config()), timeout=timeout_s)
@@ -881,11 +947,18 @@ async def crawl4ai_fetch(url: str) -> dict[str, Any]:
                                  settings.FETCH_CRAWL_TIMEOUT_S),
             timeout=settings.FETCH_CRAWL_TIMEOUT_S + 30)
     except (asyncio.TimeoutError, TimeoutError):
-        raise provider_transient(f"Crawl4AI timeout ({settings.FETCH_CRAWL_TIMEOUT_S + 30}s cap)")
+        raise provider_transient(
+            f"Crawl4AI timeout ({settings.FETCH_CRAWL_TIMEOUT_S + 30}s cap)",
+            {"render_error_code": "navigation_timeout",
+             "stage": "arun_or_launch"})
     except AppError:
         raise
     except Exception as e:
-        raise provider_transient(f"Crawl4AI error: {str(e)[:150]}")
+        raise provider_transient(
+            f"Crawl4AI error: {str(e)[:150]}",
+            {"render_error_code": classify_render_error(e),
+             "exception_type": type(e).__name__,
+             "stage": "arun_or_launch"})
 
 
 async def docling_fetch(url: str) -> dict[str, Any]:

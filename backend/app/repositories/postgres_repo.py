@@ -284,18 +284,29 @@ class PostgresRepo:
     def upsert_source(self, run_id: str, source: dict) -> None:
         self._run("upsert_source", lambda cur: cur.execute(
             """INSERT INTO sources (run_id,url,title,content_hash,status,error,
-                                   reused_from_run_id,reused_page_id,retrieved_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                   reused_from_run_id,reused_page_id,
+                                   render_status,render_error_code,fallback_used,
+                                   retrieved_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id,url) DO UPDATE SET title=EXCLUDED.title,
                  content_hash=EXCLUDED.content_hash, status=EXCLUDED.status,
                  error=EXCLUDED.error,
                  reused_from_run_id=EXCLUDED.reused_from_run_id,
                  reused_page_id=EXCLUDED.reused_page_id,
+                 render_status=EXCLUDED.render_status,
+                 render_error_code=EXCLUDED.render_error_code,
+                 fallback_used=EXCLUDED.fallback_used,
                  retrieved_at=EXCLUDED.retrieved_at""",
             (run_id, source.get("url", ""), source.get("title", ""),
              source.get("content_hash", ""), source.get("status", "ok"),
              source.get("error", ""), source.get("reused_from_run_id") or None,
-             source.get("reused_page_id") or None, source.get("retrieved_at") or None)))
+             source.get("reused_page_id") or None,
+             # A failed or skipped fetch writes no `pages` row, so this is the
+             # only place its cause is recorded. See `010_fetch_outcome.sql`.
+             str(source.get("render_status") or "not_needed"),
+             str(source.get("render_error_code") or ""),
+             bool(source.get("fallback_used")),
+             source.get("retrieved_at") or None)))
 
     # -- source reputation ----------------------------------------------------
 
@@ -484,8 +495,12 @@ class PostgresRepo:
         self._run("upsert_page", lambda cur: cur.execute(
             """INSERT INTO pages (id,run_id,url,final_url,parent_url,depth,method,
                                   status,error,content_hash,markdown,raw_html,
-                                  snapshot_chars,reducer_version,revision,retrieved_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())""",
+                                  snapshot_chars,reducer_version,revision,
+                                  fetch_attempts,render_attempted,render_status,
+                                  render_error_code,fallback_used,
+                                  final_content_source,degraded_reason,retrieved_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                       %s::jsonb,%s,%s,%s,%s,%s,%s,now())""",
             (pid, run_id, url, page.get("final_url", ""),
              page.get("parent_url", ""), int(page.get("depth", 0) or 0),
              page.get("method", ""), page.get("status", "ok"),
@@ -493,7 +508,14 @@ class PostgresRepo:
              page.get("markdown", ""), page.get("raw_html", ""),
              int(page.get("snapshot_chars", 0) or 0),
              str(page.get("reducer_version") or _REDUCER_VERSION),
-             revision)))
+             revision,
+             json.dumps(page.get("fetch_attempts") or [], default=str),
+             bool(page.get("render_attempted")),
+             str(page.get("render_status") or "not_needed"),
+             str(page.get("render_error_code") or ""),
+             bool(page.get("fallback_used")),
+             str(page.get("final_content_source") or "http"),
+             str(page.get("degraded_reason") or ""))))
         return pid
 
     def append_event(self, run_id: str, event: dict) -> None:

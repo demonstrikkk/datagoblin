@@ -420,6 +420,91 @@ def _pick_index(queue: list[tuple[dict, int]], settled: dict[str, int]) -> int:
     return best
 
 
+def _status_for_error(err: object) -> str:
+    """`timed_out` for a timeout, `failed` for anything else."""
+    if isinstance(err, (asyncio.TimeoutError, TimeoutError)):
+        return "timed_out"
+    code = str(getattr(err, "code", "") or "")
+    if code == "E_RENDER_FAILED" or "timeout" in str(
+            getattr(err, "message", err) or "").lower():
+        return "timed_out"
+    return "failed"
+
+
+def _render_code(err: object, method: str) -> str:
+    """The taxonomy code for a failed attempt on `method`.
+
+    Prefers the code the fetch layer already attached, so the browser rung's
+    classification is not re-derived here from a truncated message. Non-render
+    rungs are honestly `not_applicable` rather than being folded into a render
+    code, because "http_error" and "browser_crash" have different causes and
+    merging them would make the counts unreadable.
+    """
+    if method != "crawl4ai":
+        return "not_applicable"
+    details = getattr(err, "details", None)
+    if isinstance(details, dict):
+        code = str(details.get("render_error_code") or "")
+        if code:
+            return code
+    return fetcher.classify_render_error(err)
+
+
+def _note_attempt(attempts: list[dict], method: str, outcome: str,
+                  code: str = "") -> None:
+    """One entry in the attempt history for this URL."""
+    attempts.append({"method": method, "outcome": outcome,
+                     "error_code": code or ""})
+
+
+def _apply_outcome(page: dict, *, attempts: list[dict], fallback_from: object = None,
+                   final_source: str = "http") -> dict:
+    """Stamp the fetch outcome onto a page dict.
+
+    Six keys, and each answers a question the run used to be unable to answer
+    about any individual page:
+
+      fetch_attempts        every rung tried, in order, with its outcome
+      render_attempted      was a browser opened at all
+      render_status         not_needed / succeeded / failed / timed_out
+      render_error_code     which of the closed taxonomy codes, when it failed
+      fallback_used         did we serve something other than what we fetched
+      final_content_source  rendered | http | none
+
+    The one that mattered: a Chromium death on any page whose HTTP version
+    exceeded FETCH_THIN_CHARS used to return the HTTP page as an ordinary
+    success, with `method: "http"`, no error and no event. Measured, that turned
+    17635 characters of rendered content into 7885 characters of unrendered HTML
+    with nothing in the record to say so. The render failure was erased, not
+    merely unreported.
+    """
+    render = [a for a in attempts if a["method"] == "crawl4ai"]
+    # The rung's FINAL outcome, not whether anything along the way failed. A
+    # retry that succeeds is a successful render; reading "did any attempt fail"
+    # instead reported it as failed, which would make the run's render success
+    # rate disagree with the pages it actually got. The earlier failures are not
+    # lost -- they are in `fetch_attempts`, which is what makes a flaky renderer
+    # visible as flaky rather than as broken.
+    rendered_ok = bool(render) and render[-1]["outcome"] == "ok"
+    if not render:
+        status = "not_needed"
+    else:
+        status = "succeeded" if rendered_ok else "failed"
+    page["fetch_attempts"] = attempts
+    page["render_attempted"] = bool(render)
+    page["render_status"] = status
+    page["render_error_code"] = (
+        "" if rendered_ok or not render
+        else next((a["error_code"] for a in reversed(render)
+                   if a["outcome"] == "failed"), ""))
+    # A fallback means we did not get the rendered page. Not "a render was
+    # tried and something went wrong along the way" -- those are different
+    # claims, and conflating them would flag every retried-then-succeeded page.
+    page["fallback_used"] = bool(render) and not rendered_ok and final_source != "rendered"
+    page["final_content_source"] = final_source
+    return page
+
+
 async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> dict:
     """Waterfall with thinness-escalation (Phase 6).
 
@@ -433,6 +518,10 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
     last_err: Exception | None = None
     best: dict | None = None
     best_len = -1
+    # Every rung this URL tried, in order. The point is that a page returned after
+    # a render failure must be distinguishable from one that was simply read
+    # over HTTP -- which, before this, it was not.
+    attempts: list[dict] = []
     # RUN_RETRY_COUNT is attempts PER RUNG. It was compared against `attempt`,
     # which was `enumerate(methods)` -- the position in the waterfall, not a
     # retry counter -- so it never retried anything. `0 < 1` meant "move to the
@@ -457,6 +546,7 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                 try:
                     page = await fetch_fn(url, method)
                     page["route"] = route
+                    _note_attempt(attempts, method, "ok")
                     blob = (page.get("markdown") or page.get("html") or page.get("text") or "")
                     page["content_hash"] = hashlib.sha256(blob.encode("utf-8", errors="replace")).hexdigest()
                     if page.get("skipped"):
@@ -477,7 +567,10 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                         # unreadable shell straight to the extractor on the final
                         # attempt, so `NA` values got stored as real records.
                         if not (shell or hollow or sparse):
-                            return page
+                            return _apply_outcome(
+                                page, attempts=attempts,
+                                final_source=("rendered" if method == "crawl4ai"
+                                              else "http"))
                         if len(clean) > best_len:
                             best, best_len = page, len(clean)
                         break  # to the tail, which refuses to call a shell a page
@@ -490,6 +583,8 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                            # attempt to learn exactly what we already know.
                 except AppError as e:
                     last_err = e
+                    _note_attempt(attempts, method, "failed",
+                                  _render_code(e, method))
                     if e.code == "E_PROVIDER_FATAL":
                         if index == 0 and len(methods) > 1:
                             break  # one alternate-method attempt (never bypass)
@@ -511,6 +606,8 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                     break
                 except Exception as e:  # noqa: BLE001 (provider surface)
                     last_err = e
+                    _note_attempt(attempts, method, "failed",
+                                  _render_code(e, method))
                     politeness_svc.stats.note_retry(method)
                     if trial < attempts_per_rung - 1:
                         await fetcher.backoff(trial)
@@ -538,8 +635,27 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
                            f"than extracted from an empty shell",
                            422, {"url": best.get("url", ""),
                                  "chars": final_len,
-                                 "required": settings.FETCH_THIN_CHARS})
-        return best
+                                 "required": settings.FETCH_THIN_CHARS,
+                                 "fetch_attempts": attempts})
+        # The degraded case, and the reason this block exists at all.
+        #
+        # `last_err` is not discarded here. It used to be: a Chromium death on
+        # any page whose HTTP version exceeded FETCH_THIN_CHARS returned that
+        # page as an ordinary success -- `method: "http"`, no error, no event --
+        # and the render failure was gone rather than merely unrecorded.
+        #
+        # Measured, that turned 17635 characters of rendered content into 7885
+        # characters of unrendered HTML, a 55% loss with nothing in the dataset
+        # to say a render had even been attempted. So the page is still returned
+        # -- the HTTP text is better than nothing, and discarding it would throw
+        # away a real source -- but it is returned *labelled*, and the reason it
+        # is not what was asked for travels with it.
+        out = _apply_outcome(best, attempts=attempts, fallback_from=last_err,
+                             final_source="http")
+        if last_err is not None:
+            out["degraded_reason"] = str(getattr(last_err, "message", last_err))[:200]
+            out["degraded_code"] = str(getattr(last_err, "code", "")) or ""
+        return out
     raise last_err if last_err else RuntimeError("fetch failed")
 
 
@@ -920,8 +1036,17 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
             await _record_source({"url": url, "title": item.get("title", ""),
                                   "status": "failed", "method": "", "error": err,
                                   "content_hash": "",
+                                  # A failed fetch has no `pages` row at all, so
+                                  # the sources row is the only place its cause
+                                  # can live. `pages` only records successes.
+                                  "render_status": _status_for_error(e),
+                                  "render_error_code": _render_code(e, "crawl4ai"),
+                                  "fallback_used": False,
                                   "media": {"images": 0, "videos": 0, "links": 0},
                                   "fingerprint": politeness_svc.fingerprint("GET", url)})
+            await _notify(_source_failed_event(
+                url, err, status="failed",
+                error_code=_render_code(e, "crawl4ai")))
             return
         reason = page.get("skipped", "")
         if reason:
@@ -941,6 +1066,16 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         snapshot_chars = len(page.get("rendered_html", "") or page.get("html", "")
                              or page.get("markdown", "") or "")
 
+        # A degraded fetch is announced here rather than at the waterfall,
+        # because by this point the outcome keys have been applied and this is the
+        # one place every successful page passes through. Emitted before the
+        # storage attempt so a store failure cannot swallow it.
+        if page.get("fallback_used"):
+            await _notify(_source_failed_event(
+                url, page.get("degraded_reason", "") or "render failed",
+                error_code=str(page.get("render_error_code") or ""),
+                fallback_used=True))
+
         # Store the evidence, and keep the id on the page dict so extraction and
         # validation can cite it. markdown is what the LLM actually saw, so
         # quotes resolve against it; raw_html is the snapshot for re-checking
@@ -958,6 +1093,17 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                     "markdown": await asyncio.to_thread(reducer_svc.page_evidence_text, page),
                     "raw_html": page.get("rendered_html", "") or page.get("html", ""),
                     "snapshot_chars": snapshot_chars,
+                    # What actually happened, per `010_fetch_outcome.sql`. A
+                    # stored page that fell back after a render failure has to be
+                    # distinguishable from one that was simply read over HTTP,
+                    # and nothing above carried that.
+                    "fetch_attempts": page.get("fetch_attempts", []),
+                    "render_attempted": bool(page.get("render_attempted")),
+                    "render_status": page.get("render_status", "not_needed"),
+                    "render_error_code": page.get("render_error_code", ""),
+                    "fallback_used": bool(page.get("fallback_used")),
+                    "final_content_source": page.get("final_content_source", "http"),
+                    "degraded_reason": page.get("degraded_reason", ""),
                     # Which reducer produced the `markdown` above. Offsets in
                     # every verified cell index into it, so a future change here
                     # is otherwise undetectable after the fact.
@@ -1118,6 +1264,41 @@ def _source_fetched_event(url: str, ok_flag: bool = True) -> dict[str, Any]:
             "progress": 40,
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
             "data": {"url": url, "ok": bool(ok_flag)}}
+
+
+def _source_failed_event(url: str, reason: str, *, status: str = "failed",
+                         error_code: str = "", fallback_used: bool = False) -> dict:
+    """The `source.failed` SSE frame, for a fetch that did not deliver.
+
+    Failed and skipped sources used to emit nothing at all -- `fetch_all`
+    recorded the row and returned. So the run's event history said a page had
+    been fetched whenever a page had been fetched, and was silent about every
+    one that had not. A client could not list what was tried and refused, and a
+    reviewer could not tell "we read 12 pages" from "we read 9 and lost 3".
+
+    `degraded` is the case that mattered and had no representation at all: a
+    render that failed and was served over HTTP. The page is real and is kept, so
+    it is not a failure -- but it is not what was asked for either, and the
+    difference between the two is exactly what a reader of a dataset needs.
+
+    `data` carries the taxonomy code so a UI can group by cause rather than by
+    sentence. `status` is one of `failed`, `skipped` or `degraded`.
+    """
+    if fallback_used:
+        label = "Degraded"
+        status = "degraded"
+    elif status == "skipped":
+        label = "Skipped"
+    else:
+        label = "Failed"
+    return {"type": "source.failed", "run_id": "",
+            "stage": "FETCHING",
+            "message": f"{label} {url[:80]}: {reason[:120]}",
+            "progress": 40,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            "data": {"url": url, "ok": False, "status": status,
+                     "reason": reason[:300], "error_code": error_code,
+                     "fallback_used": bool(fallback_used)}}
 
 
 #: How long each rung's wall-clock is kept for reporting.

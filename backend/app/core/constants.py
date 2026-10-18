@@ -37,9 +37,17 @@ LEGAL_TRANSITIONS = {
 #: `POST /api/runs` response body, not by an SSE event. `duplicate.detected` and
 #: `stage.completed` were likewise declared and never emitted. All three were
 #: removed rather than left as a contract nothing honours.
+#:
+#: `source.failed` was added for the opposite reason. Failed and skipped fetches
+#: emitted nothing, so a run's history said a page had been fetched whenever one
+#: had been fetched and was silent about every one that had not -- and a render
+#: that failed and was served over HTTP had no representation at all. Its `data`
+#: carries `status` (`failed` / `skipped` / `degraded`) and `error_code` from the
+#: closed taxonomy in `fetcher.RENDER_ERROR_CODES`, so a client groups by cause
+#: rather than by parsing a sentence.
 EVENT_TYPES = ["run.partial",
     "stage.started", "stage.progress",
-    "source.discovered", "source.fetched", "source.reused",
+    "source.discovered", "source.fetched", "source.reused", "source.failed",
     "record.extracted", "record.verified", "record.needs_review", "record.rejected",
     "duplicate.merged",
     "run.completed", "run.failed", "run.cancelled"]
