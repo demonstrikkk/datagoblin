@@ -68,6 +68,32 @@ def _now() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
+def _judge_budget_for_run() -> "validator_svc.JudgeBudget":
+    """The per-run judge budget, built from `RUN_MAX_JUDGE_CALLS`.
+
+    The same literal, 0, means opposite things on the two surfaces that carry a
+    judge count, and that is deliberate:
+
+      * This setting is server config. 0 means "no cap" -- `RUN_CREDIT_BUDGET`
+        and the old `RUN_MAX_REQUESTS` used the same convention.
+      * `JudgeBudget` reads 0 as ZERO calls, because the rejudge route takes
+        `judge_budget` from a request body where 0 must mean "judge nothing" so
+        a caller cannot buy an unbounded bill.
+
+    Passing the setting straight through therefore translated a documented
+    `0 = unlimited` into zero verification: every field came back
+    `judgment_unavailable` -- values kept, nothing checked -- which reads as "no
+    evidence" and is indistinguishable from having none. Nothing errored. The
+    product simply stopped proving things, and an operator who set the variable
+    to *lift* the cap had removed the feature.
+
+    Named and separated so it is testable rather than an inline argument, and so
+    `test_judge_call_cap.py` can pin both directions.
+    """
+    limit = int(settings.RUN_MAX_JUDGE_CALLS or 0)
+    return validator_svc.JudgeBudget(limit, unlimited=(limit == 0))
+
+
 #: Adaptive per-domain budget. A host at or above `CAP_TRUST_FLOOR` keeps the
 #: full flat cap; one below it is scaled down toward `CAP_FLOOR` pages.
 CAP_TRUST_FLOOR = 0.35
@@ -418,7 +444,15 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     # mutable, so two runs at once would overwrite each other's counter on
     # startup — the comment that used to sit here claimed it was per-run, which
     # is exactly what it was not.
-    judge_budget = validator_svc.JudgeBudget(settings.RUN_MAX_JUDGE_CALLS)
+    # 0 means "no cap" on this setting, but ZERO judge calls on `JudgeBudget`.
+    # Both readings are correct on the surface they came from -- the rejudge route
+    # takes `judge_budget` from a request body, where 0 must mean "judge nothing"
+    # so a caller cannot buy an unbounded bill -- so the run path has to say which
+    # one it wants. It did not, and `JudgeBudget(settings.RUN_MAX_JUDGE_CALLS)`
+    # turned a documented `0 = unlimited` into zero verification: every field in
+    # the dataset came back `judgment_unavailable`, which is exactly what an
+    # operator who never set the variable would have seen and could not explain.
+    judge_budget = _judge_budget_for_run()
     pipe = pipeline_svc.ItemPipeline([("validate", _validate_stage),
                                       ("normalize", _normalize_stage)],
                                      max_concurrency=settings.ITEM_CONCURRENCY)

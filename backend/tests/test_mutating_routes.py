@@ -61,57 +61,82 @@ def test_the_gap_fill_route_resolves_a_run_id():
         "repositories must work through the same line")
 
 
-def test_gap_fill_refuses_with_a_reason_rather_than_crashing():
+def _client(tmp_path, monkeypatch):
+    """A TestClient bound to a throwaway store.
+
+    `TestClient(app)` runs the lifespan, and the lifespan builds the repository
+    from the process CWD. Without `chdir` that is the developer's real
+    `.datagoblin-local/` -- so these two tests were reading, and posting at, the
+    actual datasets, and `pytest.skip`-ing themselves out of existence when that
+    store happened to be empty. Coverage that depends on what you last ran is
+    not coverage.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import main as main_mod
+    from app.core.config import settings as _settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_settings, "OPENCODE_ENABLED", False)
+    return main_mod, TestClient(main_mod.app)
+
+
+def _dataset(main_mod, rows=None):
+    """A real dataset in the temp store, with the plan schema gapfill reads."""
+    plan = {"entity": "Acme", "goal": "find acme corp",
+            "fields": [{"name": "company_name", "type": "string",
+                        "required": False}]}
+    return main_mod.REPO.finalize_dataset(
+        "run-hermetic", plan, list(rows or []),
+        {"attempted": 0, "successful": 0, "failed": 0, "skipped": 0,
+         "records": len(rows or []), "verified": 0, "needs_review": 0})
+
+
+def test_gap_fill_refuses_with_a_reason_rather_than_crashing(tmp_path, monkeypatch):
     """A refusal is fine; an unnamed 500 is not.
 
-    Real stored datasets, because the two refusals under test are the honest
-    ones: an evidence gap that fetching cannot fix, and a field the schema does
-    not describe. Both must arrive as a typed E_VALIDATION naming the reason.
-"""
-    from fastapi.testclient import TestClient
+    Hermetic: an empty dataset, so `gaps/fill` refuses with a named reason
+    every time. This used to read the first real dataset on the machine and skip
+    if there was none, which is how a route that answered 500 for every dataset,
+    always, kept looking covered.
+    """
+    main_mod, app = _client(tmp_path, monkeypatch)
 
-    from app.main import app
-
-    # As a context manager, so the lifespan runs and the repository is built.
-    # Without it every route answers "repository not initialised" and the test
-    # would pass for entirely the wrong reason.
-    with TestClient(app) as client:
-        datasets = (client.get("/api/datasets").json() or {}).get("data") or []
-        if not datasets:
-            pytest.skip("no datasets stored")
-
-        dataset = datasets[0]
-        did = dataset["id"]
-        names = [f.get("name") for f in (dataset.get("schema") or [])
-                 if f.get("name")][:2]
-        if not names:
-            pytest.skip("dataset has no fields")
-
-        for field in names:
-            resp = client.post(f"/api/datasets/{did}/gaps/fill",
-                               json={"apply": False, "field": field})
-            assert resp.status_code < 500, (
-                f"gaps/fill returned {resp.status_code} for {field!r}: "
-                f"{resp.text[:200]}")
-            if resp.status_code != 200:
-                err = (resp.json().get("error") or {})
-                assert err.get("message"), (
-                    f"a {resp.status_code} was returned without a reason for {field!r}")
+    with app as client:
+        did = _dataset(main_mod, rows=[])
+        resp = client.post(f"/api/datasets/{did}/gaps/fill",
+                           json={"apply": False, "field": "company_name"})
+        assert resp.status_code < 500, (
+            f"gaps/fill returned {resp.status_code}: {resp.text[:200]}")
+        assert resp.status_code >= 400, (
+            "an empty dataset has nothing to fill and must be refused")
+        err = (resp.json().get("error") or {})
+        assert err.get("code") == "E_VALIDATION", err
+        assert "nothing to attempt" in (err.get("message") or ""), (
+            "a refusal has to say what to do instead, not merely that it "
+            f"declined: {err}")
 
 
-def test_gap_fill_requires_a_field():
+def test_gap_fill_requires_a_field(tmp_path, monkeypatch):
     """The cheapest guard, and the one the UI can trip."""
-    from fastapi.testclient import TestClient
+    main_mod, app = _client(tmp_path, monkeypatch)
 
-    from app.main import app
-
-    with TestClient(app) as client:
-        datasets = (client.get("/api/datasets").json() or {}).get("data") or []
-        if not datasets:
-            pytest.skip("no datasets stored")
-
-        resp = client.post(f"/api/datasets/{datasets[0]['id']}/gaps/fill",
-                           json={"apply": False})
+    with app as client:
+        did = _dataset(main_mod, rows=[])
+        resp = client.post(f"/api/datasets/{did}/gaps/fill", json={"apply": False})
         assert 400 <= resp.status_code < 500, (
             f"a request naming no field should be refused cleanly, "
             f"got {resp.status_code}")
+        err = (resp.json().get("error") or {})
+        assert err.get("code") == "E_VALIDATION", err
+        assert "field is required" in (err.get("message") or ""), err
+
+
+def test_gap_fill_on_an_unknown_dataset_is_404(tmp_path, monkeypatch):
+    """Refusals are for real datasets. A missing one is not found."""
+    main_mod, app = _client(tmp_path, monkeypatch)
+
+    with app as client:
+        resp = client.post("/api/datasets/does-not-exist/gaps/fill",
+                           json={"apply": False, "field": "company_name"})
+        assert resp.status_code == 404, resp.text

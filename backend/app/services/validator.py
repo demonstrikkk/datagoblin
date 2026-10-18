@@ -417,25 +417,36 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
 
 
 def _receipt_for(raw: dict, field: str, status: str, route: str = "") -> dict:
-    """The `read_method` receipt for one cell, taken from how it was extracted.
+    """The `read_method` receipt for one cell.
 
-    A field a deterministic rung filled carries its route on the evidence item,
-    and that route is authoritative: it is how the value actually got here. Only
-    a field the model produced falls back to `llm`, which is correct because
-    every cell that predates this went through the model.
+    The route is authoritative for *where* the value came from — a deterministic
+    rung filled it, and that is a fact about provenance the model output cannot
+    supply. The route says nothing about *whether the evidence was checked*, and
+    this used to let it say so twice over:
 
-    The route changes where a value came from and never whether it was checked. A
-    structured or labelled route is verified by construction — its quote is the
-    line the page printed — and everything else carries its quote to the same gate
-    the model's output always went through.
+      * it preserved whatever receipt the extractor had stamped, which computed
+        `verified` from the route name before the gate had run;
+      * and where there was no stamped receipt it recomputed `verified` as
+        `status == "verified" or method in {api, json_ld, labelled}`.
+
+    Either way a cell the gate had just refused — quote not on the page, wrong
+    type, a placeholder — kept `confidence: 0.99` and `certainty: "sure"` while
+    its own `verification_status` read `unverified`. The row contradicted itself
+    in the same breath, in the direction that flatters the data, and
+    `field_confidence`'s own docstring calls that gate absolute: it returns the
+    prior or exactly `0`.
+
+    So `verified` is now the gate's answer and nothing else. A structured route
+    that passes its gates still comes back `verified` — that promotion happens
+    inside `verify_field`, after the quote and type checks — so nothing is lost.
     """
     from app.services import confidence as conf_svc
 
     cell = (raw.get("fields") or {}).get(field)
+    method = ""
     if isinstance(cell, dict) and cell.get("read_method"):
-        return {k: cell[k] for k in ("read_method", "method_label", "method_hint",
-                                     "confidence", "certainty", "certainty_label",
-                                     "certainty_hint") if k in cell}
-    method = conf_svc.normalise_method(route) if route else "llm"
-    verified = status == "verified" or method in {"api", "json_ld", "labelled"}
-    return conf_svc.receipt(method, verified=verified)
+        method = conf_svc.normalise_method(cell["read_method"])
+    else:
+        # No receipt on the evidence item: the model produced this one.
+        method = conf_svc.normalise_method(route) if route else "llm"
+    return conf_svc.receipt(method, verified=(status == "verified"))

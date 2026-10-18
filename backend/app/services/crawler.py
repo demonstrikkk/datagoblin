@@ -433,61 +433,91 @@ async def _one(url: str, route: str, fetch_fn: Any, sem: asyncio.Semaphore) -> d
     last_err: Exception | None = None
     best: dict | None = None
     best_len = -1
+    # RUN_RETRY_COUNT is attempts PER RUNG. It was compared against `attempt`,
+    # which was `enumerate(methods)` -- the position in the waterfall, not a
+    # retry counter -- so it never retried anything. `0 < 1` meant "move to the
+    # next rung"; `1 < 1` meant give up; and raising it to 3 changed nothing,
+    # because the loop had already ended. Every rung got exactly one shot, ever.
+    #
+    # That is not cosmetic for the browser rung. On the default `web:http` route
+    # the order is http -> crawl4ai, so Chromium was index 1: one attempt, no
+    # backoff, no second try. A transient Playwright driver disconnect was
+    # therefore final for that page, which is the class of failure behind the
+    # unexplained render losses in docs/39-REUSE-VERIFICATION.md. The default
+    # stays 1, so nothing changes until it is deliberately raised -- but when it
+    # is raised it now means what its name says.
+    attempts_per_rung = max(1, int(settings.RUN_RETRY_COUNT))
+    stop = False
     async with sem:
-        for attempt, method in enumerate(methods):
-            remaining = methods[attempt + 1:]
-            try:
-                page = await fetch_fn(url, method)
-                page["route"] = route
-                blob = (page.get("markdown") or page.get("html") or page.get("text") or "")
-                page["content_hash"] = hashlib.sha256(blob.encode("utf-8", errors="replace")).hexdigest()
-                if page.get("skipped"):
-                    return page
-                # Thinness is measured on CLEAN text (what the LLM would read),
-                # never on raw HTML — a JS shell's raw HTML is big, its text tiny.
-                clean = page.get("markdown") or await asyncio.to_thread(
-                    reducer_svc.reduce_html, page.get("html", ""))
-                html = page.get("html", "")
-                shell = politeness_svc.looks_js_shell(html, len(clean), thin_at)
-                hollow = politeness_svc.has_hollow_code(html)
-                sparse = politeness_svc.low_density_shell(html, len(clean),
-                                                          len(page.get("html", "")))
-                if "crawl4ai" not in remaining or not (shell or hollow or sparse):
-                    # Either this page is genuinely readable, or it is the last
-                    # rung and still looks like a shell. Those are opposites, and
-                    # they used to share one `return page` — which handed an
-                    # unreadable shell straight to the extractor on the final
-                    # attempt, so `NA` values got stored as real records.
-                    if not (shell or hollow or sparse):
+        for index, method in enumerate(methods):
+            if stop:
+                break
+            remaining = methods[index + 1:]
+            for trial in range(attempts_per_rung):
+                try:
+                    page = await fetch_fn(url, method)
+                    page["route"] = route
+                    blob = (page.get("markdown") or page.get("html") or page.get("text") or "")
+                    page["content_hash"] = hashlib.sha256(blob.encode("utf-8", errors="replace")).hexdigest()
+                    if page.get("skipped"):
                         return page
+                    # Thinness is measured on CLEAN text (what the LLM would read),
+                    # never on raw HTML — a JS shell's raw HTML is big, its text tiny.
+                    clean = page.get("markdown") or await asyncio.to_thread(
+                        reducer_svc.reduce_html, page.get("html", ""))
+                    html = page.get("html", "")
+                    shell = politeness_svc.looks_js_shell(html, len(clean), thin_at)
+                    hollow = politeness_svc.has_hollow_code(html)
+                    sparse = politeness_svc.low_density_shell(html, len(clean),
+                                                              len(page.get("html", "")))
+                    if "crawl4ai" not in remaining or not (shell or hollow or sparse):
+                        # Either this page is genuinely readable, or it is the last
+                        # rung and still looks like a shell. Those are opposites, and
+                        # they used to share one `return page` — which handed an
+                        # unreadable shell straight to the extractor on the final
+                        # attempt, so `NA` values got stored as real records.
+                        if not (shell or hollow or sparse):
+                            return page
+                        if len(clean) > best_len:
+                            best, best_len = page, len(clean)
+                        break  # to the tail, which refuses to call a shell a page
                     if len(clean) > best_len:
                         best, best_len = page, len(clean)
-                    break  # to the tail, which refuses to call a shell a page
-                if len(clean) > best_len:
-                    best, best_len = page, len(clean)
-                politeness_svc.stats.note_retry(f"thin-escalate:{method}")
-                continue  # JS shell / hollow code + renderer untried: escalate
-            except AppError as e:
-                last_err = e
-                if e.code == "E_PROVIDER_FATAL":
-                    if attempt == 0 and len(methods) > 1:
-                        continue  # one alternate-method attempt (never bypass)
+                    politeness_svc.stats.note_retry(f"thin-escalate:{method}")
+                    break  # renderer untried: move down the waterfall, not around
+                           # it. A shell does not become readable by asking the
+                           # same rung twice, and a retry here would spend a page
+                           # attempt to learn exactly what we already know.
+                except AppError as e:
+                    last_err = e
+                    if e.code == "E_PROVIDER_FATAL":
+                        if index == 0 and len(methods) > 1:
+                            break  # one alternate-method attempt (never bypass)
+                        stop = True  # fatal mid-waterfall: stop, do not alternate
+                        break
+                    if politeness_svc.strategy(e) == "escalate":
+                        politeness_svc.stats.note_retry(f"escalate:{method}")
+                        break  # client-shaped failure: alternate now, no backoff
+                    politeness_svc.stats.note_retry(method)
+                    if trial < attempts_per_rung - 1:
+                        await fetcher.backoff(trial)  # transient: this rung again
+                        continue
+                    if remaining:
+                        # Spent here. Pause before dropping to the next rung --
+                        # the old code did this on the way *out* of a rung, and
+                        # `test_retry_notes_and_backs_off` pins it, so it is a
+                        # deliberate part of the waterfall rather than a retry.
+                        await fetcher.backoff(trial)
                     break
-                if politeness_svc.strategy(e) == "escalate":
-                    politeness_svc.stats.note_retry(f"escalate:{method}")
-                    continue  # client-shaped failure: alternate now, no backoff
-                if attempt < settings.RUN_RETRY_COUNT:
+                except Exception as e:  # noqa: BLE001 (provider surface)
+                    last_err = e
                     politeness_svc.stats.note_retry(method)
-                    await fetcher.backoff(attempt)  # transient: backoff then alternate
-                    continue
-                break
-            except Exception as e:  # noqa: BLE001 (provider surface)
-                last_err = e
-                if attempt < settings.RUN_RETRY_COUNT:
-                    politeness_svc.stats.note_retry(method)
-                    await fetcher.backoff(attempt)
-                    continue
-                break
+                    if trial < attempts_per_rung - 1:
+                        await fetcher.backoff(trial)
+                        continue
+                    if remaining:
+                        await fetcher.backoff(trial)
+                    break
     if best is not None:
         # A page that stayed a JS shell through every rung is not a page we
         # read — it is a page we failed to render, and returning it as `best`

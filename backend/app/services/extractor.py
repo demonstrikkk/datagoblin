@@ -273,12 +273,12 @@ def _ladder_cells(values: dict, quotes: dict, methods: dict,
     """
     from app.services import confidence as conf_svc
 
-    # Structured routes are verified by construction: a feed states the field and
-    # a labelled line *is* the evidence, so there is no interpretation to check.
-    # Everything else carries the line or span it came from and is verified by
-    # the same gate the model's output goes through — the route changes where a
-    # value came from, never whether it was checked.
-    self_evidenced = {"api", "json_ld", "labelled"}
+    # Structured routes carry the page's own line as the quote, so there is no
+    # interpretation to check and `verify_field` promotes them by construction --
+    # but only after it has checked the quote is on the page and the type holds.
+    # That promotion belongs to the gate, not to this function: it runs before
+    # the gate, so anything asserted here would be a claim about a check that has
+    # not happened yet.
 
     cells: dict = {}
     for name, value in (values or {}).items():
@@ -286,13 +286,21 @@ def _ladder_cells(values: dict, quotes: dict, methods: dict,
             continue
         method = conf_svc.normalise_method((methods or {}).get(name))
         quote = str((quotes or {}).get(name) or "")
-        verified = method in self_evidenced
         cells[name] = {
             "value": value,
-            "verification_status": "verified" if verified else "unverified",
+            # Provisional. The gate has not run yet at this point — nothing has
+            # checked that the quote is on the page, that the type matches, or
+            # that the value is not a placeholder. `wrap_record` re-decides this
+            # per cell and is what persists, so stamping `verified` from the
+            # route name here was a claim about a check that had not happened,
+            # and anything reading a raw extraction believed it.
+            "verification_status": "unverified",
             "source": {"url": url, "title": title, "quote": quote,
                        "retrieved_at": now},
-            **conf_svc.receipt(method, verified=verified),
+            # Same reason: a receipt computed here would carry a confidence the
+            # gate has not earned. `validator._receipt_for` rebuilds it from the
+            # gate's actual answer.
+            **conf_svc.receipt(method, verified=False),
         }
     return cells
 

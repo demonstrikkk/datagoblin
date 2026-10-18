@@ -42,7 +42,6 @@ import asyncio
 from typing import Any, Callable
 
 from app.schemas.plan import is_identity_field as plan_is_identity_field
-from app.services import confidence as conf_svc
 
 #: A rung returns {field_name: {"value": ..., "read_method": ..., "quote": ...}}
 #: for the fields it could fill. It is handed `fields` — the ones still missing —
@@ -314,14 +313,3 @@ def summarise(trace: list[dict], filled: dict) -> dict:
         "by_rung": by_rung,
         "trace": trace,
     }
-
-
-def attach_receipt(cell: dict, method: str) -> dict:
-    """Stamp a filled cell with how it was read, and nothing else.
-
-    The value, the quote and the page are untouched. This only adds the receipt,
-    so a cell can never be made *more* trustworthy by being routed through a
-    higher rung's label.
-    """
-    m = conf_svc.normalise_method(method)
-    return {**cell, **conf_svc.receipt(m, verified=bool(cell.get("verified", False)))}

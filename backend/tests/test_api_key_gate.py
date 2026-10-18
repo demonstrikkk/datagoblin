@@ -90,7 +90,7 @@ def test_auth_errors_use_the_app_error_envelope(monkeypatch):
     assert exc.value.envelope()["error"]["code"] == "E_AUTH_NOT_CONFIGURED"
 
 
-def test_real_gated_route_refuses_without_a_key(monkeypatch):
+def test_real_gated_route_refuses_without_a_key(monkeypatch, tmp_path):
     """Unit tests can prove the helper; this proves the wiring.
 
     `ALLOW_UNAUTHENTICATED` is forced off after the conftest autouse fixture has
@@ -104,6 +104,12 @@ def test_real_gated_route_refuses_without_a_key(monkeypatch):
     from app.core import config as config_mod
 
     monkeypatch.setattr(config_mod.settings, "ALLOW_UNAUTHENTICATED", False)
+
+    # The lifespan builds the repository from the process CWD, so without this
+    # the route under test served the developer's real `.datagoblin-local/`
+    # datasets. A gate test that also reads production state is two tests in a
+    # trench coat, and it fails for reasons that have nothing to do with auth.
+    monkeypatch.chdir(tmp_path)
 
     with TestClient(main_mod.app) as client:
         # No key configured at all: the deployment is misconfigured, and the

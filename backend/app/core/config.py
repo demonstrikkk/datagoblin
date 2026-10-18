@@ -198,6 +198,13 @@ class Settings(BaseSettings):
     RUN_MAX_PAGES: int = Field(default=12, ge=1, le=200)
     RUN_MAX_DEPTH: int = Field(default=2, ge=1, le=5)
     RUN_MAX_DOMAIN_PAGES: int = Field(default=10, ge=1, le=50)
+    # Attempts PER RUNG, not a count of rungs. It was compared against the
+    # waterfall index, so it never retried anything and every rung got exactly
+    # one shot whatever this said; `test_fetch_retries.py` pins that it now
+    # counts. 1 is the default and means one attempt, which is what the shipped
+    # behaviour already was -- raising it is a real change to wall time, so it
+    # is a deliberate decision rather than something to nudge. A JS shell
+    # escalates down the waterfall without consuming these.
     RUN_RETRY_COUNT: int = Field(default=1, ge=0, le=3)
     RUN_MAX_RUNTIME_S: int = Field(default=1200, ge=30, le=3600)
     # Pacing between extraction pages: free-tier LLM quotas are per-minute, so
@@ -216,7 +223,17 @@ class Settings(BaseSettings):
     # the extractor found: a live run reached 728 records, which is thousands of
     # round trips and a guaranteed budget overrun. Past the cap, fields are
     # reported `judgment_unavailable` - kept, but never counted as verified.
-    # 0 = unlimited.
+    #
+    # 0 = unlimited, and it is translated to `JudgeBudget(unlimited=True)` by the
+    # runner. That translation is load-bearing, not a convenience: `JudgeBudget`
+    # itself reads 0 as ZERO calls, deliberately, because the rejudge route takes
+    # `judge_budget` from a request body where 0 means "judge nothing" and an
+    # unbounded bill. The same literal had to mean the opposite thing on the two
+    # surfaces, so this setting used to hand the runner a zero-call budget while
+    # this comment promised unlimited -- an operator who set 0 to lift the cap
+    # silently stopped the product producing evidence at all, with no error
+    # anywhere. Runner and route now disagree on purpose, and
+    # `test_judge_call_cap.py` pins both directions.
     RUN_MAX_JUDGE_CALLS: int = Field(default=400, ge=0, le=100000)
     # Retries for a throttled (HTTP 429) judge, with exponential backoff.
     # Quitting on the first 429 made a busy run report every field as
