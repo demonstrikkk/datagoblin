@@ -16,8 +16,18 @@ So the browser gets its own owner: ONE thread, ONE long-lived loop, and every
 `arun` submitted to it. That serialises the browser rung, which is a real cost
 -- four concurrent pages become one at a time -- and it is the cost that makes
 reuse worth it, since a Chromium launch costs more than the page it was
-launched for. If concurrency matters more than launch cost, raise
-`REUSE_BROWSER_CONCURRENCY` and accept one browser per slot.
+launched for.
+
+`REUSE_BROWSER_CONCURRENCY` is therefore NOT a way to buy parallelism. It is
+accepted, bounded and reported, but `run()` below dispatches to `self._slots[0]`
+and only ever uses the first slot; the rest are built and then never hold a
+browser. An earlier version of this docstring claimed raising it "buys
+concurrency at the cost of one Chromium per slot", and `config.py` still said
+the same. Both were wrong, and `test_concurrent_callers_do_not_launch_a_browser_each`
+passed *because* of the serialisation rather than in spite of it. A live bench
+measured it: 3 slots built, 1 holding a browser, 2 permanently empty.
+`test_extra_slots_are_built_and_never_used` pins that so the setting cannot
+keep implying a capability it does not have.
 
 Leak safety
 -----------
@@ -44,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -67,6 +78,9 @@ class _BrowserSlot:
         self._crawler: Any = None
         self._pages = 0
         self._last_used = 0.0
+        #: Calls currently in flight on this slot. The idle reap must not close
+        #: a browser that is mid-render -- see `idle_for`.
+        self._busy = 0
         self._lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
@@ -146,7 +160,19 @@ class _BrowserSlot:
             crawler = await self._acquire_crawler()
             return await coro_factory(crawler)
 
-        future = self._submit(_job())
+        # Marked busy BEFORE the call is submitted, so a reaper firing in the
+        # gap cannot close a browser that is about to be used -- and the idle
+        # clock starts here rather than on return, so the reap window measures
+        # the whole call and not just the gap between calls.
+        with self._lock:
+            self._busy += 1
+            self._last_used = time.monotonic()
+        try:
+            future = self._submit(_job())
+        except BaseException:
+            with self._lock:
+                self._busy -= 1
+            raise
         try:
             return future.result(timeout=timeout_s)
         except BaseException:
@@ -154,6 +180,9 @@ class _BrowserSlot:
             # from. Discard it so the next caller starts fresh.
             self.invalidate()
             raise
+        finally:
+            with self._lock:
+                self._busy -= 1
 
     def invalidate(self) -> None:
         """Drop the current browser without waiting for the loop."""
@@ -179,14 +208,33 @@ class _BrowserSlot:
             pass
 
     def idle_for(self, now: float) -> float:
-        return now - self._last_used if self._crawler is not None else 0.0
+        """Seconds since this slot was last used, or 0.0 while it is in use.
+
+        The zero-while-busy part is load-bearing and was a real bug found by a
+        live bench rather than by a test. The reap timer is armed once and
+        `_last_used` only moved on return, so a call that ran longer than
+        `IDLE_S` had a browser closed out from under it mid-render: every
+        later step of that render failed with "Target page, context or browser
+        has been closed", and the page silently fell back to a non-rendered
+        rung. Unreachable at the shipped defaults (`IDLE_S` 120 > the 90s crawl
+        timeout) and live the moment anyone tunes `IDLE_S` down. Returning 0.0
+        while busy makes the existing `>= idle_s` test in `_reap` skip the slot
+        without adding a second condition it could forget.
+        """
+        with self._lock:
+            if self._busy:
+                return 0.0
+            return now - self._last_used if self._crawler is not None else 0.0
 
     def touch(self, now: float) -> None:
-        self._last_used = now
+        with self._lock:
+            self._last_used = now
 
     def stats(self) -> dict[str, Any]:
-        return {"pages": self._pages, "max_pages": self._max_pages,
-                "has_browser": self._crawler is not None}
+        with self._lock:
+            return {"pages": self._pages, "max_pages": self._max_pages,
+                    "has_browser": self._crawler is not None,
+                    "busy": self._busy}
 
     def shutdown(self) -> None:
         """Close the browser and stop the owning loop. Idempotent."""
@@ -225,7 +273,6 @@ class BrowserPool:
     def run(self, coro_factory: Callable[[Any], Any], timeout_s: float) -> Any:
         if self._closed:
             raise RuntimeError("browser pool is closed")
-        import time
         slot = self._slots[0]
         try:
             return slot.run(coro_factory, timeout_s)
@@ -249,7 +296,6 @@ class BrowserPool:
             self._reaper.start()
 
     def _reap(self) -> None:
-        import time
         now = time.monotonic()
         for slot in self._slots:
             if slot.idle_for(now) >= self._idle_s:

@@ -6,9 +6,15 @@ and the flag being off -- and none of it is about Playwright. A test that needs
 a browser would be slow, flaky, and unable to exercise the paths that matter
 most (a wedged browser, a failed close, a timed-out call).
 
-What is deliberately NOT proven here: that crawl4ai's AsyncWebCrawler is safe to
-reuse across `arun` calls. That needs a real browser and a real site, and is
-the reason the flag defaults to off.
+What is NOT proven here: anything about Playwright itself. That was true until
+a live crawl checked it -- see docs/39-REUSE-VERIFICATION.md. Against a real
+Chromium and three real pages, one browser reused across many `arun` calls
+produced output inside the band two fresh browsers produced for the same pages,
+and every lifecycle bound (recycle, invalidate, idle reap) behaved. Nothing
+reuse-specific failed. The flag still defaults off, but now for the measured
+reason -- the speed payoff is unproven, not the safety. What is still unknown
+is why the Playwright driver dies mid-render on some pages; it does so with the
+flag off as well, so it is not this module's doing.
 """
 import asyncio
 import sys
@@ -273,6 +279,78 @@ def test_use_arms_the_idle_reap_timer():
         pool.shutdown()
 
 
+def test_a_browser_is_not_reaped_while_a_call_is_in_flight():
+    """The race a live bench found, which no test here would have caught.
+
+    The reap timer is armed once and the idle clock used to move only on
+    return, so a call that ran longer than `IDLE_S` had its browser closed out
+    from under it. Every later step of that render then failed with "Target
+    page, context or browser has been closed" and the page fell back to a
+    non-rendered rung -- a 45% content loss with no error on the stored page.
+
+    Unreachable at the shipped defaults (`IDLE_S` 120 > the 90s crawl timeout),
+    which is exactly why it survived: the numbers hid it. The window below is
+    deliberately inverted, slow call against short window, because that is the
+    only order in which this can be seen.
+    """
+    gen = Gen()
+    idle_s = 0.15
+    pool = BrowserPool(gen.factory, max_pages=50, idle_s=idle_s)
+    errors: list[BaseException] = []
+
+    def slow_job(crawler):
+        async def run(c):
+            started.set()
+            await asyncio.sleep(idle_s * 6)  # far outlives the idle window
+            return await c.arun("https://s.example/slow")
+        return run(crawler)
+
+    started = threading.Event()
+    try:
+        # One quick call so the reap timer is armed before the slow one begins.
+        pool.run(_job("https://s.example/warm"), timeout_s=10)
+        assert pool._reaper is not None
+
+        def work():
+            try:
+                pool.run(slow_job, timeout_s=20)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        assert started.wait(5), "the slow call never started"
+        assert pool.stats()[0]["busy"] == 1, "the slot did not mark itself busy"
+
+        # The armed timer has now fired several times over a call that is still
+        # running. It must skip this slot.
+        time.sleep(idle_s * 4)
+        assert gen.closed == [], "reaped a browser that was mid-render"
+        pool._reap()
+        assert gen.closed == [], "an explicit reap closed a busy slot"
+
+        t.join(timeout=20)
+        assert not t.is_alive(), "the in-flight call never returned"
+        assert errors == [], f"the in-flight call failed: {errors!r}"
+        assert len(gen.made) == 1, "the in-flight call launched a second browser"
+        assert pool.stats()[0]["busy"] == 0, "busy was never released"
+    finally:
+        pool.shutdown()
+
+
+def test_the_idle_clock_starts_when_a_call_begins():
+    """A call that ends exactly at the window edge is idle, not mid-render."""
+    gen = Gen()
+    pool = BrowserPool(gen.factory, max_pages=50, idle_s=30)
+    try:
+        pool.run(_job("https://s.example/"), timeout_s=10)
+        pool._slots[0].touch(time.monotonic() - 31)
+        pool._reap()
+        assert gen.closed == [0], "an idle browser was not reaped"
+    finally:
+        pool.shutdown()
+
+
 def test_the_pool_is_reusable_after_a_reap():
     """Reaping must not leave the pool wedged for the next real use."""
     gen = Gen()
@@ -320,6 +398,38 @@ def test_concurrent_callers_do_not_launch_a_browser_each():
             t.join(timeout=25)
         assert len(results) == 8
         assert len(gen.made) == 1, f"8 concurrent calls launched {len(gen.made)} browsers"
+    finally:
+        pool.shutdown()
+
+
+def test_extra_slots_are_built_and_never_used():
+    """REUSE_BROWSER_CONCURRENCY > 1 does NOT buy concurrency. Pinned, not fixed.
+
+    `BrowserPool.run()` dispatches to `self._slots[0]`, so N slots are built and
+    only the first is ever used. The docstring here and the `config.py` comment
+    both used to promise the opposite -- "raising it buys concurrency at the
+    cost of one Chromium per slot" -- and the test above passes *because* of the
+    serialisation rather than in spite of it, so nothing could fail on the lie.
+
+    A live bench measured it (outputs/bench_reuse_isolate.json): 3 slots built,
+    1 holding a browser, 2 permanently empty.
+
+    This test is named for the truth rather than the intention, so that anyone
+    who wires up a real round-robin has to come here and delete it deliberately.
+    If it ever fails because extra slots DO hold browsers, that is the feature
+    landing -- update the docstring and the config comment in the same change.
+    """
+    gen = Gen()
+    pool = BrowserPool(gen.factory, max_pages=50, idle_s=0, concurrency=3)
+    try:
+        for i in range(3):
+            pool.run(_job(f"https://s.example/{i}"), timeout_s=10)
+        stats = pool.stats()
+        assert len(stats) == 3, f"expected 3 slots, got {len(stats)}"
+        used = [i for i, s in enumerate(stats) if s["has_browser"]]
+        assert used == [0], f"extra slots are now in use ({used}); wire this " \
+                            f"through, then fix the docstring and config.py"
+        assert len(gen.made) == 1, "each slot launched its own browser"
     finally:
         pool.shutdown()
 
