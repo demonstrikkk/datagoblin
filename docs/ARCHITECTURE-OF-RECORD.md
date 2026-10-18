@@ -1,6 +1,7 @@
 # DATAGOBLIN — Architecture of Record
 
-> **Status:** verified against the code on 2026-09-30.
+> **Status:** verified against the code on 2026-09-30. Reuse-browser questions
+> were re-verified later against a live crawl — see `39-REUSE-VERIFICATION.md`.
 > **Purpose:** a single file that describes what this system *actually is*, so no
 > reader has to trust the other 47 documents, or a docstring, or a comment.
 > **Method:** every claim carries a `file:line`. Anything I could not verify is
@@ -852,9 +853,11 @@ is not a UI change.
 ## 11. How to verify any of this yourself
 
 ```powershell
-# tests — note the interpreter; the venv has psycopg_pool, the system python may not
-& "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\python.exe" -m pytest backend/tests -q
-#   → 841 passed
+# tests — backend/.venv has psycopg_pool and the full browser stack; the system
+# python may not
+& backend\.venv\Scripts\python.exe -m pytest backend/tests -q
+#   → 1620 passed, 6 skipped   (measured 2026-10-18; 1617 before the reuse work)
+#   → `backend/.venv` if it does not exist, see .env.example for the env this needs
 
 cd frontend
 npm run build          # preview serves dist/, so rebuild after any src change
