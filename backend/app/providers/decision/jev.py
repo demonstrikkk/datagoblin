@@ -17,6 +17,7 @@ from typing import Literal
 import httpx
 
 from app.core.config import settings
+from app.schemas.evidence import normalize_for_match
 
 Screening = Literal["YES", "NO", "UNCERTAIN"]
 Support = Literal["SUPPORTED", "NOT_SUPPORTED", "UNCERTAIN",
@@ -160,11 +161,18 @@ def deterministic_verdict(value: str, quote: str, source_text: str) -> dict | No
 
     * a quote that is not on the page cannot support anything;
     * a value that is literally inside its own quote needs no interpretation.
+
+    The normalisation is `evidence.normalize_for_match`, NOT a local whitespace
+    fold. The local one made this function disagree with the gate that admitted
+    the quote: `verify_field` accepts a quote after folding inline markdown, so a
+    rendered page's `**Company:** C.H. Robinson` admits the model's
+    `Company: C.H. Robinson` -- and this check then looked for that quote with
+    the markers still in the source, failed to find it, and returned
+    NOT_SUPPORTED. The value was nulled one line after being admitted. One
+    definition, read by the gate, the locator and this pre-check together.
     """
-    import re
-    norm = lambda s: re.sub(r"\s+", " ", (s or "").strip().lower())
-    v, q = norm(value), norm(quote)
-    if not quote or q not in norm(source_text):
+    v, q = normalize_for_match(value), normalize_for_match(quote)
+    if not quote or q not in normalize_for_match(source_text):
         return {"judgment": "NOT_SUPPORTED", "confidence": 0.95,
                 "provider": "deterministic"}
     if v and v in q:

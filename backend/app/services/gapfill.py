@@ -15,11 +15,12 @@ important part, not the search:
   the ladder, and this module refuses a gap whose phase is not a predecessor of
   the one asked for. A gap at phase 0 is never searched, because the stored pages
   have not been tried yet and they are free.
-* **`evidence_gap` is refused outright.** A value that carries no verdict, or two
-  sources that disagree, is not fixed by fetching more. Searching here would
-  spend a search to produce a second unproven value for a field whose problem is
-  that the first one was never judged. The remedy is the judge or a person, and
-  saying so is more useful than an expensive no-op.
+* **`evidence_gap` is refused unless absence is what dominates it.** A value that
+  carries no verdict, or two sources that disagree, is not fixed by fetching
+  more; the remedy is the judge or a person. But `classify` applies that label to
+  a field with *any* disputed cell, so a column with 73 empty cells and two
+  conflicts was refused as if it were fully populated. `gaps.materially_missing`
+  is the single test both this module and `autofill` use to tell the two apart.
 * **The write rule is unchanged and is not relaxed here.** Exact identity match
   through the deduper's signature, empty cells only, and every written value goes
   through the same `wrap_record` the run uses. A value written by this path is
@@ -44,6 +45,7 @@ from app.core.errors import AppError
 from app.services import coverage as coverage_svc
 from app.services import extractor as extractor_svc
 from app.services import gaps as gaps_svc
+from app.services import planner as planner_svc
 from app.services import rejudge as rejudge_svc
 from app.services import reducer as reducer_svc
 from app.services import validator as validator_svc
@@ -106,10 +108,14 @@ def build_queries(field: str, record: dict, keys: list[str]) -> list[str]:
     failure the identity match exists to prevent.
     """
     plain = _plain(record.get("fields", {}))
+    # The schema's name is not the search phrase: `chief_executive` is an
+    # identifier. Searching it literally found nothing for eight entities in a
+    # live pass, while the pages use "chief executive" / "CEO".
+    label = planner_svc.field_phrase(field)
     out: list[str] = []
     for key in keys:
         for frag in _needles(plain.get(key)):
-            q = f'"{frag}" {field}'.strip()
+            q = f'"{frag}" {label}'.strip()
             if q not in out:
                 out.append(q)
     return out
@@ -143,7 +149,34 @@ def _host(url: str) -> str:
         return ""
 
 
-def plausible(url: str, entity: str) -> bool:
+#: Hosts whose pages are almost never readable without a login. Kept at the back
+#: of the fetch queue rather than dropped: they are still the page the search
+#: engine thinks answers the question, and a person may want to open it.
+_SOCIAL_HOSTS = ("linkedin.com", "facebook.com", "twitter.com", "x.com",
+                 "instagram.com")
+
+
+def _rank_results(results: list[dict], entity: str, website: str = "") -> list[dict]:
+    """Order candidates so the small fetch budget is spent on readable pages.
+
+    The budget is three pages per record. A search for a company commonly
+    returns its LinkedIn profile first, its Wikipedia article second and its own
+    site third; fetching in that order spent every slot on login walls. Own host
+    first, social last, search order preserved within each group -- a stable sort
+    so a relevant article is never reordered for no reason.
+    """
+    own = _host(website) if website else ""
+
+    def key(result: dict) -> tuple[int, int]:
+        host = _host(str(result.get("url", "")))
+        social = any(host == h or host.endswith("." + h) for h in _SOCIAL_HOSTS)
+        own_site = bool(own) and (host == own or host.endswith("." + own))
+        return (1 if social else 0, 0 if own_site else 1)
+
+    return sorted(results, key=key)
+
+
+def plausible(url: str, entity: str, title: str = "") -> bool:
     """Whether a search result is worth a fetch.
 
     Two rules, both about not paying for a page that cannot help. A result whose
@@ -152,6 +185,11 @@ def plausible(url: str, entity: str) -> bool:
     mentions the entity. This drops the "10 best Series A climate startups"
     roundups that otherwise dominate the results for a named company and describe
     other companies entirely.
+
+    The title is checked because the URL rarely carries the company: a news page
+    at `finance.yahoo.com/news/<slug-of-the-headline>` says "Acme Corp names Jane
+    Doe CEO" in its title and nothing in its host. The function excluded those
+    while its docstring claimed the opposite, and the live pass fetched nothing.
     """
     if not url.startswith(("http://", "https://")):
         return False
@@ -168,7 +206,18 @@ def plausible(url: str, entity: str) -> bool:
     squashed = re.sub(r"[^a-z0-9]+", "", low)
     if re.sub(r"[^a-z0-9]+", "", host).startswith(slug[:12]):
         return True
-    return slug[:10] in squashed
+    # The full squashed name is the safe match, but a page titles a company by
+    # its brand: "Autolink - Wikipedia" for "Autolink Group AS". Requiring the
+    # whole name rejected that page. A leading token of six characters or more is
+    # brand-shaped enough to trust; shorter ones ("acme", "open") are not.
+    needles = [slug[:10]]
+    first = re.sub(r"[^a-z0-9]+", "", entity.lower().split()[0]) if entity.strip() else ""
+    if len(first) >= 6 and first not in needles:
+        needles.append(first)
+    if any(n in squashed for n in needles):
+        return True
+    squashed_title = re.sub(r"[^a-z0-9]+", "", str(title).lower())
+    return bool(title) and any(n in squashed_title for n in needles)
 
 
 async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
@@ -200,20 +249,26 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
         raise GapFillRefused(why)
 
     if str(gap.get("category")) == "evidence_gap":
-        # Checked after the ladder so the refusal names the more specific reason
-        # when both apply, and refused rather than attempted.
-        #
-        # `rejudge.is_rejudgeable` owns this vocabulary. It is called rather than
-        # re-tested inline because the two used to encode the rule separately —
-        # this module hardcoded `category == "evidence_gap"` while rejudge
-        # documented that they "cannot disagree", which is only true if one of
-        # them asks the other. Asking is cheaper than finding out otherwise.
-        _rejudgeable, why = rejudge_svc.is_rejudgeable(gap)
-        raise GapFillRefused(
-            why or ("this is an evidence gap: the values exist but carry no "
-                    "verdict, or two sources disagree. Fetching more cannot add "
-                    "a verdict, so this needs the judge or a person — see the "
-                    "Conflicts and Review views"))
+        # The persisted gap row has no `present` column, so the stored copy
+        # alone cannot tell "mostly empty with one conflict" from "filled but
+        # unjudged". The dataset can: compute the live counts and judge on
+        # those. Without this, a phase-2 pass over a mostly-empty
+        # `evidence_gap` still refused as if the column were populated.
+        checked = (store.get_records(dataset_id, "", 1000, 0) or {}).get("records", [])
+        live = (coverage_svc.field_coverage(checked, [field]).get("fields")
+                or [{}])[0]
+        if not gaps_svc.materially_missing({**gap, **live}):
+            # `rejudge.is_rejudgeable` owns this vocabulary. It is called rather
+            # than re-tested inline because the two used to encode the rule
+            # separately — this module hardcoded `category == "evidence_gap"`
+            # while rejudge documented that they "cannot disagree", which is only
+            # true if one of them asks the other.
+            _rejudgeable, why = rejudge_svc.is_rejudgeable(gap)
+            raise GapFillRefused(
+                why or ("this is an evidence gap: the values exist but carry no "
+                        "verdict, or two sources disagree. Fetching more cannot "
+                        "add a verdict, so this needs the judge or a person — see "
+                        "the Conflicts and Review views"))
 
     if phase == gaps_svc.PHASE_STORED:
         # Phase one already has an implementation, an allowlist of stored pages and
@@ -222,11 +277,31 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
         from app.services import backfill as backfill_svc
         out = await backfill_svc.run(store, dataset_id, [field], llm=llm,
                                      apply=apply, include_partial=True)
+        written = int(out.get("written") or 0)
+        # Phase 1 is a re-read, not a verdict. A field it fills is resolved; a
+        # field it does not fill must stay OPEN, because the web search of phase
+        # 2 is exactly the next thing to try — `record_attempt` reads a finding
+        # (wrote nothing) as terminal, which is right for a search that was the
+        # last resort but wrong here. That is why `_finish` is handed a non-empty
+        # "error" for a miss: it is the signal for "do not close this gap yet",
+        # and it names the real reason rather than a bare failure.
+        #
+        # This used to pass the whole report dict as that argument, so the gap
+        # never resolved even when it was filled, and every phase-1 attempt was
+        # stored with the reason "the last attempt failed: {'written': ...}".
+        if written:
+            miss = ""
+        elif int(out.get("fillable") or 0):
+            miss = ("phase 1 found values for this field but wrote none (a dry "
+                    "run); the gap is left open for an applied pass")
+        else:
+            miss = ("phase 1 re-read the stored pages and found no value for this "
+                    "field; phase 2 has not been attempted")
         return _finish(gap, phase, out, {
             "pages_read": int(out.get("pages_read") or 0),
-            "cells_written": int(out.get("written") or 0),
+            "cells_written": written,
             "searches_run": 0, "pages_fetched": 0,
-        }, out)
+        }, miss)
 
     # --- phase two: search the web ------------------------------------------
     from app.services import backfill as backfill_svc
@@ -275,6 +350,11 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
     fetched: list[tuple[str, dict]] = []
     searches_run = 0
     search_errors: list[str] = []
+    # A record that already carries its own site is the best lead for anything
+    # else about it, so the ranker is told which host that is.
+    site_by_rid = {
+        str(rec.get("record_id") or ""): str(_plain(rec.get("fields", {})).get("website") or "")
+        for rec in records}
 
     async def _one(pair: tuple[str, str]) -> list[tuple[str, dict]]:
         rid, query = pair
@@ -284,9 +364,10 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
         except AppError as exc:
             search_errors.append(str(exc)[:120])
             return []
+        results = _rank_results(list(results or []), entity, site_by_rid.get(rid, ""))
         keep: list[str] = []
         for r in results or []:
-            if plausible(str(r.get("url", "")), entity):
+            if plausible(str(r.get("url", "")), entity, str(r.get("title", ""))):
                 keep.append(str(r["url"]))
         pages: list[tuple[str, dict]] = []
         for url in keep[:MAX_FETCHES_PER_RECORD]:
@@ -339,8 +420,14 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
     # Both are now done once, up front, and `_extract` reuses the result.
     prepared: dict[int, dict] = {}
     for i, (_rid, page) in enumerate(fetched):
-        working = {**page, "html": "", "markdown": page.get("markdown", "")}
-        if not working["markdown"]:
+        # Keep the body the fetcher returned. `_default_fetch` hands back `html`
+        # and no `markdown`; this loop used to blank the html and read only the
+        # missing markdown, so the reducer was given an empty string and every
+        # page a phase-2 pass fetched extracted as nothing. What gets *persisted*
+        # is still the reduced text below, never the raw fetch.
+        working = {**page}
+        if not (working.get("markdown") or working.get("html")
+                or working.get("raw_html")):
             full = store.get_page(page.get("id", "")) if page.get("id") else None
             if not full:
                 continue

@@ -47,18 +47,26 @@ HOST_TRUST_WEIGHT = 1.5
 
 
 def _domains(plan: dict) -> tuple[list[str], list[str]]:
-    include = [str(d).strip().lstrip(".") for d in
-               (plan.get("seed_domains", []) + plan.get("allowed_sources", []))]
-    include = [d for d in include if d and "." in d and " " not in d][:50]
-    return include, []
+    raw = [str(d).strip().lstrip(".") for d in
+           (plan.get("seed_domains", []) + plan.get("allowed_sources", []))]
+    include = [d for d in raw if d]
+    usable = [d for d in include if "." in d and " " not in d][:50]
+    dropped = [d for d in include if d not in usable]
+    if dropped:
+        # Surfaced rather than silently discarded: an entry that is not a domain
+        # ("official company websites") constrains nothing, and a filter the
+        # caller believes is applied but is not is worse than no filter.
+        log.info("ignoring allowlist entries that are not domains",
+                 extra={"data": {"dropped": dropped[:20]}})
+    return usable, []
 
 
-#: Fewer distinct hosts than this in the accepted set triggers top-up searches.
-DIVERSITY_FLOOR_HOSTS = 4
-
-#: Top-up searches per discovery, hard cap. Each is one Tavily call plus
-#: screens — bounded and cheap next to a supervisor round.
-DIVERSITY_TOP_UPS = 2
+#: The plan's `max_pages` is a budget to fill, not a ceiling to undershoot. A
+#: measured run declared 8 pages, fetched 3, and left a whole column
+#: (`headquarters_city`) empty because the pages it never opened were the ones
+#: that held it. So the top-up runs until the page budget is met, excluding the
+#: hosts already accepted so the extra pages come from somewhere new rather than
+#: repeating a domain that already answered.
 
 
 def _host_of(url: str) -> str:
@@ -71,23 +79,23 @@ def _host_of(url: str) -> str:
 
 async def _diversify(run_id: str, plan: dict, accepted: list[dict],
                      max_pages: int, search_capped, robots_ok, emit) -> list[dict]:
-    """Top the accepted set up to the host-diversity floor, in place order."""
-    from urllib.parse import urlparse
+    """Top the accepted set up to the page budget, from hosts not yet used.
 
+    Excluding the accepted hosts is what forces breadth: re-running the same
+    query against the same domain returns the same page. The loop is bounded by
+    the query list (at most five), so the extra spend is a handful of searches,
+    and it stops as soon as the plan's page budget is filled.
+    """
     def _hosts(rows):
         return {h for h in (_host_of(r.get("url", "")) for r in rows) if h}
 
     hosts = _hosts(accepted)
-    if len(hosts) >= DIVERSITY_FLOOR_HOSTS or len(accepted) >= max_pages:
+    if len(accepted) >= max_pages:
         return accepted
     queries = list(plan.get("search_queries", [])[:5]) or [str(plan.get("goal", ""))]
-    tried = 0
     for q in queries:
-        if len(hosts) >= DIVERSITY_FLOOR_HOSTS or len(accepted) >= max_pages:
+        if len(accepted) >= max_pages:
             break
-        if tried >= DIVERSITY_TOP_UPS:
-            break
-        tried += 1
         try:
             results = await search_capped(
                 q, settings.RUN_MAX_RESULTS_PER_QUERY, [], sorted(hosts))
@@ -110,7 +118,7 @@ async def _diversify(run_id: str, plan: dict, accepted: list[dict],
                              "route": triage_source(url)})
             hosts.add(h)
             fresh += 1
-            if len(hosts) >= DIVERSITY_FLOOR_HOSTS or len(accepted) >= max_pages:
+            if len(accepted) >= max_pages:
                 break
         try:
             await emit({"type": "source.discovered", "run_id": run_id,

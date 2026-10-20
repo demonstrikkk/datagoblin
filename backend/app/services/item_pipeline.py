@@ -10,17 +10,23 @@ Contract (Scrapy item-pipeline spirit, asyncio-native):
 - run() preserves input order in kept[], bounds in-flight items with a
   semaphore, processes in batches so a cancelled() callback stays responsive,
   and returns (kept, dropped, stats). dropped entries are
-  {item, reason, stage}.
+  {item, reason, stage, payload} where `payload` is whatever the stage attached
+  to its DropItem (None unless it chose to hand back worked state).
 """
 import asyncio
 from typing import Any
 
 
 class DropItem(Exception):
-    def __init__(self, reason: str = "", stage: str = "") -> None:
+    def __init__(self, reason: str = "", stage: str = "", payload: Any = None) -> None:
         super().__init__(reason)
         self.reason = str(reason or "")[:300]
         self.stage = str(stage or "")[:60]
+        #: Optional worked item to hand back with the drop. A stage that has
+        #: already produced the item it is refusing (validation judges the whole
+        #: record, then rejects it for one absent required field) can pass it
+        #: here so a later stage or a rescue pass does not have to redo the work.
+        self.payload = payload
 
 
 class ItemPipeline:
@@ -77,7 +83,8 @@ class ItemPipeline:
                 for original, res in zip(chunk, results):
                     if isinstance(res, DropItem):
                         dropped.append({"item": original, "reason": res.reason,
-                                        "stage": res.stage})
+                                        "stage": res.stage,
+                                        "payload": res.payload})
                     elif isinstance(res, BaseException):
                         raise res
                     else:

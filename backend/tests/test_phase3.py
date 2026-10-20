@@ -5,6 +5,7 @@ Hermetic: no network. Politeness singletons (slots/stats) are reset per test.
 import asyncio
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -427,7 +428,10 @@ def test_markdown_report_renders_evidence():
     # at random, which is the worst property a test can have: it looks like
     # coverage of the export path while actually only testing the clock.
     def _without_stamp(doc: str) -> str:
-        return "\n".join(l for l in doc.splitlines() if not l.startswith("Generated (UTC):"))
+        # The stamp is not at the start of its line: it follows the run id
+        # (`- Run: ... | Generated (UTC): ...`), so the old startswith filter
+        # removed nothing and the assertion compared two clocks.
+        return re.sub(r"Generated \(UTC\): \S+", "Generated (UTC): <stamp>", doc)
 
     assert _without_stamp(content) == _without_stamp(md)
 
@@ -471,7 +475,8 @@ def test_pipeline_order_drop_lifecycle():
     pipe = pipeline_svc.ItemPipeline(_stage_funcs(events), max_concurrency=2)
     kept, dropped, stats = run(pipe.run([{"v": 1}, {"v": 2}, {"v": 3}]))
     assert [k["v"] for k in kept] == [4, 8]  # order preserved, (v+1)*2
-    assert dropped == [{"item": {"v": 2}, "reason": "bad value", "stage": "up"}]
+    assert dropped == [{"item": {"v": 2}, "reason": "bad value", "stage": "up",
+                        "payload": None}]
     assert stats == {"received": 3, "kept": 2, "dropped": 1}
     assert events == ["open:up", "open:dbl", "close:dbl", "close:up"]
 

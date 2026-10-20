@@ -620,6 +620,10 @@ async def start_run(body: dict, cid: str = Depends(correlation_id)) -> dict:
            "store": _store, "persist_source": _persist_source,
            "persist_page": _persist_page, "reuse": _reuse,
            "record_charge": _record_charge, "llm_preflight": _llm_preflight,
+           # `_store` writes the dataset but cannot read it back; the automatic
+           # gap-fill pass reads the fields it just saved and writes filled cells
+           # into them, so it needs the repository handle, not the writer.
+           "repo": r,
            "host_prior": _host_prior,
            "cancelled": lambda: RUNS.get(run_id, {}).get("status") == "CANCELLED"}
     async def _run_to_end() -> None:
@@ -1135,11 +1139,17 @@ async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_
     except gapfill_svc.GapFillRefused as exc:
         raise validation(str(exc))
 
+    # The attempt is recorded whether or not it wrote anything. A phase that ran
+    # and found nothing is the whole reason the gap table exists: without it the
+    # field stays at phase 0, `attempts` never advances, and the same fruitless
+    # search can be run forever. Persisting only the successful writes (which is
+    # what this did) is the same defect as a dry run that never records its
+    # result. Caches are invalidated only when the data actually changed.
+    if gaps_svc.tracked(r):
+        await asyncio.to_thread(r.upsert_gap, did, field, out["gap"])
     if apply_flag and int(out.get("report", {}).get("written") or 0):
         dashboard_svc.invalidate()
         readcache.invalidate()
-        if gaps_svc.tracked(r):
-            await asyncio.to_thread(r.upsert_gap, did, field, out["gap"])
     return {"data": out, "error": None, "meta": {"correlation_id": cid}}
 
 

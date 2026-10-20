@@ -26,7 +26,26 @@ from app.services import gaps as G
 def test_a_depth_gap_query_names_the_entity():
     rec = {"record_id": "r1", "fields": {"company_name": "Acme Corp"}}
     qs = F.build_queries("funding_stage", rec, ["company_name"])
-    assert qs == ['"Acme Corp" funding_stage']
+    assert qs == ['"Acme Corp" funding round']
+
+
+def test_the_query_uses_the_words_a_page_would_use():
+    """`chief_executive` is an identifier; pages say "chief executive".
+
+    A live pass searched the literal identifier for eight entities and fetched
+    nothing, which read as "the web has no CEOs" rather than "bad query".
+    """
+    rec = {"record_id": "r1", "fields": {"company_name": "Acme Corp"}}
+    assert F.build_queries("chief_executive", rec, ["company_name"]) == \
+        ['"Acme Corp" chief executive']
+    assert F.build_queries("hq_city", rec, ["company_name"]) == \
+        ['"Acme Corp" headquarters city']
+
+
+def test_an_unmapped_field_keeps_its_identifier_instead_of_dropping_it():
+    rec = {"record_id": "r1", "fields": {"company_name": "Acme Corp"}}
+    assert F.build_queries("pe_ratio", rec, ["company_name"]) == \
+        ['"Acme Corp" pe_ratio']
 
 
 def test_no_entity_means_no_query_rather_than_a_generic_one():
@@ -87,6 +106,38 @@ def test_an_aggregator_page_that_mentions_the_entity_is_kept():
     assert F.plausible("https://crunchbase.com/organization/acme-corp", "Acme Corp")
 
 
+def test_a_brand_named_page_matches_a_full_legal_name():
+    """Pages title a company by its brand, not its registered name."""
+    assert F.plausible("https://en.wikipedia.org/wiki/Autolink", "Autolink Group AS")
+    assert F.plausible("https://www.autolink.no/om-oss", "Autolink Group AS")
+
+
+def test_the_fetch_queue_puts_readable_pages_before_login_walls():
+    """Three fetches per record; LinkedIn first would spend all three on a wall."""
+    results = [
+        {"url": "https://ee.linkedin.com/in/kristjan-jaak-reigo"},
+        {"url": "https://en.wikipedia.org/wiki/Autolink"},
+        {"url": "https://www.autolink.no/om-oss"},
+    ]
+    ordered = F._rank_results(results, "Autolink Group AS", "https://www.autolink.no")
+    assert [r["url"] for r in ordered] == [
+        "https://www.autolink.no/om-oss",
+        "https://en.wikipedia.org/wiki/Autolink",
+        "https://ee.linkedin.com/in/kristjan-jaak-reigo",
+    ]
+
+
+def test_a_result_whose_title_names_the_entity_is_kept():
+    """A news URL rarely contains the company name; the title does.
+
+    `plausible` took only the URL, so every such result was discarded and the
+    automatic pass fetched nothing for eight searched entities.
+    """
+    url = "https://finance.yahoo.com/news/logistics-firm-appoints-new-leader-120000000.html"
+    assert not F.plausible(url, "Acme Corp")
+    assert F.plausible(url, "Acme Corp", "Acme Corp names Jane Doe as CEO")
+
+
 def test_non_http_results_are_refused_before_they_are_fetched():
     assert not F.plausible("javascript:void(0)", "Acme Corp")
     assert not F.plausible("file:///etc/passwd", "Acme Corp")
@@ -101,6 +152,44 @@ def test_an_evidence_gap_is_refused_without_searching():
         _run_with_gap({"state": "open", "category": "evidence_gap", "phase": 1,
                        "attempts": 1, "field": "ceo"})
     assert "judge or a person" in str(e.value)
+
+
+def test_an_evidence_gap_that_is_mostly_empty_is_still_searched(monkeypatch):
+    """One conflict labels a field `evidence_gap`; it must not hide 73 empty cells.
+
+    Run `2f6c7644` wrote nothing: the automatic pass selected
+    `chief_executive` (73 missing, 2 conflicting), and this function refused it
+    for being an evidence gap before spending a single search. The category
+    names the *first* thing to fix, not the only one.
+    """
+    from app.services import extractor as E
+
+    async def _extract(plan, page, llm):
+        return ([{"fields": {"company_name": "Acme Corp", "ceo": "Jane Doe"},
+                  "source_url": page.get("url", ""),
+                  "source_text": "Acme Corp. Chief Executive Jane Doe."}], "fake")
+
+    async def _search(query, limit=4):
+        return [{"url": "https://acmecorp.com/about", "title": "Acme Corp"}]
+
+    async def _fetch(url, method):
+        return {"url": url, "method": method,
+                "html": "<html><body><p>Acme Corp. Chief Executive Jane Doe.</p>"
+                        "</body></html>"}
+
+    monkeypatch.setattr(E, "extract_page", _extract)
+    # One record already carries the field, so absence (1 of 2 missing) rather
+    # than an empty column is what the live counts say.
+    holder = {"record_id": "r2",
+              "fields": {"company_name": {"value": "Globex"},
+                         "ceo": {"value": "Jane Doe",
+                                 "verification_status": "verified"}}}
+    out = _run_with_gap(
+        {"state": "open", "category": "evidence_gap", "phase": 1, "attempts": 1,
+         "field": "ceo", "records": 80, "missing": 73, "conflicting": 2},
+        search_fn=_search, fetch_fn=_fetch, apply=True, records=[holder])
+    assert out["report"]["searches_run"] == 1
+    assert out["report"]["written"] == 1, out["report"]
 
 
 def test_a_gap_with_no_recorded_history_is_refused():
@@ -160,6 +249,42 @@ def test_a_dataset_without_dedupe_keys_searches_nothing():
             search_fn=_spy, dedupe_keys=[])
     assert "dedupe_keys" in str(e.value)
     assert calls == [], "nothing may be searched when the result cannot be attached"
+
+
+def test_a_fetched_page_that_carries_only_html_is_not_extracted_empty(monkeypatch):
+    """`_default_fetch` returns `html` and no `markdown`.
+
+    The preparation used to blank the html and read only the missing markdown, so
+    the extractor was handed an empty string and a live phase-2 pass searched
+    eight entities, fetched pages about them, and extracted nothing. What gets
+    persisted is still the reduced text; only the input to the reducer changed.
+    """
+    from app.services import extractor as E
+
+    seen: dict[str, int] = {}
+
+    async def _extract(plan, page, llm):
+        seen["html"] = len(page.get("html") or "")
+        return ([{"fields": {"company_name": "Acme Corp", "ceo": "Jane Doe"},
+                  "source_url": page.get("url", ""),
+                  "source_text": "Acme Corp. Chief Executive Jane Doe."}], "fake")
+
+    async def _search(query, limit=4):
+        return [{"url": "https://acmecorp.com/about", "title": "Acme Corp"}]
+
+    async def _fetch(url, method):
+        return {"url": url, "method": method,
+                "html": "<html><body><p>Acme Corp. Chief Executive Jane Doe.</p>"
+                        "</body></html>"}
+
+    monkeypatch.setattr(E, "extract_page", _extract)
+    out = _run_with_gap(
+        {"state": "open", "category": "depth_gap", "phase": G.PHASE_STORED,
+         "attempts": 1, "field": "ceo"},
+        search_fn=_search, fetch_fn=_fetch, apply=True)
+    assert seen.get("html", 0) > 0, "the fetcher's html must reach the extractor"
+    assert out["report"]["pages_fetched"] == 1
+    assert out["report"]["written"] == 1, out["report"]
 
 
 # --- the attempt's reported outcome ------------------------------------------
@@ -231,10 +356,47 @@ def test_the_attempt_stats_are_carried_onto_the_gap():
     assert out["gap"]["stats"]["pages_fetched"] == 2
 
 
+def test_phase_one_that_fills_resolves_but_a_miss_stays_open(monkeypatch):
+    """Phase 1 is a re-read: a fill closes the gap, a miss must stay open.
+
+    A miss that resolved or exhausted the gap would make phase 2 unreachable.
+    The whole report dict used to be handed to `_finish` as its `error`, so a
+    successful phase 1 never resolved and every attempt was stored with the
+    reason "the last attempt failed: {'written': ...}".
+    """
+    from app.services import backfill as B
+
+    class _Store:
+        def get_gap(self, dataset_id, field):
+            return {"state": "open", "category": "depth_gap", "phase": 0,
+                    "attempts": 0, "field": field}
+
+    async def _filled(store, dataset_id, fields, *, llm, apply, include_partial):
+        return {"written": 2, "fillable": 2, "applied": apply, "pages_read": 1}
+
+    monkeypatch.setattr(B, "run", _filled)
+    out = _run_phase1(_Store())
+    assert out["gap"]["state"] == "resolved"
+
+    async def _missed(store, dataset_id, fields, *, llm, apply, include_partial):
+        return {"written": 0, "fillable": 0, "applied": apply, "pages_read": 1}
+
+    monkeypatch.setattr(B, "run", _missed)
+    out = _run_phase1(_Store())
+    assert out["gap"]["state"] == "open", out["gap"]
+    assert "phase 2" in out["gap"]["reason"]
+
+
+def _run_phase1(store):
+    import asyncio
+    return asyncio.run(F.run(store, "d1", "ceo", phase=G.PHASE_STORED, llm=None,
+                             search_fn=None, fetch_fn=None, apply=True))
+
+
 # --- helpers -----------------------------------------------------------------
 
 def _run_with_gap(gap, phase=G.PHASE_SEARCH, search_fn=None, dedupe_keys=None,
-                 expect_ok=False):
+                 expect_ok=False, fetch_fn=None, apply=False, records=None):
     """Drive `gapfill.run` against a store complete enough for the real path.
 
     The plan is reached through the real `plan_for_dataset`, by giving the store
@@ -265,12 +427,13 @@ def _run_with_gap(gap, phase=G.PHASE_SEARCH, search_fn=None, dedupe_keys=None,
                     "dedupe_keys": keys}
 
         def get_records(self, dataset_id, q="", limit=100, offset=0):
-            return {"records": [
+            base = [
                 {"record_id": "r1",
                  "fields": {
                      "company_name": {"value": "Acme Corp",
                                       "verification_status": "verified"}},
-                 "_x": 1}]}
+                 "_x": 1}]
+            return {"records": base + list(records or [])}
 
         def update_record_cell(self, dataset_id, record_id, field, cell):
             self.written.append((record_id, field, cell))
@@ -281,4 +444,4 @@ def _run_with_gap(gap, phase=G.PHASE_SEARCH, search_fn=None, dedupe_keys=None,
 
     return asyncio.run(F.run(
         _Store(), "d1", "ceo", phase=phase, llm=None,
-        search_fn=search_fn or _default_search, fetch_fn=None))
+        search_fn=search_fn or _default_search, fetch_fn=fetch_fn, apply=apply))

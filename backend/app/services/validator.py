@@ -15,7 +15,7 @@ from app.core.errors import AppError
 from app.core.logging import log
 from app.providers.decision import jev
 from app.providers.llm import zen
-from app.schemas.evidence import locate_quote
+from app.schemas.evidence import locate_quote, normalize_for_match
 from app.services.normalizer import is_placeholder
 
 _WS = re.compile(r"\s+")
@@ -28,6 +28,13 @@ _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun",
 
 
 def _norm(s: object) -> str:
+    """Whitespace/case fold for VALUE keys, not for quotes.
+
+    Quote matching uses `evidence.normalize_for_match`, which folds inline
+    markdown as well. The two are deliberately separate: a field name has no
+    emphasis markers to fold, and folding them here would change what counts as
+    the same key.
+    """
     return _WS.sub(" ", str(s or "").strip().lower())
 
 
@@ -264,8 +271,9 @@ async def verify_field(value: object, quote: str, source_text: str,
     # whitespace regex plus lowercasing over the WHOLE page, and this is per
     # field, so on a 50 kB page with ten fields the same page was normalised ten
     # times before the judge was ever consulted.
-    if _norm(quote) not in (norm_source if norm_source is not None
-                            else _norm(source_text)):
+    if normalize_for_match(quote) not in (
+            norm_source if norm_source is not None
+            else normalize_for_match(source_text)):
         # A quote that was supplied and cannot be found is a real failure: the
         # value is either hallucinated or attributed to the wrong sentence.
         return None, "unverified"
@@ -362,7 +370,7 @@ async def wrap_record(fields_spec: list[dict], raw: dict, source_text: str,
     wrapped: dict = {}
     # Normalised once for every field below. See verify_field: this used to be
     # recomputed per field, scanning the entire page each time.
-    norm_source = _norm(source_text)
+    norm_source = normalize_for_match(source_text)
     for f in fields_spec:
         name = f["name"]
         ev = next((e for e in raw.get("evidence", []) if e.get("field") == name), {})
@@ -517,6 +525,15 @@ def settle(cell: dict, *, status: str, quote: str = "",
         else:
             out["verification_status"] = "verified"
             src["start"], src["end"] = start, end
+            # The stored quote becomes the text at the located offsets, so a
+            # reader can slice the page and get exactly what is shown. The two
+            # can differ: the locator's markdown pass matches a quote the model
+            # de-emphasised (`Company: C.H. Robinson`) against the stored
+            # `**Company:** C.H. Robinson`, and the span includes the markers.
+            # Storing the model's spelling next to offsets that slice to
+            # different text is the disagreement this module exists to prevent.
+            # For an exact match this is a no-op.
+            src["quote"] = source_text[start:end]
             out.pop("not_verified_because", None)
     else:
         # Fails closed on anything that is not a status: a missing or empty one

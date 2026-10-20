@@ -25,6 +25,27 @@ So the bar is one hit on a *core subject term*, not on every term. A page about
 AWS's transform product mentions neither "hackathon" nor "sponsor" and is
 dropped; a page about AWS sponsorship mentions "sponsorship" and is kept.
 
+The entity requirement, and why "anywhere on the page" was not enough
+-------------------------------------------------------------------
+The floor above let one page through that cost a whole run. Asked for "European
+logistics companies with their chief executive and their headquarters city", a
+live run kept `digitaldefynd.com/IQ/famous-ceo-europe` -- a listicle of 50
+*famous European CEOs* -- because it contains "european" and "executive". Every
+CEO it yielded was for the wrong entity: LVMH, SAP, GSK, Airbus, HSBC. The one
+page actually about logistics CEOs produced nothing (a separate bug), so the
+dataset was 100% off-target.
+
+`plan["entity"]` says what the rows are meant to be, and this gate ignored it
+entirely. Requiring an entity term to appear *somewhere* is not enough either:
+the off-topic page mentions "logistic" -- twice, in passing, at character 22,337
+of 67,827 ("fast fashion logistics"). The on-topic pages mention it 80 and 149
+times, starting at character 5 and 8.
+
+So the requirement is structural, not a frequency count: when the plan names an
+entity with usable terms, a page is kept only if that term appears in the page's
+**URL slug or its opening** -- a page about X announces X in its title and lede.
+Measured separation on the live run: 5 and 8 versus 22,337.
+
 Every drop is reported with its reason rather than happening silently, because a
 gate that quietly discards pages is indistinguishable from a gate that is
 wrong, and the second one is the dangerous one.
@@ -53,6 +74,28 @@ _SHAPE_WORDS = frozenset("""
 terms conditions policy policies agreement faq details guideline guidelines
 terms-and-conditions
 """.split())
+
+#: How much of the page counts as its "opening" for the entity requirement --
+#: the title and lede, where a page announces its own subject. Measured on the
+#: live run: the two on-topic pages name the entity at character 5 and 8, the
+#: off-topic page first mentions it at 22,337 of 67,827. 1500 sits an order of
+#: magnitude clear of both, so it is not a knife-edge tuned to one run.
+_LEDE_CHARS = 1500
+
+
+def entity_terms(plan: dict) -> list[str]:
+    """The words that name *what each row is meant to be*.
+
+    `plan["entity"]` answers "what kind of thing is a row?" -- here
+    `logistics_company`. Folded the same way as subject terms, so "company" and
+    "companies" fall out as stopwords and the signal word (`logistic`) survives.
+
+    An entity that yields nothing usable (blank, or only stopwords) returns
+    empty, and the gate falls back to the subject-floor rather than refusing
+    every page.
+    """
+    return _terms_from([str(plan.get("entity") or "")])
+
 
 
 @dataclass
@@ -135,20 +178,37 @@ def _terms_from(parts) -> list[str]:
 def assess(plan: dict, text: object, url: str = "") -> Verdict:
     """Decide whether a page is worth spending an extraction call on.
 
-    Returns keep=True when the page shares at least one core subject term with
-    the run's question. Empty text keeps the page: a page with no extractable
-    text will fail downstream anyway, and a gate that rejects on emptiness just
-    moves the failure somewhere less informative.
+    If the plan names an entity, the page must carry that entity in its URL slug
+    or its opening -- a page about logistics companies says "logistics" up
+    front. Otherwise the subject-term floor applies.
+
+    Returns keep=True when the page passes. Empty text keeps the page: a page
+    with no extractable text will fail downstream anyway, and a gate that rejects
+    on emptiness just moves the failure somewhere less informative.
     """
     terms = subject_terms(plan)
-    if not terms:
+    ents = entity_terms(plan)
+    if not terms and not ents:
         # No usable subject means the run's question is too vague to gate on.
         # Passing everything is the honest answer; guessing would drop real rows.
         return Verdict(keep=True, reason="no-subject-terms", terms=[])
 
     body = _norm(text)
     if not body:
-        return Verdict(keep=True, reason="empty-page", terms=terms)
+        return Verdict(keep=True, reason="empty-page", terms=terms or ents)
+
+    slug = _stem_all(url)
+
+    if ents:
+        lede = _stem_all(body[:_LEDE_CHARS])
+        ent_body = [t for t in ents if t in lede]
+        ent_slug = [t for t in ents if t in slug]
+        if ent_body or ent_slug:
+            return Verdict(keep=True, reason="entity", matched=ent_body or ent_slug,
+                           terms=ents)
+        # The page is about something else. Saying so, with the entity that was
+        # sought, is the difference between a traceable drop and a silent one.
+        return Verdict(keep=False, reason="off-entity", matched=[], terms=ents)
 
     body_stems = {_stem(w) for w in body.split()}
     matched = [t for t in terms if t in body_stems]
@@ -159,7 +219,6 @@ def assess(plan: dict, text: object, url: str = "") -> Verdict:
     # A URL is a second chance, and it is a real one: plenty of pages put the
     # subject in the slug (`/events/sponsorship`) and not in the body text we
     # reduced. Cheap, and it rescues pages the body gate would wrongly drop.
-    slug = _stem_all(url)
     slug_hits = [t for t in terms if t in slug]
     if slug_hits:
         return Verdict(keep=True, reason="matched-url", matched=slug_hits,
@@ -186,6 +245,8 @@ def report(detail: bool = False) -> dict:
     return {
         "stopwords": len(_STOPWORDS),
         "shape_words": sorted(_SHAPE_WORDS),
-        "bar": "one core subject term, body or url",
+        "bar": ("entity term in url or opening, else one core subject term "
+                "body or url"),
+        "lede_chars": _LEDE_CHARS,
         "detail": detail,
     }

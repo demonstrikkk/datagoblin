@@ -161,6 +161,36 @@ def derive(coverage: dict, conflicts: list[dict] | None = None) -> list[dict]:
     return rows
 
 
+def materially_missing(gap: dict) -> bool:
+    """Whether absence, not an unproven value, is this field's dominant problem.
+
+    `classify` labels a field with *any* unverified or conflicting cell an
+    `evidence_gap`, because a missing verdict is the first thing to judge. That
+    is right about the field and wrong as a reason to skip fetching: run
+    `890f3509` had 122 of 128 `chief_executive` cells empty and one conflict, so
+    every field was classed `evidence_gap` and the automatic pass considered
+    nothing while 122 rows stayed blank.
+
+    This lives here, and not in either caller, because `autofill` and `gapfill`
+    both have to agree on it: the first decides what to attempt, the second
+    decides whether the category alone forbids an attempt. Two copies of the
+    rule is how they came to disagree.
+
+    `present > 0` keeps a `schema_gap` out: no source has ever carried that
+    field, so searching for it is a proposal, not a default.
+    """
+    missing = int(gap.get("missing") or 0)
+    disputed = int(gap.get("unverified") or 0) + int(gap.get("conflicting") or 0)
+    # The persisted row carries `records` and `missing` but not `present`, and a
+    # caller that hands this function a stored row would otherwise read
+    # `present=0` and call every field a `schema_gap`. Deriving it keeps the rule
+    # identical for a derived row and a stored one.
+    present = gap.get("present")
+    if present is None:
+        present = max(0, int(gap.get("records") or 0) - missing)
+    return int(present) > 0 and missing > 0 and missing > disputed
+
+
 def can_attempt(gap: dict, *, phase: int) -> tuple[bool, str]:
     """Whether `phase` may be attempted on this gap, and why not if it may not.
 

@@ -380,4 +380,21 @@ async def preflight() -> str | None:
     # choice — and a cloud fallback is only a *fallback* if a cloud key is
     # actually configured. Reported either way, because a run that silently
     # starts paying a different provider is the thing to avoid.
-    return detail
+    #
+    # Which meant refusing every run without a local `opencode serve`, even with
+    # GEMINI_API_KEY and GROQ_API_KEY both set and working -- the plan compiler
+    # had just used Gemini successfully in the same process. The check the
+    # comment describes was never implemented, so a configured fallback was
+    # treated the same as no fallback at all, and the pipeline was unrunnable
+    # without a separate local server that nothing documented as a requirement.
+    #
+    # The distinction is the one the comment already draws. Without any cloud key
+    # there is genuinely nothing left to try, and refusing is exactly the failure
+    # this function exists to prevent: a run that searches, crawls, extracts
+    # nothing and reports success. With one, the run can proceed -- loudly.
+    if not (settings.GEMINI_API_KEY or settings.GROQ_API_KEY):
+        return detail
+
+    log.warning("primary reader unreachable; a cloud provider will serve the run",
+                extra={"data": {"error": detail}})
+    return None

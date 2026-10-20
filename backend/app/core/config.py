@@ -193,11 +193,36 @@ class Settings(BaseSettings):
     # mislead; the live query budget is `SUPERVISOR_MAX_QUERIES`, the page
     # budget is `RUN_MAX_PAGES`.
     RUN_MAX_RESULTS_PER_QUERY: int = Field(default=5, ge=1, le=20)
-    # Deep-crawl ceilings raised for complete-site capture; defaults stay
-    # conservative (12 pages / depth 2) — plans opt into more explicitly.
-    RUN_MAX_PAGES: int = Field(default=12, ge=1, le=200)
+    # Deep-crawl ceilings raised for complete-site capture; plans opt into more
+    # explicitly (`planner._entity_traversal` asks for one detail page per
+    # requested record). Measured: a 10-page entity run queued 49 same-host
+    # children and fetched none, so its per-entity columns stayed empty while the
+    # identity columns were full from listing pages.
+    RUN_MAX_PAGES: int = Field(default=30, ge=1, le=200)
+    # A run's own second pass over the fields its first crawl could not fill.
+    #
+    # The pipeline used to end at whatever the first crawl produced, so a field
+    # the fetched pages did not carry came back empty for a reason the user never
+    # saw. Measured: 138 of 139 `headquarters_city` cells empty after a run that
+    # fetched 3 of its 8 budgeted pages, none of which held a headquarters. The
+    # on-demand gap-fill route closes that, but only if someone notices and asks.
+    # This runs the same pass automatically, once, on the run's saved dataset.
+    #
+    # Bounded because it spends real search budget and only fills cells the crawl
+    # left empty (absence-dominant fields, even when a cell or two also needs a
+    # verdict). 0 searches, or RUN_AUTOFILL off, disables it entirely.
+    #
+    # 8 searches is deliberate: one entity query per record, and the last live
+    # run left 122 of 128 `chief_executive` cells empty. At 3 the pass could not
+    # move the column; at 8 it covers the entities whose pages were never read
+    # without a measurable dent in the run budget.
+    RUN_AUTOFILL: bool = Field(default=True)
+    RUN_AUTOFILL_SEARCHES: int = Field(default=8, ge=0, le=20)
+    RUN_AUTOFILL_FIELDS: int = Field(default=2, ge=0, le=5)
     RUN_MAX_DEPTH: int = Field(default=2, ge=1, le=5)
-    RUN_MAX_DOMAIN_PAGES: int = Field(default=10, ge=1, le=50)
+    # A directory that holds one page per entity is the field-rich source for an
+    # entity dataset, so its allowance has to exceed a dozen companies.
+    RUN_MAX_DOMAIN_PAGES: int = Field(default=15, ge=1, le=50)
     # Attempts PER RUNG, not a count of rungs. It was compared against the
     # waterfall index, so it never retried anything and every rung got exactly
     # one shot whatever this said; `test_fetch_retries.py` pins that it now

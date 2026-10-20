@@ -51,6 +51,18 @@ def test_evidence_outranks_depth_when_both_apply():
     assert G.classify(cov(present=5, missing=3, unverified=2)) == "evidence_gap"
 
 
+def test_absence_dominance_is_readable_from_a_persisted_row():
+    """The stored row has `records` and `missing` but no `present` column.
+
+    `materially_missing` decides whether a labelled `evidence_gap` may still be
+    fetched. Reading `present` straight off a stored row made it 0 for every
+    field, so phase 2 kept refusing fields that were 73/77 empty.
+    """
+    assert G.materially_missing({"records": 80, "missing": 73, "conflicting": 2})
+    assert not G.materially_missing({"records": 80, "missing": 2, "conflicting": 2})
+    assert not G.materially_missing({"records": 80, "missing": 80})
+
+
 # --- reasons -----------------------------------------------------------------
 
 def test_the_schema_gap_reason_does_not_claim_the_sources_lack_the_field():

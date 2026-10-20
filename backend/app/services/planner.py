@@ -2,6 +2,8 @@
 structured call second; rule-based deterministic compiler third (marked
 provider=rule-based); generic fallback last (marked provider=fallback)."""
 import re
+from urllib.parse import urlparse
+
 from app.core.config import settings
 from app.core.errors import validation
 from app.schemas.plan import WorkflowPlan
@@ -107,7 +109,7 @@ async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
                        "content": "Convert to a WorkflowPlan. "
                                   f"Business data request: {prompt[:2000]}"}],
             response_model=WorkflowPlan, max_retries=1), timeout=120)
-        return _cap_total_fields(_cap_required(plan.model_dump())), "instructor:gemini"
+        return _finalize(plan.model_dump(), prompt), "instructor:gemini"
     except Exception:
         return None
 
@@ -115,6 +117,14 @@ async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
 #: How many fields may be required at once. A record is dropped when a required
 #: field has no evidence, so a plan requiring everything guarantees an empty
 #: dataset. Two is enough to identify a record; the rest are enrichment.
+#:
+#: This is a ceiling, not the policy. A field is only kept required if it is one
+#: of the plan's identity fields (`dedupe_keys`) -- the attributes that say what
+#: a record *is*. Enrichment a query happens to ask for (a CEO name, a revenue
+#: figure) is not identity: a page can legitimately lack it, and requiring it
+#: drops the whole record. Measured: a live run marked `company_name` and
+#: `chief_executive` required; the pages held company names but no quotable CEO,
+#: so the gate dropped all 92 extracted records and stored an empty dataset.
 MAX_REQUIRED_FIELDS = 2
 
 # Total fields a plan may carry, whatever the planner proposed.
@@ -126,23 +136,38 @@ MAX_TOTAL_FIELDS = 12
 
 
 def _cap_required(plan: dict) -> dict:
-    r"""Demote surplus `required` flags, keeping the identifying ones.
+    r"""Restrict `required` to the plan's identity fields.
 
     Applied to every rung, LLM and rule-based alike, so a plan can never be
-    unpassable by construction. A measured run marked all 6 generated fields
-    required and the validation gate then dropped all 24 extracted records,
-    almost all of them solely for a missing `website`. An empty dataset is a
-    worse failure than a missing optional column.
+    unpassable by construction. Two measured failures drove this:
+
+    * A run marked all 6 generated fields required and the validation gate then
+      dropped all 24 extracted records, almost all for a missing `website`.
+    * A later run marked `company_name` and `chief_executive` required; the
+      pages held company names but no quotable CEO, so the gate dropped all 92
+      extracted records. Capping at two fields did not help -- both required
+      fields were within the cap.
+
+    The invariant is narrower than a count: only identity (`dedupe_keys`) is
+    what a record cannot exist without. Anything else a query asks for is
+    enrichment and may be absent from a given page. The `MAX_REQUIRED_FIELDS`
+    ceiling still applies in case a plan declares many identity fields.
     """
     fields = plan.get("fields") or []
     required = [f for f in fields if f.get("required")]
-    if len(required) <= MAX_REQUIRED_FIELDS:
+    if not required:
         return plan
-    # Keep the first ones in declaration order: a planner lists the identifying
-    # attribute first in practice, and stable order beats guessing importance
-    # from the field name.
-    for f in required[MAX_REQUIRED_FIELDS:]:
-        f["required"] = False
+    identity = _identity_names(plan)
+    keep = [f for f in required if str(f.get("name") or "") in identity]
+    if not keep:
+        # No identity information to anchor on: keep the first declared
+        # required field, the one a planner lists as the record's subject.
+        keep = required[:1]
+    keep = keep[:MAX_REQUIRED_FIELDS]
+    keep_ids = {id(f) for f in keep}
+    for f in required:
+        if id(f) not in keep_ids:
+            f["required"] = False
     return plan
 
 
@@ -196,6 +221,232 @@ def _identity_names(plan: dict) -> set:
     return {str(n) for n in (plan.get("dedupe_keys") or []) if n}
 
 
+def _has_enrichment_fields(plan: dict) -> bool:
+    """Does this plan ask for anything beyond the record's identity?
+
+    An identity-only plan (a list of names) is served by listing pages. As soon
+    as a *property* is requested -- a CEO, a website, a headcount -- the value
+    usually lives on a per-entity detail page, which the crawl has to be allowed
+    to reach and pay for.
+    """
+    identity = _identity_names(plan)
+    for f in (plan.get("fields") or []):
+        name = str((f or {}).get("name") or "")
+        if name and name not in identity:
+            return True
+    return False
+
+
+#: How many field probes may be folded into a plan's five search queries.
+FIELD_PROBE_MAX = 2
+
+#: Field-name tokens -> the phrase a search engine needs to find a page that
+#: carries that field. Ordered, and the first matching row wins, because a field
+#: carries several tokens (`hq_city` is `hq` + `city`).
+#:
+#: Generic fields are absent on purpose. A plain `location` means something
+#: different on a job dataset than on a company one, and a probe is only worth a
+#: search when the concept is specific enough to name.
+_FIELD_PROBE_HINTS: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"founder", "founders", "cofounder", "cofounders"}), "founder"),
+    (frozenset({"ceo", "chief", "executive", "managing", "director",
+                "directors", "leadership"}),
+     "chief executive"),
+    (frozenset({"website", "site", "homepage", "url", "domain"}),
+     "official website"),
+    (frozenset({"employee", "employees", "headcount", "staff", "team", "size"}),
+     "number of employees"),
+    (frozenset({"hq", "headquarters", "city", "town"}), "headquarters city"),
+    (frozenset({"country"}), "headquarters country"),
+    (frozenset({"industry", "sector", "focus"}), "industry"),
+    (frozenset({"revenue", "turnover", "sales", "income"}), "revenue"),
+    (frozenset({"founded", "founding", "year"}), "founded year"),
+    (frozenset({"funding", "round", "valuation", "raised", "investment"}),
+     "funding round"),
+    (frozenset({"contact", "email", "phone"}), "contact"),
+)
+
+_FIELD_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _name_tokens(name: object) -> set[str]:
+    return {w for w in _FIELD_WORD.findall(str(name or "").lower()) if len(w) > 1}
+
+
+def _plural_fold(tokens: set[str]) -> set[str]:
+    """Fold a trailing plural so "CEOs" answers a "ceo" hint.
+
+    Both sides are folded: the hint rows spell out the words a page uses, and a
+    plan whose query says "CEOs" has already asked for the CEO. Enumerating
+    plurals in the table would work until the next field is added.
+    """
+    return {t[:-1] if len(t) > 3 and t.endswith("s") else t for t in tokens}
+
+
+def _probe_hint(name: str) -> tuple[frozenset[str], str]:
+    """The hint row a field name matches, including the words pages use for it.
+
+    The row's own token set is what the "already asked" test compares against.
+    Comparing the identifier alone would miss the live plan exactly: its queries
+    said "CEOs" and "headquarters", not "chief"/"hq", so it would have spent both
+    probe slots re-asking for fields it already asked for and probed neither
+    website nor headcount -- the two columns that were actually empty.
+    """
+    tokens = _name_tokens(name)
+    for hints, phrase in _FIELD_PROBE_HINTS:
+        if tokens & hints:
+            return hints, phrase
+    return frozenset(), ""
+
+
+def field_phrase(name: str) -> str:
+    """The words a page uses for a field, for a search query.
+
+    `chief_executive` is an identifier; nobody writes it. The automatic gap-fill
+    pass searched the literal identifier for eight entities and fetched nothing
+    ("chief_executive" matches almost no page). Falls back to the identifier for
+    a field the vocabulary does not know, which is still better than dropping it.
+    """
+    return _probe_hint(str(name or ""))[1] or str(name or "")
+
+
+def _field_probe_queries(plan: dict) -> list[str]:
+    """One query per requested field that no existing query already names.
+
+    Discovery can only surface pages for what it searches for. When a plan asks
+    for a CEO and every query is about the market ("logistics companies in
+    Europe"), the pages that carry the CEO are never candidates -- and no amount
+    of crawl depth recovers a page nobody looked for.
+
+    Skipped when the field is already the subject of a query, which is the case
+    the live logistics run actually hit: its queries already said "chief
+    executive" and "headquarters", so probes would have been duplicate spend.
+    """
+    queries = [str(q).strip() for q in (plan.get("search_queries") or [])
+               if str(q).strip()]
+    asked = " ".join(queries).lower()
+    asked_words = _plural_fold(set(_FIELD_WORD.findall(asked)))
+    subject = (min(queries, key=len) if queries
+               else str(plan.get("goal") or plan.get("entity") or "").strip())[:80]
+    if not subject:
+        return []
+    identity = _identity_names(plan)
+    out: list[str] = []
+    for f in (plan.get("fields") or []):
+        name = str((f or {}).get("name") or "")
+        if not name or name in identity:
+            continue
+        hints, phrase = _probe_hint(name)
+        if not phrase:
+            continue
+        if _plural_fold(hints | _name_tokens(name)) & asked_words:
+            continue
+        q = f"{subject} {phrase}".strip()
+        if q and q.lower() not in asked and q not in out:
+            out.append(q)
+    return out
+
+
+def _merge_field_probes(plan: dict) -> dict:
+    """Fold probes into `search_queries`, never past the schema's five.
+
+    When the list is full, the *shortest* queries yield their slots. Dropping the
+    tail instead removed the most specific queries: on the live logistics plan
+    the last query named five actual companies, while the shortest was the
+    generic "largest companies" phrase the probe is built from anyway.
+    """
+    probes = _field_probe_queries(plan)[:FIELD_PROBE_MAX]
+    if not probes:
+        return plan
+    existing = [str(q).strip() for q in (plan.get("search_queries") or [])
+                if str(q).strip()]
+    room = max(0, 5 - len(probes))
+    survivors = sorted(range(len(existing)),
+                       key=lambda i: (-len(existing[i]), i))[:room]
+    keep = [existing[i] for i in sorted(survivors)]
+    plan["search_queries"] = list(dict.fromkeys(keep + probes))[:5]
+    return plan
+
+
+def _entity_traversal(plan: dict) -> dict:
+    """Give a property-bearing plan the reach its fields require.
+
+    Measured on a live entity run: the crawl queued 49 same-host children and
+    fetched none of them because a 10-page budget was spent on the seeds. The
+    identity columns were 100% filled from listing pages; the per-entity columns
+    (CEO 2/17, website 1/17) were exactly the pages left in that queue.
+
+    So an entity plan reserves enough budget for one detail page per requested
+    record, plus a few seeds. The ceiling stays `RUN_MAX_PAGES`; this only asks
+    for more than a flat `max_pages: 12` when the schema needs it.
+    """
+    if not _has_enrichment_fields(plan):
+        return plan
+    traversal = dict(plan.get("traversal") or {})
+    traversal["max_pages_per_domain"] = max(
+        int(traversal.get("max_pages_per_domain") or 0), 15)
+    traversal["max_children_per_page"] = max(
+        int(traversal.get("max_children_per_page") or 0), 12)
+    plan["traversal"] = traversal
+    requested = int(plan.get("requested_count") or plan.get("max_results") or 15)
+    want = requested + 6
+    plan["max_pages"] = min(max(int(plan.get("max_pages") or 0), want),
+                            settings.RUN_MAX_PAGES)
+    return plan
+
+
+def _requested_allowed_sources(prompt: str, entries) -> list[str]:
+    """Keep only the allowlist entries the *prompt itself* named.
+
+    `allowed_sources` is not advice. It is a hard filter in two places: Tavily's
+    `include_domains` and the traversal allowlist. So a domain the planner
+    invented is a domain the run can never leave — and a phrase that is not a
+    domain (`"official company websites"`) silently matches nothing.
+
+    Measured: a run asked for "European logistics companies with their chief
+    executive and their headquarters city"; the planner returned
+    `["wikipedia.org", "official company websites", "dnb.com", "statista.com"]`.
+    The primary search was pinned to those three real domains, returned nothing
+    crawlable, and *every* source the run used came from an unrestricted
+    fallback path. The planner was answering a question nobody asked, which is
+    the same defect `_cap_total_fields` exists to stop — a schema nobody
+    requested is not the schema the user wanted.
+    """
+    text = (prompt or "").lower()
+    kept: list[str] = []
+    for entry in entries or []:
+        raw = str(entry or "").strip()
+        if not raw:
+            continue
+        if "://" in raw:
+            host = (urlparse(raw).hostname or raw).lower()
+        else:
+            host = raw.lower()
+        host = host.strip(".")
+        # A bare host must actually look like a host. "official company websites"
+        # is a phrase; it belongs in neither filter.
+        if " " in host or "." not in host:
+            continue
+        domain = ".".join(host.split(".")[-2:])
+        if host in text or domain in text:
+            kept.append(raw)
+    return kept
+
+
+def _finalize(plan: dict, prompt: str) -> dict:
+    """The deterministic post-processing every rung shares.
+
+    Kept in one place so the invariants cannot hold on one rung and not another:
+    an allowlist only for requested domains, a passable required set, a bounded
+    field count. Applied to the LLM rungs and the rule-based rung alike.
+    """
+    plan["allowed_sources"] = _requested_allowed_sources(
+        prompt, plan.get("allowed_sources") or [])
+    plan = _cap_total_fields(_cap_required(plan))
+    plan = _entity_traversal(plan)
+    return _merge_field_probes(plan)
+
+
 async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
     """Returns (plan_dict, provider). Raises E_VALIDATION on empty prompt.
 
@@ -234,7 +485,7 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
                 WorkflowPlan.model_json_schema())
             data = out.get("data", out) if isinstance(out, dict) else {}
             plan = WorkflowPlan(**data).model_dump()
-            return (_cap_total_fields(_cap_required(plan)),
+            return (_finalize(plan, prompt),
                 (out.get("provider", "llm")
                  if isinstance(out, dict) else "llm"))
         except Exception:
@@ -248,8 +499,8 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
 
     # Rung 3: rule-based, always available, no model involved.
     try:
-        return (_cap_total_fields(_cap_required(
-            WorkflowPlan(**_rule_plan(prompt)).model_dump())), "rule-based")
+        return (_finalize(
+            WorkflowPlan(**_rule_plan(prompt)).model_dump(), prompt), "rule-based")
     except Exception:
         return _fallback_plan(prompt), "fallback"
 

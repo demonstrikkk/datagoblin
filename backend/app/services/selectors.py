@@ -37,6 +37,47 @@ _PRICE_RE = re.compile(r"\$\s?[\d,]+(?:\.\d{1,2})?\s?(?:million|billion|thousand
                        re.IGNORECASE)
 _PHONE_RE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
 
+#: A URL with one of these extensions is a file, never a company's site.
+_ASSET_EXT_RE = re.compile(
+    r"\.(?:png|jpe?g|gif|svg|webp|ico|bmp|css|js|woff2?|ttf|mp4|webm)(?:[?#]|$)",
+    re.IGNORECASE)
+#: Asset directories. Also only meaningful for a "website" field: a page under
+#: /media/ is still a valid source_url.
+_ASSET_PATH_RE = re.compile(
+    r"/(?:dist|assets?|static|img|images?|media|logo|logos|icons?)/", re.IGNORECASE)
+_WEBSITE_HINTS = frozenset({"website", "homepage", "site", "domain"})
+
+
+def _url_candidate(field_name: str, url: str) -> str:
+    """Reject URLs that cannot be the thing the field asks for.
+
+    The pattern rung returned the *first* URL anywhere in the page text.
+    Measured on a live run: 84 of 94 `website` cells were logo/image URLs
+    (`/dist/img/...logo.png`, a `/media/...jpg`). Every one was locatable in the
+    stored text and therefore `verified` -- true about the quote, false about
+    the company. An empty cell is the honest outcome; a wrong URL is not.
+    """
+    # Markdown links leave the closing paren (and prose leaves a comma or full
+    # stop) attached to the URL. It is not part of the address.
+    url = (url or "").rstrip(".,;:)]}")
+    if _ASSET_EXT_RE.search(url):
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    name = (field_name or "").lower()
+    if any(h in name for h in _WEBSITE_HINTS):
+        if _ASSET_PATH_RE.search(url or ""):
+            return ""
+        # A company's website is its entry point, not one of its sub-pages.
+        if (parsed.path or "").strip("/"):
+            return ""
+    return url
+
+
 # field-name hints -> (pattern name, compiled regex). Conservative: a pattern
 # only fires when the field name asks for it, so years never become phones.
 _REGEX_EXTRACTORS: tuple[tuple[frozenset, str, Any], ...] = (
@@ -226,6 +267,19 @@ def regex_extract(field_name: str, text: str) -> tuple[str, str]:
     name = (field_name or "").lower()
     for hints, kind, pattern in _REGEX_EXTRACTORS:
         if not any(h in name for h in hints):
+            continue
+        if kind == "url":
+            # Scan past logos and deep links to the URL that could actually be
+            # the answer. Returning the first match is what made image files
+            # into "official websites".
+            try:
+                matches = pattern.finditer(text or "")
+                for m in matches:
+                    candidate = _url_candidate(name, m.group(0).strip())
+                    if candidate:
+                        return candidate, kind
+            except Exception:
+                pass
             continue
         try:
             m = pattern.search(text or "")

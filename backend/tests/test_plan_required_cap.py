@@ -50,8 +50,13 @@ def test_blanket_required_is_capped(monkeypatch):
 
 
 def test_the_identifying_field_is_never_demoted(monkeypatch):
-    """The cap keeps the first required fields in declaration order, so the
-    identifying attribute a planner lists first always survives."""
+    """Only identity survives as required; every enrichment is demoted.
+
+    The identity here is `dedupe_keys: ["company_name"]`, so `company_name` is
+    the sole field a record cannot exist without. `website`, `hq` and `revenue`
+    are enrichment a page may lack, so requiring any of them would drop records
+    for a field the dataset does not need to be identified by.
+    """
     monkeypatch.setattr(config_mod.settings, "OPENCODE_STRICT", True)
     fields = [{"name": "company_name", "type": "string", "description": "",
                "required": True},
@@ -61,11 +66,29 @@ def test_the_identifying_field_is_never_demoted(monkeypatch):
     plan, _ = run(planner_svc.compile_plan("ai companies", _llm_returning(fields)))
     by_name = {f["name"]: f for f in plan["fields"]}
     assert by_name["company_name"]["required"] is True
-    assert sum(1 for f in plan["fields"] if f["required"]) == \
-        planner_svc.MAX_REQUIRED_FIELDS
-    # The surplus at the tail is what gets demoted.
+    assert sum(1 for f in plan["fields"] if f["required"]) == 1
+    assert by_name["website"]["required"] is False
     assert by_name["revenue"]["required"] is False
     assert by_name["hq"]["required"] is False
+
+
+def test_an_enrichment_field_within_the_count_cap_is_still_demoted(monkeypatch):
+    """The old bug: a required set of two slipped under `MAX_REQUIRED_FIELDS`.
+
+    A live run required `company_name` and `chief_executive`. Both fit under the
+    count cap, so neither was touched -- and because the crawled pages carried
+    company names but no quotable CEO, every extracted record was dropped. Only
+    the identity field may be required, however few required fields there are.
+    """
+    monkeypatch.setattr(config_mod.settings, "OPENCODE_STRICT", True)
+    fields = [{"name": "company_name", "type": "string", "description": "",
+               "required": True},
+              {"name": "chief_executive", "type": "string", "description": "",
+               "required": True}]
+    plan, _ = run(planner_svc.compile_plan("european logistics companies", _llm_returning(fields)))
+    by_name = {f["name"]: f for f in plan["fields"]}
+    assert by_name["company_name"]["required"] is True
+    assert by_name["chief_executive"]["required"] is False
 
 
 def test_a_sensible_plan_is_left_alone(monkeypatch):
@@ -92,12 +115,16 @@ def test_the_prompt_tells_the_model_not_to_require_everything(monkeypatch):
 
 
 def test_cap_applies_to_the_rule_based_rung(monkeypatch):
-    """Every rung, so the invariant does not depend on which model answered."""
+    """Every rung, so the invariant does not depend on which model answered.
+
+    With no `dedupe_keys` there is no identity to anchor on, so the first
+    declared field survives as required and the rest are demoted.
+    """
     plan = {"fields": [{"name": f"f{i}", "type": "string", "description": "",
                         "required": True} for i in range(7)]}
     capped = planner_svc._cap_required(plan)
-    assert sum(1 for f in capped["fields"] if f["required"]) == \
-        planner_svc.MAX_REQUIRED_FIELDS
+    required = [f["name"] for f in capped["fields"] if f["required"]]
+    assert required == ["f0"]
 
 
 def test_cap_leaves_a_small_required_set_intact():

@@ -167,6 +167,35 @@ _ENTITY_SYNONYMS: dict[str, set[str]] = {
     "price": {"cost", "rate", "fee", "pricing"},
 }
 
+#: What a field is called on the pages that carry it.
+#:
+#: Field names are snake_case identifiers (`chief_executive_name`), which nobody
+#: writes in HTML: the page says "leadership" or "management". Scoring only the
+#: identifier's own words meant a company's team page looked as unrelated to the
+#: CEO field as an unrelated listicle did, so the page that could answer the
+#: question never outranked the pages that could not.
+_FIELD_SYNONYMS: dict[str, set[str]] = {
+    "chief": {"leadership", "management", "executive", "officers", "directors",
+              "team", "about"},
+    "executive": {"leadership", "management", "officers", "directors", "team"},
+    "ceo": {"leadership", "management", "executive", "officers", "directors"},
+    "founder": {"leadership", "management", "team", "about"},
+    "website": {"official", "homepage", "home", "site"},
+    "employee": {"headcount", "staff", "workforce", "team", "people"},
+    "headcount": {"employee", "staff", "workforce", "team", "people"},
+    "hq": {"headquarters", "location", "address", "contact", "office"},
+    "headquarters": {"hq", "location", "address", "contact", "office"},
+    "city": {"headquarters", "location", "address", "office"},
+    "country": {"headquarters", "location"},
+    "industry": {"sector", "business", "services", "focus"},
+    "revenue": {"sales", "turnover", "income", "earnings"},
+    "funding": {"round", "raised", "investment", "valuation"},
+}
+
+#: A field synonym is weaker than the field name itself: it narrows the ranking
+#: without letting a page that never mentions the field overtake one that does.
+_FIELD_SYNONYM_BONUS = 0.5
+
 #: A synonym is weaker evidence than the word the plan actually used.
 _SYNONYM_BONUS = 1.5
 
@@ -257,8 +286,14 @@ def _plan_relevance(candidate: dict, state: dict, prior: dict | None = None) -> 
     entity = _relevance_terms(state.get("entity", ""), drop_generic=True)
     fields: set[str] = set()
     for f in (state.get("fields") or []):
-        fields |= _relevance_terms(f.get("name") if isinstance(f, dict) else f,
-                                   drop_generic=True)
+        raw = f.get("name") if isinstance(f, dict) else f
+        fields |= _relevance_terms(raw, drop_generic=True)
+        # `chief_executive_name` is one token to `_relevance_terms`, so neither
+        # the field bonus below nor the synonym lookup could ever match a page
+        # that says "leadership". Split the identifier into the words a page
+        # would actually use.
+        fields |= {t for t in re.split(r"[^a-z0-9]+", str(raw or "").lower())
+                   if len(t) > 2 and t not in _GENERIC_STOP}
     queries = " ".join(str(q) for q in (state.get("queries") or []))
     goal_terms = _relevance_terms(queries or state.get("goal", ""))
 
@@ -275,6 +310,13 @@ def _plan_relevance(candidate: dict, state: dict, prior: dict | None = None) -> 
     score += _PLURAL_BONUS * len((variants - entity) & words)
     score += _SYNONYM_BONUS * len((synonyms - entity - variants) & words)
     score += _FIELD_BONUS * len(fields & words)
+    # The identifiers a field is named by are not the words a page uses for it,
+    # so a team/leadership page scored as unrelated to the field it answers.
+    field_synonyms: set[str] = set()
+    for w in fields:
+        field_synonyms |= _FIELD_SYNONYMS.get(w, set())
+    score += _FIELD_SYNONYM_BONUS * len(
+        (field_synonyms - entity - variants) & words)
     score += 0.5 * len(goal_terms & words)
     if any(s in hay for s in _EDITORIAL_SLUGS):
         score -= 2.5

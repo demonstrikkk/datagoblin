@@ -169,8 +169,8 @@ def test_diversify_top_up_excludes_accepted_hosts():
     assert "https://a.example/other" not in urls
 
 
-def test_diversify_stops_at_the_floor():
-    """Four hosts is enough — no extra search is spent."""
+def test_diversify_stops_when_the_page_budget_is_filled():
+    """A filled budget is enough — no extra search is spent."""
     calls = []
 
     async def _search(q, limit, include=None, exclude=None):
@@ -185,8 +185,36 @@ def test_diversify_stops_at_the_floor():
 
     accepted = [{"url": f"https://h{i}.example/p"} for i in range(4)]
     out = asyncio.run(discovery_svc._diversify(
-        "r1", {"goal": "g"}, accepted, 12, _search, _robots, _emit))
+        "r1", {"goal": "g"}, accepted, 4, _search, _robots, _emit))
     assert out == accepted and calls == []
+
+
+def test_diversify_fills_the_page_budget_past_the_old_host_floor():
+    """Four hosts used to end the top-up with pages still unspent.
+
+    A run declared 8 pages, stopped at 4 because it had four hosts, and left
+    `headquarters_city` empty — the pages it never opened were the ones holding
+    it. The budget is the stopping rule now, bounded by the query list.
+    """
+    calls = []
+
+    async def _search(q, limit, include=None, exclude=None):
+        calls.append(q)
+        return [{"url": f"https://new{len(calls)}.example/p", "title": "N",
+                 "snippet": "s"}]
+
+    async def _robots(url):
+        return True
+
+    async def _emit(ev):
+        pass
+
+    accepted = [{"url": f"https://h{i}.example/p"} for i in range(4)]
+    plan = {"goal": "g", "search_queries": ["q1", "q2", "q3", "q4", "q5"]}
+    out = asyncio.run(discovery_svc._diversify(
+        "r1", plan, accepted, 8, _search, _robots, _emit))
+    assert len(out) == 8, "the plan's page budget must be filled"
+    assert len(calls) == 4, "one search per page still missing, no more"
 
 
 def test_no_llm_means_no_breaker_and_no_probe(monkeypatch):

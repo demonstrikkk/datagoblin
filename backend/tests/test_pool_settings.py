@@ -15,6 +15,10 @@ def _pool_kwargs(monkeypatch) -> dict:
     captured: dict = {}
 
     class _Pool:
+        @staticmethod
+        def check_connection(conn):
+            return True
+
         def __init__(self, **kw):
             captured.update(kw)
 
@@ -71,6 +75,19 @@ def test_the_pool_stays_small_and_does_not_hold_a_remote_connection_forever(monk
         "a per-process pool this large will exhaust a small server's "
         "connection limit across a few workers")
     assert kw["max_lifetime"] == 1800
+
+
+def test_the_pool_probes_a_connection_before_handing_it_out(monkeypatch):
+    """A transaction-mode pooler closes idle server connections silently.
+
+    Without a checkout probe the pool hands out a half-closed socket, and the
+    next write fails with "consuming input failed: server closed the connection
+    unexpectedly". Measured at finalize on a 16-minute live run, which lost the
+    whole dataset after 25 pages had been fetched.
+    """
+    kw = _pool_kwargs(monkeypatch)
+    assert callable(kw.get("check")), (
+        "the pool hands out connections without checking they are alive")
 
 
 def test_a_pool_that_cannot_open_becomes_a_typed_error(monkeypatch):

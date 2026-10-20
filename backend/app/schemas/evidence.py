@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 
 __all__ = ["EvidenceItem", "ExtractedRecord", "ExtractionEnvelope",
            "simplify_schema", "expected_terms", "coverage_tripwire",
-           "parse_llm_json", "locate_quote"]
+           "parse_llm_json", "locate_quote", "normalize_for_match",
+           "normalize_with_map"]
 
 Coverage = Literal["full", "partial", "none"]
 
@@ -177,15 +178,85 @@ def _norm_with_map(src: str) -> tuple[str, list[int]]:
     return "".join(out), idx
 
 
+#: Inline markdown emphasis and code markers.
+#:
+#: A rendered page is reduced to markdown, so the STORED text carries `**`, `*`,
+#: `_` and backticks that the model does not reproduce when it quotes. Asked to
+#: quote a company name off `**Company:** C.H. Robinson`, a model returns
+#: `Company: C.H. Robinson` -- and neither the exact, case-insensitive nor
+#: whitespace-collapsed search finds that, so a required field is ruled
+#: unevidenced and the whole record is dropped.
+#:
+#: Measured on a live run: `supplychaindigital.com/top10/top-10-logistics-ceos`
+#: is delivered by Chromium (markdown, markers present) and lost 13 of 13
+#: extracted rows, every one with "required field(s) not evidenced:
+#: company_name". The two plain-HTTP pages in the same run lost none. The
+#: difference was the emphasis markers, not the content.
+#:
+#: Only these three characters are folded, and they are folded on BOTH sides of
+#: every comparison, so the fold is symmetric and cannot invent a match between
+#: two strings that share no characters. A quote that spans a markdown LINK
+#: (`[text](url)`) is deliberately NOT rescued: mapping the inner text back
+#: across its own delimiters is ambiguous, and a wrong offset is worse than a
+#: refused one.
+_MD_MARKERS = "*_`"
+
+
+def normalize_with_map(text: object) -> tuple[str, list[int]]:
+    """Lowercase, collapse whitespace, drop inline markdown markers.
+
+    Returns the normalised string plus, for each character in it, that
+    character's index in the original -- so a match found in normalised space
+    can be reported as offsets into the original text.
+    """
+    out: list[str] = []
+    idx: list[int] = []
+    prev_space = True  # also collapses a leading run
+    for i, ch in enumerate(str(text or "")):
+        if ch in _MD_MARKERS:
+            continue
+        if ch.isspace():
+            if not prev_space:
+                out.append(" ")
+                idx.append(i)
+            prev_space = True
+        else:
+            out.append(ch.lower())
+            idx.append(i)
+            prev_space = False
+    return "".join(out), idx
+
+
+def normalize_for_match(text: object) -> str:
+    """The one normalisation the support gate, the judge pre-check and the
+    locator must share.
+
+    They must agree or a field is admitted by one and refused by another: a
+    quote the gate accepts and the locator cannot place produces `verified` with
+    no offsets, and a quote the gate accepts but the judge's own substring check
+    rejects produces a nulled value. Both are the same class of bug and this is
+    the single definition they all read.
+    """
+    return normalize_with_map(text)[0]
+
+
 def locate_quote(quote: str, source_text: str) -> tuple[int | None, int | None]:
     """Character offsets of quote within source_text, or (None, None).
 
-    Exact match first, then case-insensitive, then whitespace-collapsed. The
-    third pass exists because the verification gate matches a quote against the
-    source with whitespace collapsed - a quote the model emitted as one line
-    matches a span laid out over several. The gate and the locator must agree,
-    or a field is admitted as verified and then handed offsets of (None, None),
-    which makes the citation unusable. Offsets address the ORIGINAL text.
+    Exact first, then case-insensitive, then whitespace-collapsed, then
+    markdown-folded. The third pass exists because the verification gate matches
+    a quote against the source with whitespace collapsed - a quote the model
+    emitted as one line matches a span laid out over several. The fourth exists
+    because a rendered page's stored text carries emphasis markers the model
+    drops when it quotes. The gate and the locator must agree, or a field is
+    admitted as verified and then handed offsets of (None, None), which makes
+    the citation unusable.
+
+    Offsets address the ORIGINAL text. The markdown pass can therefore return a
+    span that CONTAINS markers the quote did not have (`**Company:** X` for the
+    quote `Company: X`), which is why `validator.settle` stores the original
+    slice as the cell's quote rather than the model's spelling -- so the stored
+    quote is always exactly the text at the stored offsets.
     """
     q = quote or ""
     src = source_text or ""
@@ -203,9 +274,20 @@ def locate_quote(quote: str, source_text: str) -> tuple[int | None, int | None]:
         return None, None
     norm_src, imap = _norm_with_map(src.lower())
     npos = norm_src.find(nq.lower())
-    if npos < 0 or not imap:
+    if npos >= 0 and imap:
+        s_idx = imap[npos]
+        e_pos = npos + len(nq) - 1
+        e_idx = imap[min(e_pos, len(imap) - 1)]
+        return s_idx, e_idx + 1
+    # Markdown-folded search, mapped back to original offsets. Reached only when
+    # every pass above failed, so exact and whitespace matches keep priority.
+    nq_md, _ = normalize_with_map(q)
+    if not nq_md:
         return None, None
-    s_idx = imap[npos]
-    e_pos = npos + len(nq) - 1
-    e_idx = imap[min(e_pos, len(imap) - 1)]
-    return s_idx, e_idx + 1
+    src_md, imap_md = normalize_with_map(src)
+    mpos = src_md.find(nq_md)
+    if mpos < 0 or not imap_md:
+        return None, None
+    s_idx = imap_md[mpos]
+    e_pos = min(mpos + len(nq_md) - 1, len(imap_md) - 1)
+    return s_idx, imap_md[e_pos] + 1

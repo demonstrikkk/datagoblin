@@ -164,6 +164,64 @@ def test_stages_stop_when_the_budget_is_gone_and_keep_the_records(monkeypatch):
     assert done["data"]["dataset_id"] == "d1"
 
 
+class _SoftAfterAPass:
+    """Not soft-expired on the first poll, soft-expired on the next one.
+
+    A real clock makes the cut-off a race; this makes it exact. It exists
+    because the old drain awaited `gather` over every page before emitting
+    anything, so a budget stop cancelled the gather and discarded pages that had
+    already returned.
+    """
+
+    def __init__(self) -> None:
+        self.passes = 0
+        self.total = 600.0
+        self.started = 0.0
+
+    def remaining(self):
+        return 60.0
+
+    def expired(self):
+        return False
+
+    def soft_expired(self):
+        self.passes += 1
+        return self.passes > 1
+
+    def elapsed(self):
+        return 12.0
+
+
+def test_a_slow_page_does_not_discard_the_pages_that_already_finished(monkeypatch):
+    monkeypatch.setattr(config_mod.settings, "EXTRACT_PAGE_SPACING_S", 0)
+    monkeypatch.setattr(config_mod.settings, "EXTRACT_PAGE_CONCURRENCY", 6)
+    ctx, stored = _ctx()
+    urls = _seeds(6)
+    monkeypatch.setattr(runner_svc.discovery_svc, "discover",
+                        lambda *a, **k: asyncio.sleep(0, result=urls))
+
+    real_extract = runner_svc.extractor_svc.extract_page
+
+    async def _extract(plan, page, llm):
+        if page["url"].endswith("/0"):
+            await asyncio.sleep(30)  # the page that will still be in flight
+        return await real_extract(plan, page, llm)
+
+    monkeypatch.setattr(runner_svc.extractor_svc, "extract_page", _extract)
+    events: list = []
+
+    async def _emit(ev):
+        events.append(ev)
+
+    plan = dict(PLAN, max_pages=6)
+    res = run(runner_svc._body("r1", plan, ctx, _emit, _SoftAfterAPass(), {}))
+
+    assert res["status"] == "PARTIAL"
+    assert stored.get("rows"), "pages that finished before the stop must be kept"
+    assert any(e["type"] == "record.extracted" and e["data"]["count"] > 0
+               for e in events), "each completed page must be published as it lands"
+
+
 def test_budget_expiring_after_fetch_keeps_nothing_and_says_so(monkeypatch):
     """Bailing out before extraction leaves nothing to keep, and the run must
     say that rather than implying a partial result."""

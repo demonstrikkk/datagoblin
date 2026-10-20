@@ -140,3 +140,40 @@ def test_gap_fill_on_an_unknown_dataset_is_404(tmp_path, monkeypatch):
         resp = client.post("/api/datasets/does-not-exist/gaps/fill",
                            json={"apply": False, "field": "company_name"})
         assert resp.status_code == 404, resp.text
+
+
+def test_an_attempt_that_wrote_nothing_is_still_recorded(tmp_path, monkeypatch):
+    """The gap must advance even when the phase found nothing.
+
+    The route used to upsert the gap only when cells were written, so a
+    fruitless phase left the field at phase 0 with `attempts` 0 forever and the
+    same search could be run without limit. Recording the attempt is the whole
+    reason the gap table exists.
+    """
+    from app.services import gaps as gaps_svc
+
+    main_mod, app = _client(tmp_path, monkeypatch)
+    with app as client:
+        did = _dataset(main_mod)
+        main_mod.REPO.upsert_gap(did, "company_name", {
+            "field": "company_name", "category": "depth_gap",
+            "state": "open", "phase": 0, "attempts": 0})
+
+        async def _fake_run(store, dataset_id, field, *, phase, llm, search_fn,
+                            fetch_fn, persist_page=None, search_budget=12,
+                            apply=False):
+            gap = store.get_gap(dataset_id, field)
+            after = gaps_svc.record_attempt(
+                gap, phase=phase, stats={"cells_written": 0},
+                error="phase 1 found nothing; phase 2 not attempted")
+            return {"report": {"written": 0, "searches_run": 0, "applied": apply},
+                    "gap": after}
+
+        monkeypatch.setattr(main_mod.gapfill_svc, "run", _fake_run)
+        resp = client.post(f"/api/datasets/{did}/gaps/fill",
+                           json={"field": "company_name", "phase": 1, "apply": True})
+        assert resp.status_code == 200, resp.text
+
+        stored = main_mod.REPO.get_gap(did, "company_name")
+        assert stored["attempts"] == 1, stored
+        assert stored["phase"] == gaps_svc.PHASE_STORED, stored

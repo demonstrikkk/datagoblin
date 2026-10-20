@@ -11,6 +11,7 @@ import time
 
 from app.core.config import settings
 from app.core.constants import RunStage
+from app.services import autofill as autofill_svc
 from app.services import crawler as crawler_svc
 from app.services import deduper as deduper_svc
 from app.services import entity_gate as entity_gate_svc
@@ -346,64 +347,62 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         recs, provider = await _extract_one(p)
         return idx, recs, provider, str(p.get("url", ""))
 
-    async def _drain() -> None:
-        done_n = 0
-        for idx, recs, provider, url in await asyncio.gather(
-                *(_one(i, p) for i, p in enumerate(pages)), return_exceptions=True):
-            if isinstance(recs, BaseException):
-                recs, provider, url = [], "error", ""
-            done_n += 1
-            extract_providers.append(provider)
-            for r in recs:
-                raws.append(r)
-            # Published per page: these are the records a hard timeout would
-            # otherwise take with it.
-            progress["raws"] = raws
-            await _emit(emit, {"type": "record.extracted", "run_id": run_id,
-                               "stage": RunStage.EXTRACTING,
-                               "message": f"Extracted {len(recs)} from {url[:60]} ({provider})",
-                               "progress": 60 + min(9, done_n),
-                               "timestamp": _now(),
-                               "data": {"url": url, "count": len(recs),
-                                        "provider": provider}})
-            if budget.expired() and done_n < len(pages):
-                await _emit(emit, {"type": "stage.progress", "run_id": run_id,
-                                   "stage": RunStage.EXTRACTING,
-                                   "message": f"runtime budget exhausted after {done_n} "
-                                              f"of {len(pages)} pages",
-                                   "progress": 69, "timestamp": _now()})
-
     if pages:
         if cancelled():
             return {"status": "CANCELLED", "records": []}
-        task = asyncio.create_task(_drain())
-        # Stop waiting as soon as the budget is gone, but let the in-flight pages
-        # finish so their records are not thrown away.
-        while not task.done():
-            # `asyncio.wait` returns `(done, pending)`. The old expression tested
-            # the truthiness of the whole tuple, which is a non-empty tuple
-            # whenever `done` is a set — so it was truthy only on the iteration
-            # where the task had *already* finished, and the `soft_expired()`
-            # short-circuit below it could never fire. The soft budget stop was
-            # unreachable code: a run blew through its reserve for validation and
-            # then got killed at the hard wall, losing the window it needed.
-            done, _pending = await asyncio.wait({task}, timeout=2.0)
-            if done:
-                break  # nothing left to wait for
-            if budget.soft_expired():
-                break  # give the remaining time back to validation
-            if cancelled():
+        # Harvest each page as it lands. This used to be one
+        # `gather(*(_one(...)))` inside a single drain task, which meant nothing
+        # was emitted or kept until the *slowest* page finished -- so a budget
+        # stop cancelled the gather and threw away the pages that had already
+        # returned. Measured on a live run: 25 pages fetched, extraction cut at
+        # the reserve, zero records stored. The comment claimed per-page
+        # publishing; the code was all-or-nothing.
+        pending: set[asyncio.Task] = {
+            asyncio.create_task(_one(i, p)) for i, p in enumerate(pages)}
+        done_n = 0
+        try:
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, timeout=2.0,
+                    return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        _idx, recs, provider, url = task.result()
+                    except BaseException:  # noqa: BLE001 (a page may fail alone)
+                        recs, provider, url = [], "error", ""
+                    done_n += 1
+                    extract_providers.append(provider)
+                    raws.extend(recs)
+                    # Published per page: these are the records the budget stop
+                    # must not take with it.
+                    progress["raws"] = raws
+                    await _emit(emit, {"type": "record.extracted", "run_id": run_id,
+                                       "stage": RunStage.EXTRACTING,
+                                       "message": f"Extracted {len(recs)} from {url[:60]} ({provider})",
+                                       "progress": 60 + min(9, done_n),
+                                       "timestamp": _now(),
+                                       "data": {"url": url, "count": len(recs),
+                                                "provider": provider}})
+                    if budget.expired() and done_n < len(pages):
+                        await _emit(emit, {"type": "stage.progress", "run_id": run_id,
+                                           "stage": RunStage.EXTRACTING,
+                                           "message": f"runtime budget exhausted after {done_n} "
+                                                      f"of {len(pages)} pages",
+                                           "progress": 69, "timestamp": _now()})
+                if not pending:
+                    break
+                if budget.soft_expired():
+                    break  # give the remaining time back to validation
+                if cancelled():
+                    return {"status": "CANCELLED", "records": []}
+        finally:
+            for task in pending:
                 task.cancel()
-                return {"status": "CANCELLED", "records": []}
-        if not task.done():
-            task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        if budget.soft_expired():
             partial_reason = (f"runtime budget reserved for validation after "
                               f"{len(extract_providers)} of {len(pages)} pages")
-        else:
-            await task
-            if budget.soft_expired():
-                partial_reason = (f"runtime budget reserved for validation after "
-                                  f"{len(extract_providers)} of {len(pages)} pages")
     progress["extract_providers"] = extract_providers
     progress["partial_reason"] = partial_reason
 
@@ -425,12 +424,16 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
         specs = {f["name"]: f for f in plan.get("fields", []) if f.get("required")}
         missing = [n for n, f in specs.items()
                    if wrapped.get(n, {}).get("value") in (None, "")]
+        record = {"fields": wrapped, "source_url": raw.get("source_url", ""),
+                  "page_id": raw.get("page_id", "")}
         if missing:
+            # Hand the judged record back with the drop: the gate has already
+            # spent the judging, and if every record is gated the rescue below
+            # keeps them without a second pass.
             raise pipeline_svc.DropItem(
                 f"required field(s) not evidenced: {', '.join(sorted(missing))}",
-                "validate")
-        return {"fields": wrapped, "source_url": raw.get("source_url", ""),
-                "page_id": raw.get("page_id", "")}
+                "validate", payload=record)
+        return record
 
     async def _normalize_stage(row: dict) -> dict:
         row["fields"] = normalizer_svc.normalize_record(row.get("fields", {}))
@@ -459,13 +462,48 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     kept, dropped, _pstats = await pipe.run(raws, cancelled=cancelled)
     if cancelled():
         return {"status": "CANCELLED", "records": []}
-    for d in dropped:  # a record that failed the gate; counted, not written
+    # A record is dropped when a required field has no value. That is right per
+    # record -- a row whose subject is unknown is not a row -- but a plan whose
+    # required field happens to be absent from every page would empty the
+    # dataset and then report a run that looks like the crawl found nothing.
+    # Those gate drops are held apart so an all-required failure can be rescued.
+    gate_drops = [d for d in dropped
+                  if d.get("stage") == "validate"
+                  and isinstance((d.get("payload") or {}).get("fields"), dict)]
+    gate_ids = {id(d) for d in gate_drops}
+    other_drops = [d for d in dropped if id(d) not in gate_ids]
+
+    rescued = False
+    rescued_records: list[dict] = []
+    if not kept and gate_drops:
+        # Never return a silent empty dataset. The records were extracted and
+        # judged; only a required value was absent. Keep them for review and say
+        # which field could not be evidenced, rather than storing nothing and
+        # blaming discovery for pages that did contain matching records.
+        rescued = True
+        rescued_records = [d["payload"] for d in gate_drops]
+        fields_missing = _gate_drop_fields(gate_drops)
+        progress["rescued"] = len(rescued_records)
+        progress["rescue_reason"] = (
+            f"kept {len(rescued_records)} record(s) for review: required field(s) "
+            f"{'; '.join(fields_missing) or '?'} not evidenced on any page")
+        await _emit(emit, {"type": "stage.progress", "run_id": run_id,
+                           "stage": RunStage.VALIDATING,
+                           "message": progress["rescue_reason"], "progress": 79,
+                           "timestamp": _now(),
+                           "data": {"rescued": len(rescued_records),
+                                    "fields": fields_missing}})
+
+    to_reject = other_drops + ([] if rescued else gate_drops)
+    for d in to_reject:  # a record that failed the gate; counted, not written
         await _emit(emit, {"type": "record.rejected", "run_id": run_id, "stage": RunStage.VALIDATING,
                            "message": f"Record dropped at {d.get('stage', '?')}: "
                                       f"{d.get('reason', '')[:120]}",
                            "progress": 78, "timestamp": _now(),
                            "data": {"url": (d.get("item", {}) or {}).get("source_url", ""),
                                     "reason": d.get("reason", "")[:200]}})
+    if rescued:
+        kept = rescued_records
     verified: list[dict] = []
     for row in kept:
         wrapped = row.get("fields", {})
@@ -538,8 +576,16 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
     reason = progress.get("partial_reason", "")
     no_yield = ""
     if not canonical:
-        no_yield = progress.get("no_yield_reason", "") or _explain_zero_yield(
-            pages, extract_providers)
+        # Name the real cause. Before this, a run that extracted records and
+        # dropped them all for a missing required field reported "the pages were
+        # read but contained no matching records" -- the opposite of what
+        # happened, and it sent the operator to inspect discovery.
+        gate_reason = _gate_no_yield_reason(gate_drops)
+        if gate_reason:
+            no_yield = gate_reason
+        else:
+            no_yield = progress.get("no_yield_reason", "") or _explain_zero_yield(
+                pages, extract_providers)
     await _emit(emit, {"type": "stage.started", "run_id": run_id, "stage": RunStage.FINALIZING,
                        "message": f"Finalizing {len(canonical)} records",
                        "progress": 95, "timestamp": _now()})
@@ -548,6 +594,23 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
                               "partial": partial, "partial_reason": reason,
                               "no_yield_reason": no_yield,
                               **summary})
+    # A second, bounded pass over the fields the first crawl could not fill.
+    # After `store`, because gap-fill operates on the saved dataset and writes
+    # cells into it; never fatal, because the dataset already exists.
+    autofill = await _autofill_pass(
+        emit, run_id, plan, ctx.get("repo"), dataset_id, canonical, llm,
+        search_fn, fetch_fn, _persist_page)
+    if autofill.get("cells_written"):
+        # The saved cells changed under the summary above; recompute the view the
+        # caller reads rather than understate what is now proven. A read failure
+        # here changes only the report — the dataset is already written.
+        try:
+            rows_after = (ctx["repo"].get_records(dataset_id, "", 1000, 0)
+                          or {}).get("records", [])
+            if rows_after:
+                summary = provenance_svc.summarize(rows_after)
+        except Exception:  # noqa: BLE001
+            pass
     if partial:
         headline = f"Partial: {len(canonical)} records kept. {reason}"
     elif canonical:
@@ -578,14 +641,40 @@ async def _body(run_id: str, plan: dict, ctx: dict, emit: object,
                                 # Named counts, not "verified"/"needs_review":
                                 # those conflated records with fields and
                                 # counted unjudged claims as verified.
-                                **summary,
-                                "credits_used": meter.spent,
-                                "credits_projected": meter.projected,
-                                "credit_budget": meter.budget}})
+                                 **summary,
+                                 "autofill": autofill,
+                                 "credits_used": meter.spent,
+                                 "credits_projected": meter.projected,
+                                 "credit_budget": meter.budget}})
     if partial:
         return {"status": "PARTIAL", "records": len(canonical),
                 "dataset_id": dataset_id, "partial": True, "error": reason}
     return {"status": "COMPLETED", "records": len(canonical), "dataset_id": dataset_id}
+
+
+async def _autofill_pass(emit: object, run_id: str, plan: dict, repo: object,
+                         dataset_id: str, records: list, llm: object,
+                         search_fn: object, fetch_fn: object,
+                         persist_page: object) -> dict:
+    """Run the bounded automatic gap-fill over the just-saved dataset.
+
+    Never raises: the first crawl already produced a dataset, so a second pass
+    that fails is reported and leaves that dataset exactly as it was.
+    """
+    if not settings.RUN_AUTOFILL or repo is None or not dataset_id or not records:
+        return {}
+    try:
+        return await autofill_svc.fill_open_gaps(
+            store=repo, dataset_id=dataset_id, plan=plan, llm=llm,
+            search_fn=search_fn, fetch_fn=fetch_fn, persist_page=persist_page,
+            emit=_emit_stamped(emit, run_id))
+    except Exception as e:  # noqa: BLE001 (the saved dataset is the product)
+        await _emit(emit, {"type": "stage.progress", "run_id": run_id,
+                           "stage": RunStage.FINALIZING,
+                           "message": (f"Auto gap-fill failed; the saved dataset "
+                                       f"is unchanged: {str(e)[:160]}"),
+                           "progress": 96, "timestamp": _now()})
+        return {"error": str(e)[:200]}
 
 
 async def _finish_partial(emit: object, run_id: str, plan: dict, store: object,
@@ -649,6 +738,38 @@ def _explain_zero_yield(pages: list, providers: list) -> str:
               if thin else "")
     return (f"the pages were read but contained no matching records "
             f"({n} page(s) checked, provider {provs[0] or 'none'}){detail}")
+
+
+def _gate_drop_fields(drops: list[dict]) -> list[str]:
+    """The required field name(s) named in each gate drop's reason, deduped.
+
+    A gate reason reads `required field(s) not evidenced: a, b`; the part after
+    the colon is what the operator needs, so it is lifted out here once rather
+    than parsed at two call sites.
+    """
+    names: list[str] = []
+    for d in drops:
+        reason = d.get("reason", "")
+        if ":" not in reason:
+            continue
+        tail = reason.split(":", 1)[1].strip()
+        if tail and tail not in names:
+            names.append(tail)
+    return names
+
+
+def _gate_no_yield_reason(drops: list[dict]) -> str:
+    """Why a run yielded nothing when the gate, not discovery, is to blame.
+
+    Returns "" when `drops` is empty so the caller can fall back to the
+    discovery explanation. Without this the run said "the pages were read but
+    contained no matching records" for a run that extracted and dropped 92.
+    """
+    if not drops:
+        return ""
+    fields = _gate_drop_fields(drops)
+    return (f"{len(drops)} record(s) dropped: required field(s) "
+            f"{'; '.join(fields) or '?'} not evidenced")
 
 
 def _apply_adaptive_domain_caps(plan: dict, sources: list[dict],

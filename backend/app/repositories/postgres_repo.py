@@ -132,6 +132,15 @@ class PostgresRepo:
                         min_size=settings.DB_POOL_MIN,
                         max_size=settings.DB_POOL_MAX,
                         max_lifetime=1800,   # don't hold a remote connection forever
+                        # A pooled connection sits idle between operations, and a
+                        # transaction-mode pooler (Supabase) closes idle server
+                        # connections without telling the client. The pool then
+                        # hands out a half-closed socket and the next write dies
+                        # with "consuming input failed: server closed the
+                        # connection unexpectedly" -- measured at finalize on a
+                        # 16-minute run, losing the whole dataset. Probe on
+                        # checkout so a dead connection is replaced instead.
+                        check=ConnectionPool.check_connection,
                         open=True,
                         # dict_row belongs to the pool, not to each connect():
                         # the row factory must be set when the pooled

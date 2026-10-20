@@ -84,13 +84,37 @@ def test_css_extract_first_hit_and_fallback():
 def test_regex_extract_gated():
     text = "Contact jane@acme.ai or visit https://acme.ai, price $15M, call +1 (555) 123-4567."
     assert selectors_svc.regex_extract("contact_email", text)[0] == "jane@acme.ai"
-    assert selectors_svc.regex_extract("website", text)[0] == "https://acme.ai,"
+    assert selectors_svc.regex_extract("website", text)[0] == "https://acme.ai"
     assert selectors_svc.regex_extract("funding", text)[0] == "$15M"
     assert selectors_svc.regex_extract("phone", text)[0] == "+1 (555) 123-4567"
     # no hint, no fire — even though the patterns match the text
     assert selectors_svc.regex_extract("company_name", text) == ("", "")
     assert selectors_svc.regex_extract("founded", "founded 2020") == ("", "")
     assert selectors_svc.regex_extract("email", "nothing here") == ("", "")
+
+
+def test_a_logo_is_not_a_website():
+    """Measured live: 84 of 94 website cells were image URLs, each one locatable
+    and therefore "verified". The first URL in the text is often the logo."""
+    text = ("![logo](https://acme.ai/dist/img/logo.png) "
+            "homepage https://acme.ai/")
+    assert selectors_svc.regex_extract("website", text)[0] == "https://acme.ai/"
+
+
+def test_an_image_url_alone_is_not_a_website():
+    text = "logo https://acme.ai/media/brand.jpg?width=540"
+    assert selectors_svc.regex_extract("website", text) == ("", "")
+
+
+def test_a_deep_link_is_not_the_site_entry_point():
+    text = "see https://acme.ai/news/2026/launch"
+    assert selectors_svc.regex_extract("website", text) == ("", "")
+
+
+def test_a_source_url_may_still_point_at_one_page():
+    text = "source https://acme.ai/reports/2026.pdf"
+    assert selectors_svc.regex_extract("source_url", text)[0] == \
+        "https://acme.ai/reports/2026.pdf"
 
 
 # -- relocate --------------------------------------------------------------------------

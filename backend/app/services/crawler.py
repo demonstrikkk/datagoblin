@@ -83,6 +83,71 @@ def _methods_for(route: str, url: str) -> tuple[str, ...]:
     return tuple(methods)
 
 
+#: A leading host label that is a language/region code, not a site of its own.
+_LOCALE_LABEL = re.compile(r"^[a-z]{2}(?:-[a-z]{2})?$")
+#: Second-level labels that belong to a public suffix. Stripping the label in
+#: front of `co.uk` would leave the suffix itself, which is not a site.
+_PUBLIC_SLDS = frozenset({"co", "com", "org", "net", "gov", "ac", "edu", "ne", "or"})
+
+
+def _site_host(host: str) -> str:
+    """`de.railmarket.com` -> `railmarket.com`; `www.x` -> `x`.
+
+    Localised subdomains serve the same page under a different host. A live run
+    put **11 of its 12 new pages** on one company profile in 11 languages
+    (`de.`, `es.`, `cs.`, `it.`, `fr.`, `hu.`, `ru.`, `pl.`, `tr.`, `uk.`), each
+    counting as its own host and its own slot. The page was byte-identical in
+    everything but language, and the budget is the binding constraint.
+    """
+    host = (host or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    parts = host.split(".")
+    if len(parts) >= 3 and _LOCALE_LABEL.match(parts[0]):
+        rest = parts[1:]
+        if not (len(rest) == 2 and rest[0] in _PUBLIC_SLDS):
+            return ".".join(rest)
+    return host
+
+
+def _host_is_locale(host: str) -> bool:
+    host = (host or "").lower()
+    plain = host[4:] if host.startswith("www.") else host
+    return bool(host) and _site_host(host) != plain
+
+
+def _site_key(url: str) -> tuple[str, str]:
+    """Identity of one document across localised hosts: (site host, path+query)."""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return "", ""
+    path = (p.path or "/").rstrip("/") or "/"
+    return (_site_host(p.hostname or ""), f"{path}?{p.query}" if p.query else path)
+
+
+def _collapse_site_variants(links: list[str]) -> list[str]:
+    """Keep one URL per (site, path), preferring the canonical host.
+
+    Applied to a page's ranked children. Two locale hosts linking the same
+    profile are one resource; spending two slots on it is the bug `_site_host`
+    exists to prevent.
+    """
+    out: list[str] = []
+    pos: dict[tuple[str, str], int] = {}
+    for link in links:
+        site = _site_key(link)
+        if site not in pos:
+            pos[site] = len(out)
+            out.append(link)
+            continue
+        current = out[pos[site]]
+        if (_host_is_locale(urlparse(current).hostname or "")
+                and not _host_is_locale(urlparse(link).hostname or "")):
+            out[pos[site]] = link
+    return out
+
+
 def _domain(url: str) -> str:
     """Registrable-ish host for per-domain caps and round-robin.
 
@@ -90,9 +155,11 @@ def _domain(url: str) -> str:
     different site: one run spent fifteen candidate slots on `csr.gov.in` as
     `http://`, `https://`, `www.`, trailing-slash and query-string variants,
     each counting as its own domain against the per-domain cap.
+
+    Language subdomains collapse too, for the same reason and with live
+    evidence: see `_site_host`.
     """
-    host = (urlparse(url).hostname or "").lower()
-    return host[4:] if host.startswith("www.") else host
+    return _site_host(urlparse(url).hostname or "")
 
 
 def canonical_url(url: str) -> str:
@@ -172,6 +239,29 @@ careers jobs employment blog news tag tags category categories search
 cart checkout account my-account help faq support subscribe newsletter press
 media events sitemap feed rss share print wishlist returns shipping
 """.split())
+
+#: Path segments that are furniture on a listing but hold per-entity facts on a
+#: detail page. `_NAV_SEGMENTS` penalises these unconditionally, which is right
+#: for a directory index and wrong for a plan that asks for a property: a
+#: company's `/about`, `/leadership` or `/contact` page is exactly where its CEO,
+#: website and headcount live. Measured on a live run, every queued child that
+#: could have carried those fields was competing for a budget it never got.
+_ENTITY_DETAIL_SEGMENTS = frozenset({
+    "about", "about-us", "team", "leadership", "management", "officers",
+    "directors", "people", "who-we-are", "contact", "contact-us", "company",
+})
+
+
+def _has_enrichment_fields(plan: dict | None) -> bool:
+    """Does the plan ask for anything beyond a record's identity?"""
+    plan = plan or {}
+    identity = {str(k) for k in (plan.get("dedupe_keys") or []) if k}
+    for f in (plan.get("fields") or []):
+        name = str((f or {}).get("name") or "")
+        if name and name not in identity:
+            return True
+    return False
+
 
 #: Query keys that are navigation state rather than a distinct resource. Two
 #: pages that differ only by `?sort=name` or `?filter=active` are one resource
@@ -324,7 +414,15 @@ def score_link(link: str, anchor: str = "", plan: dict | None = None,
     # --- negatives: things that are page furniture, not records ---------------
     if not segs:
         score -= 2.0
-    if any(s in _NAV_SEGMENTS for s in segs[:2]):
+    nav = any(s in _NAV_SEGMENTS for s in segs[:2])
+    # A property-bearing plan is the one case where an "about" or "contact" page
+    # is not furniture: it is the entity page that carries the requested field.
+    # Every other furniture segment keeps the penalty, and an identity-only plan
+    # keeps it too -- a list of names has no use for a contact page.
+    detail_for_enrichment = (
+        _has_enrichment_fields(plan)
+        and any(s in _ENTITY_DETAIL_SEGMENTS for s in segs[:2]))
+    if nav and not detail_for_enrichment:
         score -= 5.0
     # parse_qsl yields (key, value) PAIRS. Reading them as bare keys raised
     # AttributeError, and the broad except below turned that into "no query
@@ -867,10 +965,28 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     depth_reached = 0
     # Seeds are canonicalised on entry so a seeded fragment variant cannot
     # spend a slot the base URL already occupies.
-    _seed_queue: list[tuple[dict, int]] = [
-        ({**u, "url": canonical_url(u.get("url", ""))}, 0)
-        for u in urls if canonical_url(u.get("url", ""))
-    ]
+    # One seed per document. Localised hosts (`de.`, `pt-br.`, ...) of the same
+    # path are the same page, so the first one is kept and the canonical host is
+    # preferred when both are offered. Without this, discovery's localised
+    # search hits can fill the seed reserve with one company in ten languages.
+    _seed_queue: list[tuple[dict, int]] = []
+    _seed_sites: dict[tuple[str, str], int] = {}
+    seeds_collapsed = 0
+    for u in urls:
+        canon = canonical_url(u.get("url", ""))
+        if not canon:
+            continue
+        site = _site_key(canon)
+        pos = _seed_sites.get(site)
+        if pos is None:
+            _seed_sites[site] = len(_seed_queue)
+            _seed_queue.append(({**u, "url": canon}, 0))
+            continue
+        seeds_collapsed += 1
+        held = _seed_queue[pos][0]
+        if (_host_is_locale(urlparse(held["url"]).hostname or "")
+                and not _host_is_locale(urlparse(canon).hostname or "")):
+            held["url"] = canon
     queue: list[tuple[dict, int]] = _seed_queue[:seed_cap]
     seeds_queued = len(queue)
     seeds_dropped = max(0, len(_seed_queue) - len(queue))
@@ -1138,9 +1254,10 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
         # 2 < 2 and stopped. The setting now means what it says - that many
         # levels below the seeds.
         if depth < max_depth:
-            for link in _rank_children(
-                    _child_links_with_text(page), plan, terms, seen, depth,
-                    budget, per_parent_cap):
+            ranked = _rank_children(
+                _child_links_with_text(page), plan, terms, seen, depth,
+                budget, per_parent_cap)
+            for link in _collapse_site_variants(ranked):
                 queue.append(({"url": link, "title": "",
                                "parent_url": url}, depth + 1))
                 if len(queue) >= budget + 100:
@@ -1151,9 +1268,14 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
 
     settled: dict[str, int] = {}
     in_flight = 0
+    # Site variants discovered from *different* parents still meet here. Two
+    # listing pages each linking a different locale of one profile would
+    # otherwise pass the per-page collapse and spend two slots on it.
+    seen_sites: set[tuple[str, str]] = set()
+    site_variants_collapsed = 0
 
     async def _worker() -> None:
-        nonlocal in_flight, fail, blocked_by_budget
+        nonlocal in_flight, fail, blocked_by_budget, site_variants_collapsed
         while True:
             # Sync pick section (no awaits): claim is race-free on one loop.
             # Duplicates are skipped WITHOUT counting; budget counts every
@@ -1166,10 +1288,14 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
                 # claim on the raw URL would let a fragment variant through
                 # both checks and spend a slot on the same document.
                 key = canonical_url(item["url"])
-                if key and key not in seen:
+                site = _site_key(key) if key else ("", "")
+                if key and key not in seen and site not in seen_sites:
                     seen.add(key)
+                    seen_sites.add(site)
                     in_flight += 1
                     pick = (item, depth)
+                elif key and key not in seen:
+                    site_variants_collapsed += 1
             if pick is None:
                 # The queue still holds children but the budget is spent. This
                 # is the truncation the seed reserve exists to prevent, so it is
@@ -1233,6 +1359,8 @@ async def fetch_all(urls: list[dict], fetch_fn: Any, emit: Any, persist_source: 
     counts["traversal"] = {
         "seeds_queued": seeds_queued,
         "seeds_dropped": seeds_dropped,
+        "seeds_collapsed": seeds_collapsed,
+        "site_variants_collapsed": site_variants_collapsed,
         "traversed_pages": traversed_pages,
         "blocked_by_domain_cap": blocked_by_domain_cap,
         "blocked_by_budget": blocked_by_budget,
