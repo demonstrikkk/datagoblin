@@ -114,6 +114,39 @@ because it runs ahead of the fetch-time guard on raw search results.
 column needs a default. If you write a column, something must read it — a column
 nobody reads is the same anti-pattern as a dead function.
 
+## Domain editions
+
+A vertical (legal, finance, ...) lives in `editions/<name>/edition.json` and is
+read by the core as data. `editions/README.md` is the contract.
+
+The rule is one-directional:
+
+```
+core  --->  app.domain  <---  editions/*
+```
+
+Core may import `app.domain`; `app.domain` never imports an edition (it reads a
+manifest or an entry point); an edition that ships Python may import only
+`app.domain.api`. `test_edition_isolation.py` parses both trees and fails on a
+violation, in the same spirit as `test_name_binding.py`.
+
+- `api_version` is checked before anything else. A manifest for another major is
+  refused with a named reason and does not load; the core keeps working.
+- A broken edition is reported by `app.domain.api.list_editions()` as
+  `status: "error"`; it must never stop the API from starting.
+- The merge is additive and idempotent (`app.domain.apply`): it runs before the
+  planner's caps and probes, never overwrites a user/planner value, and stamps
+  `edition` / `edition_version` on the plan.
+- `WorkflowPlan` declares `edition` and `edition_version` because pydantic drops
+  keys it does not know. A stamp on the dict that is not on the model is gone by
+  the next round trip.
+
+Gate: the core suite must pass with no edition installed. Then, per edition:
+
+```bash
+$env:EDITIONS_PATH="editions"; backend\.venv\Scripts\python.exe -m pytest editions\<name>\tests -q
+```
+
 ## Before you claim something works
 
 Say what you ran and what it printed. "The tests pass" is a claim about a

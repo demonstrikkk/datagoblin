@@ -92,9 +92,13 @@ def entity_terms(plan: dict) -> list[str]:
 
     An entity that yields nothing usable (blank, or only stopwords) returns
     empty, and the gate falls back to the subject-floor rather than refusing
-    every page.
+    every page. A domain edition adds its own subject words through
+    `relevance_terms`, because a court page says "judgment" where the plan's
+    entity says "court_decision".
     """
-    return _terms_from([str(plan.get("entity") or "")])
+    terms = [str(plan.get("entity") or "")]
+    terms.extend(str(t) for t in (plan.get("relevance_terms") or []) if str(t).strip())
+    return _terms_from(terms)
 
 
 

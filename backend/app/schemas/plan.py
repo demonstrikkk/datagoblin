@@ -73,6 +73,13 @@ class WorkflowPlan(BaseModel):
     dedupe_keys: list[str] = []
     allowed_sources: list[str] = []
     max_pages: int = 12
+    #: The domain edition that contributed vocabulary and source policy, and the
+    #: version it declared. Declared on the model because pydantic drops keys it
+    #: does not know: an edition stamped on the dict but not on the model would
+    #: vanish on the first `WorkflowPlan(**plan).model_dump()` round trip, and a
+    #: run would lose the record of what shaped it.
+    edition: str = ""
+    edition_version: str = ""
 
 
 class SourceRef(BaseModel):

@@ -160,8 +160,8 @@ def test_an_attempt_that_wrote_nothing_is_still_recorded(tmp_path, monkeypatch):
             "state": "open", "phase": 0, "attempts": 0})
 
         async def _fake_run(store, dataset_id, field, *, phase, llm, search_fn,
-                            fetch_fn, persist_page=None, search_budget=12,
-                            apply=False):
+                                fetch_fn, persist_page=None, search_budget=12,
+                                apply=False, phrases=None):
             gap = store.get_gap(dataset_id, field)
             after = gaps_svc.record_attempt(
                 gap, phase=phase, stats={"cells_written": 0},

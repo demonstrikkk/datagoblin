@@ -135,7 +135,8 @@ async def fill_open_gaps(*, store: Any, dataset_id: str, plan: dict, llm: Any,
                     store, dataset_id, field, phase=phase, llm=llm,
                     search_fn=search_fn, fetch_fn=fetch_fn,
                     persist_page=persist_page,
-                    search_budget=max(1, remaining), apply=True)
+                    search_budget=max(1, remaining), apply=True,
+                    phrases=plan.get("field_phrases") or None)
             except gapfill_svc.GapFillRefused as exc:
                 entry["refused"] = str(exc)[:200]
                 break

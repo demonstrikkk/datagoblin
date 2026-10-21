@@ -98,7 +98,8 @@ def _needles(value: Any) -> list[str]:
     return [t[:120]]
 
 
-def build_queries(field: str, record: dict, keys: list[str]) -> list[str]:
+def build_queries(field: str, record: dict, keys: list[str],
+                  phrases: dict | None = None) -> list[str]:
     """The queries to try for one record's missing field, best first.
 
     Named-entity queries come first and the bare field query is not used at all
@@ -110,8 +111,9 @@ def build_queries(field: str, record: dict, keys: list[str]) -> list[str]:
     plain = _plain(record.get("fields", {}))
     # The schema's name is not the search phrase: `chief_executive` is an
     # identifier. Searching it literally found nothing for eight entities in a
-    # live pass, while the pages use "chief executive" / "CEO".
-    label = planner_svc.field_phrase(field)
+    # live pass, while the pages use "chief executive" / "CEO". An edition can
+    # supply its own phrase for a field the core has never heard of.
+    label = planner_svc.field_phrase(field, phrases)
     out: list[str] = []
     for key in keys:
         for frag in _needles(plain.get(key)):
@@ -122,7 +124,7 @@ def build_queries(field: str, record: dict, keys: list[str]) -> list[str]:
 
 
 def entity_queries(field: str, records: list[dict], keys: list[str],
-                   budget: int) -> list[tuple[str, str]]:
+                   budget: int, phrases: dict | None = None) -> list[tuple[str, str]]:
     """(record_id, query) pairs, capped at `budget` searches in total.
 
     Ordered by how much of the record is actually identifiable, so a pass spends
@@ -135,7 +137,7 @@ def entity_queries(field: str, records: list[dict], keys: list[str],
         rid = str(rec.get("record_id") or "")
         if not rid:
             continue
-        for q in build_queries(field, rec, keys):
+        for q in build_queries(field, rec, keys, phrases):
             pairs.append((rid, q))
             if len(pairs) >= max(1, budget):
                 return pairs
@@ -224,7 +226,8 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
               search_fn: Callable[..., Any], fetch_fn: Callable[..., Any],
               persist_page: Callable[[dict], Any] | None = None,
               search_budget: int = MAX_SEARCHES_PER_PASS,
-              apply: bool = False) -> dict:
+              apply: bool = False,
+              phrases: dict | None = None) -> dict:
     """Attempt `phase` on one gap and report exactly what it cost and did.
 
     `apply=False` performs the real search, the real fetch and the real
@@ -332,7 +335,7 @@ async def run(store, dataset_id: str, field: str, *, phase: int, llm: Any,
         }, {"pages_read": 0, "cells_written": 0, "searches_run": 0,
             "pages_fetched": 0}, None)
 
-    pairs = entity_queries(field, targets, keys, search_budget)
+    pairs = entity_queries(field, targets, keys, search_budget, phrases)
     if not pairs:
         raise GapFillRefused(
             "none of the records missing this field carry an identifying value, "

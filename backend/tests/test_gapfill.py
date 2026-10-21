@@ -42,6 +42,13 @@ def test_the_query_uses_the_words_a_page_would_use():
         ['"Acme Corp" headquarters city']
 
 
+def test_an_edition_phrase_overrides_the_core_vocabulary():
+    rec = {"record_id": "r1", "fields": {"case_name": "Acme v. Beta"}}
+    assert F.build_queries("citation", rec, ["case_name"],
+                           {"citation": "case citation"}) == \
+        ['"Acme v. Beta" case citation']
+
+
 def test_an_unmapped_field_keeps_its_identifier_instead_of_dropping_it():
     rec = {"record_id": "r1", "fields": {"company_name": "Acme Corp"}}
     assert F.build_queries("pe_ratio", rec, ["company_name"]) == \

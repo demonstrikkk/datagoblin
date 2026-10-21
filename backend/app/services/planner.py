@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from app.core.config import settings
 from app.core.errors import validation
+from app.domain.api import apply_profile, require
 from app.schemas.plan import WorkflowPlan
 
 _ENTITY_HINTS = [  # tie-break order: specific entities before generic company
@@ -93,7 +94,8 @@ def _fallback_plan(prompt: str) -> dict:
             "dedupe_keys": ["company_name"], "allowed_sources": [], "max_pages": 12}
 
 
-async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
+async def _instructor_plan(prompt: str,
+                           profile=None) -> tuple[dict, str] | None:
     """Instructor from_provider + response_model + max_retries (verified API).
     None when unavailable (no package/key) or when validation keeps failing."""
     if not settings.GEMINI_API_KEY:
@@ -104,12 +106,17 @@ async def _instructor_plan(prompt: str) -> tuple[dict, str] | None:
         from instructor import from_provider
         client = from_provider(f"google/{settings.GEMINI_PLAN_MODEL}", async_client=True,
                                api_key=settings.GEMINI_API_KEY)
+        guidance = (f"\nDomain rules for this edition: {profile.planner_guidance}"
+                    if profile is not None and profile.planner_guidance else "")
         plan = await asyncio.wait_for(client.create(
             messages=[{"role": "user",
                        "content": "Convert to a WorkflowPlan. "
-                                  f"Business data request: {prompt[:2000]}"}],
+                                  f"Business data request: {prompt[:2000]}{guidance}"}],
             response_model=WorkflowPlan, max_retries=1), timeout=120)
-        return _finalize(plan.model_dump(), prompt), "instructor:gemini"
+        data = plan.model_dump()
+        if profile is not None:
+            data = apply_profile(data, profile)
+        return _finalize(data, prompt), "instructor:gemini"
     except Exception:
         return None
 
@@ -299,15 +306,21 @@ def _probe_hint(name: str) -> tuple[frozenset[str], str]:
     return frozenset(), ""
 
 
-def field_phrase(name: str) -> str:
+def field_phrase(name: str, phrases: dict | None = None) -> str:
     """The words a page uses for a field, for a search query.
 
     `chief_executive` is an identifier; nobody writes it. The automatic gap-fill
     pass searched the literal identifier for eight entities and fetched nothing
-    ("chief_executive" matches almost no page). Falls back to the identifier for
-    a field the vocabulary does not know, which is still better than dropping it.
+    ("chief_executive" matches almost no page). A domain edition supplies the
+    phrases the core vocabulary cannot know; the core's own table is the
+    fallback, and the identifier is the last resort -- still better than
+    dropping the field.
     """
-    return _probe_hint(str(name or ""))[1] or str(name or "")
+    key = str(name or "")
+    supplied = (phrases or {}).get(key)
+    if isinstance(supplied, str) and supplied.strip():
+        return supplied.strip()
+    return _probe_hint(key)[1] or key
 
 
 def _field_probe_queries(plan: dict) -> list[str]:
@@ -336,7 +349,8 @@ def _field_probe_queries(plan: dict) -> list[str]:
         name = str((f or {}).get("name") or "")
         if not name or name in identity:
             continue
-        hints, phrase = _probe_hint(name)
+        hints, builtin = _probe_hint(name)
+        phrase = (plan.get("field_phrases") or {}).get(name) or builtin
         if not phrase:
             continue
         if _plural_fold(hints | _name_tokens(name)) & asked_words:
@@ -440,14 +454,22 @@ def _finalize(plan: dict, prompt: str) -> dict:
     an allowlist only for requested domains, a passable required set, a bounded
     field count. Applied to the LLM rungs and the rule-based rung alike.
     """
-    plan["allowed_sources"] = _requested_allowed_sources(
+    requested = _requested_allowed_sources(
         prompt, plan.get("allowed_sources") or [])
+    # An edition's allowlist is curated, not invented by the planner, so the
+    # prompt filter above must not be the thing that deletes it. Both are kept:
+    # the domains the user named, then the edition's.
+    edition_sources = [str(s).strip() for s in
+                       (plan.get("edition_allowed_sources") or [])
+                       if str(s).strip()]
+    plan["allowed_sources"] = list(dict.fromkeys(requested + edition_sources))
     plan = _cap_total_fields(_cap_required(plan))
     plan = _entity_traversal(plan)
     return _merge_field_probes(plan)
 
 
-async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
+async def compile_plan(prompt: str, llm: object = None,
+                       edition: str = "") -> tuple[dict, str]:
     """Returns (plan_dict, provider). Raises E_VALIDATION on empty prompt.
 
     Rung order is: the injected `llm`, then the hardwired Gemini instructor, then
@@ -460,9 +482,25 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
     whole purpose: a free local reader must not be able to quietly fall through
     to a billed cloud model, so under strict mode the only model rung is the
     injected `llm`.
+
+    `edition` names a domain profile to merge into whichever plan a rung
+    produces. The merge happens before `_finalize`, so the edition's fields are
+    subject to the same caps, probes and traversal sizing as the model's own.
+    An unknown or unusable edition fails here with a 422 rather than producing a
+    plan that silently lacks what the caller asked for.
     """
     if not (prompt or "").strip():
         raise validation("Prompt must not be empty")
+
+    profile = require(edition) if str(edition or "").strip() else None
+
+    def _finish(plan: dict, provider: str) -> tuple[dict, str]:
+        if profile is not None:
+            plan = apply_profile(plan, profile)
+        return _finalize(plan, prompt), provider
+
+    guidance = (f"\nDomain rules for this edition: {profile.planner_guidance}"
+                if profile is not None and profile.planner_guidance else "")
 
     # Rung 1: the injected provider.
     if llm is not None:
@@ -481,28 +519,28 @@ async def compile_plan(prompt: str, llm: object = None) -> tuple[dict, str]:
                 "IMPORTANT: set required=true ONLY for the fields that identify "
                 "the record (typically the name/company/title). Set required=false "
                 "for enrichment fields like website, revenue, dates, counts, which "
-                "are frequently absent from a page. Never mark every field required.",
+                "are frequently absent from a page. Never mark every field required."
+                f"{guidance}",
                 WorkflowPlan.model_json_schema())
             data = out.get("data", out) if isinstance(out, dict) else {}
-            plan = WorkflowPlan(**data).model_dump()
-            return (_finalize(plan, prompt),
-                (out.get("provider", "llm")
-                 if isinstance(out, dict) else "llm"))
+            return _finish(WorkflowPlan(**data).model_dump(),
+                           (out.get("provider", "llm")
+                            if isinstance(out, dict) else "llm"))
         except Exception:
             pass  # fall through to the next rung (honest, marked)
 
     # Rung 2: the hardwired Gemini instructor. Skipped entirely under strict mode.
     if not settings.OPENCODE_STRICT:
-        hit = await _instructor_plan(prompt)
+        hit = await _instructor_plan(prompt, profile)
         if hit is not None:
             return hit
 
     # Rung 3: rule-based, always available, no model involved.
     try:
-        return (_finalize(
-            WorkflowPlan(**_rule_plan(prompt)).model_dump(), prompt), "rule-based")
+        return _finish(WorkflowPlan(**_rule_plan(prompt)).model_dump(),
+                       "rule-based")
     except Exception:
-        return _fallback_plan(prompt), "fallback"
+        return _finish(_fallback_plan(prompt), "fallback")
 
 
 def coerce_plan(data: dict) -> WorkflowPlan:

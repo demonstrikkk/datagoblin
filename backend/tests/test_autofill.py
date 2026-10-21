@@ -80,9 +80,10 @@ def _patch_run(monkeypatch, calls, *, fill_per_phase=None, searches_per_phase=No
     searches_per_phase = searches_per_phase or {}
 
     async def run(store, dataset_id, field, *, phase, llm, search_fn, fetch_fn,
-                  persist_page=None, search_budget=12, apply=False):
+                  persist_page=None, search_budget=12, apply=False,
+                  phrases=None):
         calls.append({"field": field, "phase": phase, "apply": apply,
-                      "search_budget": search_budget})
+                      "search_budget": search_budget, "phrases": phrases})
         if refuse:
             raise gapfill_svc.GapFillRefused("no identity to match against")
         gap = store.get_gap(dataset_id, field)
@@ -204,6 +205,17 @@ def test_a_depth_gap_is_searched_and_the_fill_is_counted(monkeypatch):
     assert out["searches_run"] == 2
     # Every attempt was applied; a dry run would be meaningless here.
     assert all(c["apply"] is True for c in calls)
+
+
+def test_an_edition_phrase_reaches_the_search(monkeypatch):
+    # The pass has the plan in hand; an edition's vocabulary has to reach the
+    # query builder through it, or the edition would only affect the first crawl.
+    calls = []
+    _patch_run(monkeypatch, calls, fill_per_phase={2: 1}, searches_per_phase={2: 1})
+    plan = {**_PLAN, "field_phrases": {"headquarters_city": "head office"}}
+    _fill(_Store(_records()), plan)
+    assert any(c["phrases"] == {"headquarters_city": "head office"}
+               for c in calls)
 
 
 def test_a_schema_gap_is_never_searched(monkeypatch):

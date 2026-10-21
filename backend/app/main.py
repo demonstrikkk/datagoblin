@@ -255,7 +255,8 @@ def _run_view(run_id: str) -> dict:
 async def compile_plan(body: dict, cid: str = Depends(correlation_id)) -> dict:
     async def _llm(prompt: str, schema: dict) -> dict:
         return await llm_provider.structured_generate(prompt, schema)
-    plan, provider = await planner_svc.compile_plan(body.get("prompt", ""), _llm)
+    plan, provider = await planner_svc.compile_plan(
+        body.get("prompt", ""), _llm, edition=str(body.get("edition", "") or ""))
     seeds = []
     for s in (body.get("seed_urls", []) or [])[:12]:
         url = (s.get("url") if isinstance(s, dict) else s) or ""
@@ -1119,6 +1120,15 @@ async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_
     if not row:
         raise not_found("dataset", did)
     run_id = str(row.get("run_id") or "")
+    # The plan carries the edition's vocabulary. Without it the on-demand route
+    # would search the schema identifier while the run's own autofill searched
+    # the words a page uses, for the same field, in the same dataset.
+    plan: dict = {}
+    if run_id:
+        run = await asyncio.to_thread(r.get_run, run_id) or {}
+        workflow_id = str(run.get("workflow_id") or "")
+        if workflow_id:
+            plan = await asyncio.to_thread(r.get_plan, workflow_id) or {}
 
     async def _persist_page(page: dict) -> str:
         """Store the fetched body so its quote can be checked later.
@@ -1135,7 +1145,8 @@ async def fill_dataset_gap(did: str, body: dict, cid: str = Depends(correlation_
         out = await gapfill_svc.run(
             r, did, field, phase=phase, llm=_llm,
             search_fn=search_provider.search, fetch_fn=_fetch_method,
-            persist_page=_persist_page, search_budget=budget, apply=apply_flag)
+            persist_page=_persist_page, search_budget=budget, apply=apply_flag,
+            phrases=plan.get("field_phrases") or None)
     except gapfill_svc.GapFillRefused as exc:
         raise validation(str(exc))
 

@@ -173,6 +173,11 @@ class Settings(BaseSettings):
     # Phase-4 deterministic selectors: directory of checked-in domain schemas.
     # Empty = <backend>/selectors.
     SELECTORS_DIR: str = ""
+    # Domain editions: directory holding `<name>/edition.json` manifests. Empty
+    # = <repo>/editions. Relative values resolve against the repository root,
+    # never the process CWD, so the same .env works from backend/ and from the
+    # repository root.
+    EDITIONS_PATH: str = ""
     # Phase 2 impersonation allowlist: comma-separated host suffixes
     # (e.g. "example.com" also covers "www.example.com"). Empty = disabled:
     # impersonation NEVER fires without an explicit entry. No proxies, no

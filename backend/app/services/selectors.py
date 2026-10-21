@@ -89,10 +89,15 @@ _REGEX_EXTRACTORS: tuple[tuple[frozenset, str, Any], ...] = (
 )
 
 
-def selectors_dir() -> Path:
-    """Directory of checked-in domain schemas (backend/selectors by default)."""
+def selectors_dir(override: str = "") -> Path:
+    """Directory of checked-in domain schemas (backend/selectors by default).
+
+    `override` is the edition's own directory, already made absolute by the
+    registry. It is consulted first so a vertical's schemas travel with the
+    vertical and never overwrite the core's.
+    """
     from app.core.config import settings
-    configured = (settings.SELECTORS_DIR or "").strip()
+    configured = (override or "").strip() or (settings.SELECTORS_DIR or "").strip()
     if configured:
         path = Path(configured)
         if not path.is_absolute():
@@ -108,12 +113,15 @@ def domain_of(url: str) -> str:
         return ""
 
 
-def _schema_path(domain: str) -> Path:
+def _schema_path(domain: str, directory: str = "") -> Path:
     safe = re.sub(r"[^a-z0-9.-]", "_", (domain or "").lower())[:100]
-    return selectors_dir() / f"{safe}.json"
+    # Call the zero-argument form when no override is given: existing callers
+    # (and tests) replace `selectors_dir` with a function that takes nothing.
+    base = selectors_dir(directory) if directory else selectors_dir()
+    return base / f"{safe}.json"
 
 
-def load_schema(domain: str) -> dict | None:
+def load_schema(domain: str, directory: str = "") -> dict | None:
     """Load and shape-validate a domain schema. None when absent/invalid.
 
     Shape: {"domain": str, "fields": {name: {"selectors": [css, ...],
@@ -122,7 +130,7 @@ def load_schema(domain: str) -> dict | None:
     if not domain:
         return None
     try:
-        data = json.loads(_schema_path(domain).read_text(encoding="utf-8"))
+        data = json.loads(_schema_path(domain, directory).read_text(encoding="utf-8"))
     except Exception:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("fields"), dict):
@@ -308,7 +316,7 @@ def deterministic_extract(plan: dict, page: dict) -> tuple[list[dict], str, dict
     if not fields_spec:
         return [], "none", {}
     url = page.get("url", "")
-    schema = load_schema(domain_of(url))
+    schema = load_schema(domain_of(url), str(plan.get("selectors_dir") or ""))
     schema_fields = (schema or {}).get("fields", {}) if schema else {}
     item_selector = (schema or {}).get("item", "") if schema else {}
     clean = page.get("markdown") or ""
